@@ -170,6 +170,8 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
 
     // The server's reasoning parser gives us `reasoning_content` directly; on
     // the raw path we split it ourselves. Either way it goes into history.
+    // The server's reasoning parser gives us `reasoning_content` directly; on
+    // the raw path we split it ourselves. Either way it goes into history.
     const split =
       response.reasoningContent !== undefined
         ? { reasoning: response.reasoningContent, content: response.content }
@@ -189,7 +191,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
       tokensPerSecond: response.ms > 0 ? (outTokens / response.ms) * 1000 : 0,
     });
 
-    const parsed = getChannel(channel).parse(split.content, ctx);
+    const parsed = getChannel(channel).parse(split.content, ctx, response.toolCalls);
     if (parsed.analysis || parsed.plan) {
       emit({ type: "plan", analysis: parsed.analysis, plan: parsed.plan });
     }

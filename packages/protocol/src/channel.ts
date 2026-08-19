@@ -22,7 +22,7 @@
  */
 
 import { parseToolCalls, type RepairContext } from "./toolcall.js";
-import { unwrapTool, type Tool } from "./types.js";
+import { toolCallParts, unwrapTool, type Tool, type ToolCall } from "./types.js";
 
 export type ChannelId = "toolcall" | "object" | "raw";
 
@@ -51,7 +51,34 @@ export interface Channel {
    * map — otherwise the prefix differs every session.
    */
   promptFragment(tools: Tool[]): string;
-  parse(text: string, ctx: RepairContext): ChannelParse;
+  /**
+   * `structured` carries tool calls the server already extracted. When a server
+   * runs a tool-call parser it lifts the calls out of the body, so the text
+   * alone is not the whole turn — and treating it as such reports a failure
+   * that never happened.
+   */
+  parse(text: string, ctx: RepairContext, structured?: ToolCall[]): ChannelParse;
+}
+
+/** Turn a server-extracted tool call into an action. */
+function actionFromToolCall(tc: ToolCall): Action {
+  const { name, args } = toolCallParts(tc);
+  let decoded: Record<string, unknown> = {};
+  if (typeof args === "string") {
+    try {
+      const v = JSON.parse(args) as unknown;
+      if (v && typeof v === "object" && !Array.isArray(v)) decoded = v as Record<string, unknown>;
+    } catch {
+      // A server that extracted the call but left unparseable arguments is
+      // still telling us which tool was meant; surface it as an empty-argument
+      // call rather than discarding the turn.
+    }
+  } else if (args && typeof args === "object") {
+    decoded = args as Record<string, unknown>;
+  }
+  return name === "done"
+    ? { kind: "done", summary: String(decoded["summary"] ?? "") }
+    : { kind: "tool", name, arguments: decoded, repaired: false };
 }
 
 /**
@@ -80,7 +107,18 @@ class ToolCallChannel implements Channel {
     ].join("\n");
   }
 
-  parse(text: string, ctx: RepairContext): ChannelParse {
+  parse(text: string, ctx: RepairContext, structured?: ToolCall[]): ChannelParse {
+    // Server-extracted calls win. They have already been through the server's
+    // repair ladder, which sees the raw token stream; ours only sees what is
+    // left in the body afterwards.
+    if (structured && structured.length > 0) {
+      return {
+        actions: structured.map(actionFromToolCall),
+        content: text.trim(),
+        unrecoverable: [],
+        truncated: false,
+      };
+    }
     const r = parseToolCalls(text, ctx);
     const actions: Action[] = r.calls.map((c) =>
       c.name === "done"
@@ -132,8 +170,13 @@ class ObjectChannel implements Channel {
     ].join("\n");
   }
 
-  parse(text: string, ctx: RepairContext): ChannelParse {
+  parse(text: string, ctx: RepairContext, structured?: ToolCall[]): ChannelParse {
     void ctx;
+    // A model may answer with native tool calls even when asked for an object;
+    // honour them rather than calling the turn empty.
+    if (structured && structured.length > 0) {
+      return { actions: structured.map(actionFromToolCall), content: text.trim(), unrecoverable: [], truncated: false };
+    }
     const obj = extractJsonObject(text);
     if (!obj) {
       return { actions: [], content: text.trim(), unrecoverable: [text.trim()], truncated: false };
@@ -212,8 +255,11 @@ class RawChannel implements Channel {
     ].join("\n");
   }
 
-  parse(text: string, ctx: RepairContext): ChannelParse {
+  parse(text: string, ctx: RepairContext, structured?: ToolCall[]): ChannelParse {
     void ctx;
+    if (structured && structured.length > 0) {
+      return { actions: structured.map(actionFromToolCall), content: text.trim(), unrecoverable: [], truncated: false };
+    }
     const actions: Action[] = [];
     const analysis = tagText(text, "analysis");
     const plan = tagText(text, "plan");

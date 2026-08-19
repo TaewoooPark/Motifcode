@@ -252,3 +252,94 @@ describe("output clamping", () => {
     expect(clampOutput("short", 1000)).toBe("short");
   });
 });
+
+describe("server-extracted tool calls", () => {
+  it("uses tool_calls the server lifted out of the body", async () => {
+    // A server running a tool-call parser — which is what
+    // `--tool-call-parser motif` makes vLLM do — returns the calls
+    // structured and leaves only prose in `content`. Reading `content` alone
+    // means every turn looks empty, so the harness would report a failure that
+    // never happened, on its own target. The mock in the first end-to-end run
+    // happened to imitate a server *without* the parser, which is why this got
+    // as far as it did.
+    const { events, emit } = collect();
+    const structured = (name: string, args: Record<string, unknown>) => ({
+      content: "",
+      rawText: "",
+      ms: 1,
+      toolCalls: [{ id: "s1", type: "function" as const, function: { name, arguments: JSON.stringify(args) } }],
+    });
+    const transport = new ScriptedTransport([
+      structured("bash", { command: "ls" }),
+      structured("done", { summary: "listed" }),
+      structured("done", { summary: "listed", confirm: true }),
+    ]);
+    const r = await runLoop({ ...base, transport, executor: okExecutor, emit });
+    expect(r.reason).toBe("done");
+    const started = kinds(events, "tool_start") as Extract<LoopEvent, { type: "tool_start" }>[];
+    expect(started).toHaveLength(1);
+    expect(started[0]!.call.arguments).toEqual({ command: "ls" });
+  });
+
+  it("accepts arguments as an object as well as a string", async () => {
+    const { events, emit } = collect();
+    const transport = new ScriptedTransport([
+      {
+        content: "",
+        rawText: "",
+        ms: 1,
+        toolCalls: [{ type: "function" as const, function: { name: "bash", arguments: { command: "pwd" } } }],
+      },
+      doneBody("ok"),
+      doneBody("ok", { confirm: true }),
+    ]);
+    await runLoop({ ...base, transport, executor: okExecutor, emit });
+    const started = kinds(events, "tool_start") as Extract<LoopEvent, { type: "tool_start" }>[];
+    expect(started[0]!.call.arguments).toEqual({ command: "pwd" });
+  });
+
+  it("sends tool call arguments back as a JSON string", async () => {
+    // The wire format says `arguments` is a string, and servers enforce it —
+    // sending an object fails the request on the turn *after* the first tool
+    // call, which is late enough to look like a model problem rather than ours.
+    const seen: unknown[] = [];
+    const fetchImpl = (async (_url: string, init: { body: string }) => {
+      seen.push(JSON.parse(init.body));
+      return new Response(
+        JSON.stringify({ choices: [{ message: { content: "" }, finish_reason: "stop" }] }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+
+    const { HttpTransport } = await import("../src/transport.js");
+    const t = new HttpTransport({ endpoint: "http://x", model: "Motif-3", fetchImpl });
+    await t.complete({
+      messages: [
+        { role: "user", content: "q" },
+        {
+          role: "assistant",
+          content: "",
+          tool_calls: [{ id: "c1", type: "function", function: { name: "bash", arguments: { command: "ls" } } }],
+        },
+      ],
+      tools: [],
+    });
+    const body = seen[0] as { messages: { tool_calls?: { function: { arguments: unknown } }[] }[] };
+    const args = body.messages[1]!.tool_calls![0]!.function.arguments;
+    expect(typeof args).toBe("string");
+    expect(JSON.parse(args as string)).toEqual({ command: "ls" });
+  });
+
+  it("puts the server's error text in the thrown message", async () => {
+    // "400 Bad Request" on its own tells nobody anything; the server almost
+    // always names the field it rejected.
+    const fetchImpl = (async () =>
+      new Response('{"error":{"message":"cannot unmarshal object into field arguments"}}', {
+        status: 400,
+        statusText: "Bad Request",
+      })) as unknown as typeof fetch;
+    const { HttpTransport } = await import("../src/transport.js");
+    const t = new HttpTransport({ endpoint: "http://x", model: "m", fetchImpl });
+    await expect(t.complete({ messages: [], tools: [] })).rejects.toThrow(/cannot unmarshal/);
+  });
+});
