@@ -8,3 +8,4 @@ export * from "./channel.js";
 export * from "./validate.js";
 export * from "./wire.js";
 export * from "./codec.js";
+export * from "./hash.js";

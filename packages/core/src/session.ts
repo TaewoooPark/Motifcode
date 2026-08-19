@@ -137,6 +137,19 @@ export class Session {
   }
 
   /**
+   * Replace the transcript wholesale, for a resume.
+   *
+   * The system turn comes from the caller rather than the checkpoint, so a
+   * changed prompt is caught by the compatibility check instead of being
+   * silently reinstated from an old recording.
+   */
+  restoreMessages(messages: readonly Message[]): void {
+    this.messages.length = 0;
+    for (const m of messages) this.messages.push(m);
+    this.lastPrompt = "";
+  }
+
+  /**
    * Begin a new segment: a new system turn and a fresh opening.
    *
    * Used when the action channel changes. The alternative — rewriting the old

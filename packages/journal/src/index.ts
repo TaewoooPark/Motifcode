@@ -1,67 +1,160 @@
 /**
  * The session journal.
  *
- * Append-only JSONL of every event, written as it happens, so a session
- * survives the process that produced it.
+ * Append-only JSONL of everything that happened, written as it happens, so a
+ * session survives the process that produced it. That is not a nice-to-have on
+ * this stack: vLLM on GB10 has open reports of fatal engine errors, so a local
+ * server dying mid-session is expected rather than exceptional, and a two-hour
+ * run vanishing with it is the kind of experience users do not return from.
  *
- * This is not a nice-to-have here. vLLM on GB10 has open reports of fatal
- * engine errors, so a local server dying mid-session is an expected event
- * rather than an edge case — and a two-hour agent run vanishing because the
- * backend fell over is the kind of experience users do not return from. Resume
- * is a precondition for shipping, not a feature.
+ * Three things about v2 are corrections rather than additions.
  *
- * It doubles as the trajectory export. Motif's own software-engineering teacher
- * was trained on successful trajectories filtered by whether the repository's
- * tests passed; the same filter applies to these files. Weights are MIT and the
- * training framework is public, so the loop from "what this harness did" back
- * to "what the model learns" is one that can actually be closed.
+ * **Scopes.** Parent and every subagent wrote into one stream with no
+ * namespace, and `toTrajectory` took the *first* `session_end` it found. A
+ * child finishing first therefore labelled the run — so a root session that
+ * crashed, timed out or lost the server could be exported as a success, on the
+ * strength of a subagent having said `done`. Every record now carries a scope,
+ * and only the root scope's ending describes the run.
+ *
+ * **Crash-safe reads.** Every line was parsed strictly, and one bad line made
+ * the whole file disappear from `listSessions`. Since the bad line is almost
+ * always the half-written last one after a hard kill, the runs most likely to
+ * vanish were the runs that crashed — which is survivorship bias pointed
+ * directly at the number being measured. A truncated tail is now expected and
+ * reported; corruption in the middle is still refused, loudly.
+ *
+ * **`done` is not success.** The model saying it finished is a self-report. It
+ * is not evidence that the tests pass, that the repository is intact, or that
+ * an evaluator agrees. Grades come from a trusted grader outside the loop and
+ * live in their own record, and every export that claims success reads that
+ * record and not the agent's.
  */
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { LoopEvent } from "@motifcode/core";
+import type { LoopCheckpoint, LoopEvent, SessionEndReason } from "@motifcode/core";
+import type { ChannelId, Message } from "@motifcode/protocol";
 
-export interface JournalHeader {
-  version: 1;
-  sessionId: string;
-  startedAt: string;
-  cwd: string;
-  model: string;
-  endpoint: string;
-  /** Frozen tool list and its hash — a resume with a different list is not a resume. */
-  tools: string[];
-  toolsHash: string;
-}
-
-export type JournalRecord =
-  | { t: "header"; header: JournalHeader }
-  | { t: "user"; at: string; text: string }
-  | { t: "event"; at: string; event: LoopEvent };
-
-export interface SessionSummary {
-  path: string;
-  header: JournalHeader;
-  events: number;
-  lastAt?: string;
-  outcome?: string;
-}
+export const JOURNAL_VERSION = 2;
 
 /* ------------------------------------------------------------------ */
+/* contracts                                                          */
+/* ------------------------------------------------------------------ */
+
+export interface JournalHeaderV2 {
+  schemaVersion: 2;
+  runId: string;
+  startedAt: string;
+  harness: { version: string; gitSha?: string };
+  repository: { cwd: string; baseCommit?: string; initialTreeHash?: string };
+  model: { id: string; checkpointSha256?: string; tokenizerSha256?: string };
+  serving: { engine?: string; engineVersion?: string; configHash?: string; endpoint?: string };
+  prompt: { systemHash: string; toolSchemaHash: string };
+  config: {
+    initialChannel: ChannelId;
+    channelPolicy: "fixed" | "adaptive";
+    temperature: number;
+    topP: number;
+    seed?: number;
+    maxTurns: number;
+    maxOutputTokens?: number;
+    maxRepairs: number;
+    wallTimeoutMs?: number;
+  };
+  benchmark?: {
+    manifestId: string;
+    instanceId: string;
+    configId: string;
+    replicate: number;
+  };
+}
+
+/**
+ * How the agent's own run ended.
+ *
+ * Deliberately says nothing about whether the work was any good. `done` means
+ * the model proposed a completion and confirmed it when challenged — a claim,
+ * made by the thing being measured.
+ */
+export interface AgentResult {
+  endReason: SessionEndReason;
+  summary?: string;
+  turns: number;
+}
+
+/**
+ * What a trusted grader found, run outside the agent's environment.
+ *
+ * `not_run` is a real value and must survive: a run whose grader never
+ * executed is not a pass and is not a fail, and quietly dropping it from the
+ * denominator is how a benchmark flatters whichever configuration crashes most.
+ */
+export interface GraderResult {
+  status: "passed" | "failed" | "infra_error" | "not_run";
+  score: number;
+  graderName: string;
+  graderVersion: string;
+  graderImageDigest?: string;
+  startedAt: string;
+  finishedAt: string;
+  exitCode?: number;
+  tests?: { name: string; status: "passed" | "failed" | "error"; durationMs?: number }[];
+  patchSha256?: string;
+  stdoutArtifact?: string;
+  stderrArtifact?: string;
+}
+
+export type ScopeKind = "root" | "subagent";
+
+export type JournalRecordV2 =
+  | { t: "scope_start"; initialMessages: Message[]; task: string }
+  | { t: "event"; event: LoopEvent }
+  | { t: "checkpoint"; state: LoopCheckpoint }
+  | { t: "scope_end"; result: AgentResult }
+  | { t: "grade"; grade: GraderResult }
+  | { t: "resume"; fromSeq: number; previousRunId?: string };
+
+export interface JournalEnvelopeV2 {
+  v: 2;
+  seq: number;
+  at: string;
+  runId: string;
+  scopeId: string;
+  parentScopeId?: string;
+  scopeKind: ScopeKind;
+  agentName?: string;
+  record: JournalRecordV2;
+}
+
+export type JournalLine = { t: "header"; header: JournalHeaderV2 } | JournalEnvelopeV2;
+
+/* ------------------------------------------------------------------ */
+/* writing                                                            */
+/* ------------------------------------------------------------------ */
+
+export interface ScopeIdentity {
+  scopeId: string;
+  scopeKind: ScopeKind;
+  parentScopeId?: string;
+  agentName?: string;
+}
 
 export class Journal {
   private headerWritten = false;
+  private seq = 0;
 
   constructor(
     readonly path: string,
-    private readonly header: JournalHeader,
+    private readonly header: JournalHeaderV2,
   ) {
-    mkdirSync(dirname(path), { recursive: true });
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   }
 
-  private write(rec: JournalRecord): void {
-    // Synchronous by design. An async write that has not flushed when the
-    // process dies is exactly the record you needed.
-    appendFileSync(this.path, JSON.stringify(rec) + "\n", "utf8");
+  private write(line: JournalLine): void {
+    // Synchronous, and one record per write call. An async write that has not
+    // flushed when the process dies is exactly the record you needed, and a
+    // record split across two writes is the corrupt line that loses the file.
+    appendFileSync(this.path, JSON.stringify(line) + "\n", { encoding: "utf8", mode: 0o600 });
   }
 
   private ensureHeader(): void {
@@ -70,53 +163,187 @@ export class Journal {
     this.write({ t: "header", header: this.header });
   }
 
-  user(text: string): void {
+  record(scope: ScopeIdentity, record: JournalRecordV2): number {
     this.ensureHeader();
-    this.write({ t: "user", at: new Date().toISOString(), text });
+    this.seq += 1;
+    this.write({
+      v: 2,
+      seq: this.seq,
+      at: new Date().toISOString(),
+      runId: this.header.runId,
+      scopeId: scope.scopeId,
+      ...(scope.parentScopeId !== undefined ? { parentScopeId: scope.parentScopeId } : {}),
+      scopeKind: scope.scopeKind,
+      ...(scope.agentName !== undefined ? { agentName: scope.agentName } : {}),
+      record,
+    });
+    return this.seq;
   }
 
-  record(event: LoopEvent): void {
-    this.ensureHeader();
-    this.write({ t: "event", at: new Date().toISOString(), event });
+  /** An event sink bound to one scope, ready to hand to the loop. */
+  sinkFor(scope: ScopeIdentity): (event: LoopEvent) => void {
+    return (event) => {
+      this.record(scope, { t: "event", event });
+    };
   }
 
-  /** An event sink that can be handed straight to the loop. */
-  get sink(): (event: LoopEvent) => void {
-    return (e) => this.record(e);
+  checkpointFor(scope: ScopeIdentity): (state: LoopCheckpoint) => void {
+    return (state) => {
+      this.record(scope, { t: "checkpoint", state });
+    };
   }
+}
+
+export function newHeader(opts: {
+  runId: string;
+  cwd: string;
+  model: string;
+  endpoint: string;
+  systemHash: string;
+  toolSchemaHash: string;
+  harnessVersion: string;
+  config: JournalHeaderV2["config"];
+  baseCommit?: string;
+}): JournalHeaderV2 {
+  return {
+    schemaVersion: 2,
+    runId: opts.runId,
+    startedAt: new Date().toISOString(),
+    harness: { version: opts.harnessVersion },
+    repository: { cwd: opts.cwd, ...(opts.baseCommit ? { baseCommit: opts.baseCommit } : {}) },
+    model: { id: opts.model },
+    serving: { endpoint: opts.endpoint },
+    prompt: { systemHash: opts.systemHash, toolSchemaHash: opts.toolSchemaHash },
+    config: opts.config,
+  };
 }
 
 /* ------------------------------------------------------------------ */
+/* reading                                                            */
+/* ------------------------------------------------------------------ */
 
-export function parseJournal(text: string): JournalRecord[] {
-  return text
-    .split("\n")
-    .filter((l) => l.trim() !== "")
-    .map((l) => JSON.parse(l) as JournalRecord);
+export interface ParsedJournal {
+  header?: JournalHeaderV2;
+  records: JournalEnvelopeV2[];
+  /** The file ended mid-record. Expected after a hard kill. */
+  truncatedTail: boolean;
+  /** A line other than the last failed to parse, or sequence numbers broke. */
+  corruptAtSeq?: number;
+  corruption?: string;
+}
+
+/**
+ * Parse a journal, surviving the one failure that is normal.
+ *
+ * A file that ends without a newline and whose final line is invalid JSON is a
+ * process that died mid-write. Everything before it is intact, so it is kept
+ * and the tail is flagged. Anything else — a bad line in the middle, a sequence
+ * number that repeats or goes backwards, a run id that changes — is corruption,
+ * and salvaging it would mean guessing at what is missing.
+ */
+export function parseJournal(text: string): ParsedJournal {
+  const endsCleanly = text.length === 0 || text.endsWith("\n");
+  const lines = text.split("\n");
+  if (lines[lines.length - 1] === "") lines.pop();
+
+  const out: ParsedJournal = { records: [], truncatedTail: false };
+  let lastSeq = 0;
+  let runId: string | undefined;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (line.trim() === "") continue;
+    const isLast = i === lines.length - 1;
+    let parsed: JournalLine;
+    try {
+      parsed = JSON.parse(line) as JournalLine;
+    } catch {
+      if (isLast && !endsCleanly) {
+        out.truncatedTail = true;
+        break;
+      }
+      out.corruptAtSeq = lastSeq;
+      out.corruption = `line ${i + 1} is not valid JSON`;
+      return out;
+    }
+    if ("t" in parsed && parsed.t === "header") {
+      out.header = parsed.header;
+      runId = parsed.header.runId;
+      continue;
+    }
+    const env = parsed as JournalEnvelopeV2;
+    if (env.v !== 2 || typeof env.seq !== "number") {
+      out.corruptAtSeq = lastSeq;
+      out.corruption = `line ${i + 1} is not a v2 envelope`;
+      return out;
+    }
+    if (env.seq !== lastSeq + 1) {
+      out.corruptAtSeq = env.seq;
+      out.corruption = `sequence jumped from ${lastSeq} to ${env.seq}`;
+      return out;
+    }
+    if (runId !== undefined && env.runId !== runId) {
+      out.corruptAtSeq = env.seq;
+      out.corruption = `run id changed from ${runId} to ${env.runId}`;
+      return out;
+    }
+    lastSeq = env.seq;
+    out.records.push(env);
+  }
+  return out;
+}
+
+export type Outcome = SessionEndReason | "interrupted";
+
+export interface SessionSummary {
+  path: string;
+  header: JournalHeaderV2;
+  /** Records in the root scope only. Child work is counted separately. */
+  rootEvents: number;
+  childEvents: number;
+  lastAt?: string;
+  /** From the root scope's ending. A child finishing does not end the run. */
+  outcome: Outcome;
+  truncatedTail: boolean;
+  grade?: GraderResult;
+}
+
+function rootScopeId(records: JournalEnvelopeV2[]): string | undefined {
+  return records.find((r) => r.scopeKind === "root")?.scopeId;
 }
 
 export function summarize(path: string, text: string): SessionSummary | null {
-  const records = parseJournal(text);
-  const head = records.find((r): r is Extract<JournalRecord, { t: "header" }> => r.t === "header");
-  if (!head) return null;
-  const events = records.filter((r): r is Extract<JournalRecord, { t: "event" }> => r.t === "event");
-  const end = [...events].reverse().find((r) => r.event.type === "session_end");
+  const parsed = parseJournal(text);
+  if (!parsed.header) return null;
+  if (parsed.corruption !== undefined) return null;
+
+  const root = rootScopeId(parsed.records);
+  const rootRecords = parsed.records.filter((r) => r.scopeId === root);
+  const end = [...rootRecords].reverse().find((r) => r.record.t === "scope_end");
+  const grade = [...rootRecords].reverse().find((r) => r.record.t === "grade");
+
   return {
     path,
-    header: head.header,
-    events: events.length,
-    lastAt: events[events.length - 1]?.at,
+    header: parsed.header,
+    rootEvents: rootRecords.filter((r) => r.record.t === "event").length,
+    childEvents: parsed.records.filter((r) => r.scopeId !== root && r.record.t === "event").length,
+    lastAt: parsed.records[parsed.records.length - 1]?.at,
+    // No root ending means the process went away without writing one, which on
+    // this stack usually means the model server died rather than that the user
+    // quit. Either way it is not a completion.
     outcome:
-      end && end.event.type === "session_end" ? end.event.reason : events.length > 0 ? "interrupted" : undefined,
+      end && end.record.t === "scope_end" ? end.record.result.endReason : "interrupted",
+    truncatedTail: parsed.truncatedTail,
+    ...(grade && grade.record.t === "grade" ? { grade: grade.record.grade } : {}),
   };
 }
 
 /**
  * Sessions in a directory, newest first.
  *
- * `interrupted` is the outcome that matters: it means the process went away
- * without writing a `session_end`, which on this stack usually means the model
- * server died rather than that the user quit.
+ * Truncated-tail runs are included. Dropping them would remove exactly the runs
+ * that crashed, which is the population a stability comparison exists to
+ * measure.
  */
 export function listSessions(dir: string): SessionSummary[] {
   if (!existsSync(dir)) return [];
@@ -128,114 +355,87 @@ export function listSessions(dir: string): SessionSummary[] {
       const s = summarize(path, readFileSync(path, "utf8"));
       if (s) out.push(s);
     } catch {
-      // A truncated final line is normal after a hard kill; skip rather than
-      // refusing to list anything.
+      // Unreadable file, as opposed to an unparseable one. Nothing to report.
     }
   }
   return out.sort((a, b) => statSync(b.path).mtimeMs - statSync(a.path).mtimeMs);
 }
 
+/* ------------------------------------------------------------------ */
+/* resume                                                             */
+/* ------------------------------------------------------------------ */
+
 export interface ResumeState {
-  header: JournalHeader;
-  /** User turns, in order, for replaying the conversation. */
-  userTurns: string[];
-  events: LoopEvent[];
-  /** True when no `session_end` was written — the likely server-death case. */
+  header: JournalHeaderV2;
+  /** The last checkpoint written in the root scope, if any. */
+  checkpoint?: LoopCheckpoint;
+  task?: string;
+  truncatedTail: boolean;
+  corruption?: string;
+  /** True when no root `scope_end` was written. */
   interrupted: boolean;
+  finished: boolean;
 }
 
 export function loadResume(path: string): ResumeState {
-  const records = parseJournal(readFileSync(path, "utf8"));
-  const header = records.find((r): r is Extract<JournalRecord, { t: "header" }> => r.t === "header")?.header;
-  if (!header) throw new Error(`${path} has no header record`);
-  const events = records
-    .filter((r): r is Extract<JournalRecord, { t: "event" }> => r.t === "event")
-    .map((r) => r.event);
+  const parsed = parseJournal(readFileSync(path, "utf8"));
+  if (!parsed.header) throw new Error(`${path} has no header record`);
+  const root = rootScopeId(parsed.records);
+  const rootRecords = parsed.records.filter((r) => r.scopeId === root);
+  const lastCheckpoint = [...rootRecords].reverse().find((r) => r.record.t === "checkpoint");
+  const start = rootRecords.find((r) => r.record.t === "scope_start");
+  const end = rootRecords.find((r) => r.record.t === "scope_end");
   return {
-    header,
-    userTurns: records
-      .filter((r): r is Extract<JournalRecord, { t: "user" }> => r.t === "user")
-      .map((r) => r.text),
-    events,
-    interrupted: !events.some((e) => e.type === "session_end"),
+    header: parsed.header,
+    ...(lastCheckpoint && lastCheckpoint.record.t === "checkpoint"
+      ? { checkpoint: lastCheckpoint.record.state }
+      : {}),
+    ...(start && start.record.t === "scope_start" ? { task: start.record.task } : {}),
+    truncatedTail: parsed.truncatedTail,
+    ...(parsed.corruption !== undefined ? { corruption: parsed.corruption } : {}),
+    interrupted: end === undefined,
+    finished: end !== undefined,
   };
 }
 
 /**
- * Refuse to resume into a different tool list.
+ * Why this session cannot be picked up where it left off.
  *
- * The frozen, canonically ordered tool array is what keeps the prompt prefix
- * alive; resuming with a changed one would silently discard the cache the
- * original session built and produce a history rendered against different
- * tools. Better to say so than to quietly do the wrong thing.
+ * Fail-closed, and specific. "Cannot resume" with no reason invites the user to
+ * try again with a flag; naming the mismatch tells them what would have to be
+ * true instead.
  */
-export function checkResumable(state: ResumeState, currentToolsHash: string): string | null {
-  if (state.header.toolsHash !== currentToolsHash) {
+export function checkResumable(
+  state: ResumeState,
+  current: { systemHash: string; toolSchemaHash: string; model: string },
+): string | null {
+  if (state.corruption !== undefined) {
+    return `this journal is corrupt (${state.corruption}); it cannot be salvaged`;
+  }
+  if (state.finished) {
+    return "this session already ended; start a new run rather than resuming a finished one";
+  }
+  if (!state.checkpoint) {
+    return "no checkpoint was written before the interruption; there is no state to restore";
+  }
+  if (state.header.prompt.toolSchemaHash !== current.toolSchemaHash) {
     return (
-      `this session was recorded with tool list #${state.header.toolsHash}, ` +
-      `and the current one is #${currentToolsHash}. The prompt prefix would not match.`
+      "the tool schemas changed since this session was recorded. Resuming would render the " +
+      "existing transcript against different tools and lose the prompt prefix"
+    );
+  }
+  if (state.header.prompt.systemHash !== current.systemHash) {
+    return "the system prompt changed since this session was recorded";
+  }
+  if (state.header.model.id !== current.model) {
+    return `recorded against model ${state.header.model.id}, now ${current.model}`;
+  }
+  const inflight = state.checkpoint.inFlightTool;
+  if (inflight?.mutating) {
+    return (
+      `the run stopped while \`${inflight.name}\` (${inflight.id}) was running, and whether it ` +
+      "took effect is unknowable from here. Inspect the working tree, then start a new run"
     );
   }
   return null;
-}
-
-/* ------------------------------------------------------------------ */
-
-export interface Trajectory {
-  sessionId: string;
-  model: string;
-  outcome: string;
-  turns: number;
-  toolCalls: { name: string; arguments: Record<string, unknown>; ok: boolean; repaired: boolean }[];
-  /** Parse failures, which is the number this project exists to drive down. */
-  parseFailures: number;
-}
-
-/**
- * Distil a journal into a training-shaped trajectory.
- *
- * The filter mirrors the recipe in Motif's own technical report: keep only
- * trajectories that actually succeeded. Everything else is a record of how not
- * to do it, which is useful for tuning the harness and misleading as training
- * data.
- */
-export function toTrajectory(state: ResumeState): Trajectory | null {
-  const end = state.events.find(
-    (e): e is Extract<LoopEvent, { type: "session_end" }> => e.type === "session_end",
-  );
-  if (!end || end.reason !== "done") return null;
-
-  const starts = state.events.filter(
-    (e): e is Extract<LoopEvent, { type: "tool_start" }> => e.type === "tool_start",
-  );
-  const ends = new Map(
-    state.events
-      .filter((e): e is Extract<LoopEvent, { type: "tool_end" }> => e.type === "tool_end")
-      .map((e) => [e.id, e.ok]),
-  );
-
-  return {
-    sessionId: state.header.sessionId,
-    model: state.header.model,
-    outcome: end.reason,
-    turns: state.events.filter((e) => e.type === "turn_start").length,
-    toolCalls: starts.map((s) => ({
-      name: s.call.name,
-      arguments: s.call.arguments,
-      ok: ends.get(s.call.id) ?? false,
-      repaired: s.call.repaired,
-    })),
-    parseFailures: state.events.filter((e) => e.type === "parse_failure").length,
-  };
-}
-
-export function newHeader(opts: {
-  sessionId: string;
-  cwd: string;
-  model: string;
-  endpoint: string;
-  tools: string[];
-  toolsHash: string;
-}): JournalHeader {
-  return { version: 1, startedAt: new Date().toISOString(), ...opts };
 }

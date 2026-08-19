@@ -37,6 +37,12 @@ export interface BudgetState {
   consecutive: number;
 }
 
+export interface BudgetSnapshot {
+  options: Required<BudgetOptions>;
+  state: BudgetState;
+  recent: boolean[];
+}
+
 export class BreakageBudget {
   private readonly consecutiveLimit: number;
   private readonly rateLimit: number;
@@ -54,6 +60,33 @@ export class BreakageBudget {
 
   get snapshot(): Readonly<BudgetState> {
     return { ...this.state };
+  }
+
+  /**
+   * Everything needed to continue counting after a crash.
+   *
+   * The options travel with the state on purpose: a budget restored under
+   * different limits is a different budget, and the mismatch would only show up
+   * as a downgrade that fires at the wrong time.
+   */
+  capture(): BudgetSnapshot {
+    return {
+      options: {
+        consecutiveLimit: this.consecutiveLimit,
+        rateLimit: this.rateLimit,
+        window: this.window,
+        hardLimit: this.hardLimit,
+      },
+      state: { ...this.state },
+      recent: [...this.recent],
+    };
+  }
+
+  static restore(snap: BudgetSnapshot): BreakageBudget {
+    const b = new BreakageBudget(snap.options);
+    b.state = { ...snap.state };
+    b.recent = [...snap.recent];
+    return b;
   }
 
   /** A turn whose actions parsed. `repaired` still counts as a success. */
@@ -122,6 +155,14 @@ export interface LoopVerdict {
   repeats: number;
 }
 
+export interface LoopGuardSnapshot {
+  options: Required<LoopGuardOptions>;
+  lastSignature: string;
+  repeats: number;
+  lastOutput: string;
+  stalls: number;
+}
+
 export class LoopGuard {
   private readonly repeatLimit: number;
   private readonly stallLimit: number;
@@ -162,5 +203,24 @@ export class LoopGuard {
     this.repeats = 0;
     this.lastOutput = "";
     this.stalls = 0;
+  }
+
+  capture(): LoopGuardSnapshot {
+    return {
+      options: { repeatLimit: this.repeatLimit, stallLimit: this.stallLimit },
+      lastSignature: this.lastSignature,
+      repeats: this.repeats,
+      lastOutput: this.lastOutput,
+      stalls: this.stalls,
+    };
+  }
+
+  static restore(snap: LoopGuardSnapshot): LoopGuard {
+    const g = new LoopGuard(snap.options);
+    g.lastSignature = snap.lastSignature;
+    g.repeats = snap.repeats;
+    g.lastOutput = snap.lastOutput;
+    g.stalls = snap.stalls;
+    return g;
   }
 }

@@ -76,6 +76,24 @@ export type TransportErrorKind =
   | "aborted";
 
 export class TransportError extends Error {
+  /**
+   * Recognise a transport error without `instanceof`.
+   *
+   * Two copies of this module — a workspace package resolved twice, a bundled
+   * build alongside a source one — give two distinct classes, and `instanceof`
+   * quietly answers false for the other one's errors. The failure that produces
+   * is the worst kind: a retryable server death reported as a protocol bug and
+   * the session ended.
+   */
+  static is(err: unknown): err is TransportError {
+    return (
+      typeof err === "object" &&
+      err !== null &&
+      (err as { name?: string }).name === "TransportError" &&
+      typeof (err as { kind?: unknown }).kind === "string"
+    );
+  }
+
   readonly kind: TransportErrorKind;
   readonly status?: number;
   readonly body?: string;

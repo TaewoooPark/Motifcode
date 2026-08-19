@@ -30,6 +30,7 @@
 
 import {
   ToolValidator,
+  callDigest,
   formatErrors,
   getCodec,
   looksLikeLeakedToolCall,
@@ -44,6 +45,12 @@ import {
   type Tool,
 } from "@motifcode/protocol";
 import { BreakageBudget, LoopGuard, nextChannel, type BudgetState } from "./budget.js";
+import {
+  PROTOCOL_VERSION,
+  isMutating,
+  type LoopCheckpoint,
+  type RepoState,
+} from "./checkpoint.js";
 import type { EventSink, LoopEvent, SessionEndReason, ToolInvocation } from "./events.js";
 import { Session } from "./session.js";
 import { TransportError, backoffDelay, sleep, type Transport } from "./transport.js";
@@ -103,6 +110,26 @@ export interface LoopOptions {
   signal?: AbortSignal;
   /** Injected for deterministic backoff in tests. */
   random?: () => number;
+  /** Identifies this scope in the journal. Defaults to `root`. */
+  scopeId?: string;
+  /** Recorded in checkpoints so a resume can refuse a moved repository. */
+  repo?: RepoState;
+  /**
+   * Continue an interrupted run instead of starting one.
+   *
+   * The caller is responsible for having checked compatibility and for having
+   * refused a checkpoint with an uncertain in-flight mutating tool; see
+   * `checkpoint.ts`.
+   */
+  resume?: LoopCheckpoint;
+  /**
+   * Called after every model response and around every tool call.
+   *
+   * Around, not after: the checkpoint written before a tool runs records the
+   * intent, and the one after clears it. A crash between them is the only way
+   * to know a command may have half-happened.
+   */
+  onCheckpoint?: (checkpoint: LoopCheckpoint) => void;
 }
 
 export interface ChannelTransition {
@@ -181,15 +208,16 @@ function normalizeSummary(s: string): string {
   return s.trim().replace(/\s+/g, " ");
 }
 
-let idCounter = 0;
-function nextId(): string {
-  idCounter += 1;
-  return `c${idCounter}`;
-}
-
-/** Exposed for deterministic replay tests. */
+/**
+ * Call ids come from a per-scope sequence held in the checkpoint.
+ *
+ * A module-global counter meant two sessions in one process interleaved their
+ * ids, and a resumed session restarted from 1 and collided with ids already in
+ * its own transcript.
+ */
 export function resetIds(): void {
-  idCounter = 0;
+  // Retained so existing callers keep working; ids are per-scope now, so there
+  // is no global state left to reset.
 }
 
 export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
@@ -207,20 +235,25 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
 
   if (opts.userTask.trim() === "") throw new EmptyTaskError();
 
-  const initialChannel: ChannelId = opts.channel ?? "toolcall";
+  const resume = opts.resume;
+  const scopeId = opts.scopeId ?? resume?.scopeId ?? "root";
+  const repo: RepoState = opts.repo ?? resume?.repo ?? { cwd: process.cwd() };
+  const initialChannel: ChannelId = resume?.initialChannel ?? opts.channel ?? "toolcall";
   const channelPolicy: ChannelPolicy = opts.channelPolicy ?? "fixed";
-  let channel: ChannelId = initialChannel;
+  let channel: ChannelId = resume?.currentChannel ?? initialChannel;
   let codec: ChannelCodec = getCodec(channel);
 
   // `system -> user(task)`. The task keeps its own turn and its own bytes: the
-  // exact string the caller passed is what the model reads.
+  // exact string the caller passed is what the model reads. On resume the whole
+  // transcript comes back instead — assistant turns, tool results, the lot.
   const session = new Session({
     system: system(channel),
     tools,
     initialMessages: [{ role: "user", content: opts.userTask }],
   });
-  const budget = new BreakageBudget();
-  const guard = new LoopGuard();
+  if (resume) session.restoreMessages(resume.messages);
+  const budget = resume ? BreakageBudget.restore(resume.breakage) : new BreakageBudget();
+  const guard = resume ? LoopGuard.restore(resume.loopGuard) : new LoopGuard();
   const ctx = repairContext(tools);
   // One validator for every path that can produce a call. A second
   // implementation would be a second set of rules, and the gap between them is
@@ -237,11 +270,42 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
     toolsHash: hashTools(toolNames),
   });
 
-  let turn = 0;
-  let repairsThisTask = 0;
-  let pendingDone: string | null = null;
-  let transportErrors = 0;
+  let turn = resume?.turn ?? 0;
+  let repairsThisTask = resume?.repairsThisTask ?? 0;
+  let pendingDone: string | null = resume?.pendingDone ?? null;
+  let transportErrors = resume?.transportErrors ?? 0;
+  let callSequence = resume?.nextCallSequence ?? 1;
+  let seq = resume?.afterSeq ?? 0;
   const transitions: ChannelTransition[] = [];
+
+  const nextId = (): string => `${scopeId}-c${callSequence++}`;
+
+  /**
+   * Write a checkpoint.
+   *
+   * `inFlight` is set before a tool runs and cleared after. A checkpoint that
+   * still carries one is the record of a command whose outcome nobody knows.
+   */
+  const checkpoint = (inFlight?: LoopCheckpoint["inFlightTool"]): void => {
+    if (!opts.onCheckpoint) return;
+    seq++;
+    opts.onCheckpoint({
+      scopeId,
+      afterSeq: seq,
+      messages: session.messages.map((m) => ({ ...m })),
+      turn,
+      currentChannel: channel,
+      initialChannel,
+      breakage: budget.capture(),
+      loopGuard: guard.capture(),
+      repairsThisTask,
+      pendingDone,
+      nextCallSequence: callSequence,
+      transportErrors,
+      repo,
+      ...(inFlight ? { inFlightTool: inFlight } : {}),
+    });
+  };
 
   const finish = (reason: SessionEndReason, summary?: string): LoopResult => {
     emit({ type: "session_end", reason, summary });
@@ -316,13 +380,11 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
         response = await transport.complete(request);
         break;
       } catch (err) {
-        const te =
-          err instanceof TransportError
-            ? err
-            : new TransportError(`transport failed: ${String(err)}`, {
-                kind: "protocol",
-                cause: err,
-              });
+        // Only transport failures are handled here. An arbitrary exception out
+        // of a transport is a bug in the harness or in a test double, and
+        // reporting it as "the server died" hides it behind a plausible story.
+        if (!TransportError.is(err)) throw err;
+        const te = err;
         transportErrors++;
         if (te.kind === "aborted") return finish("aborted");
         if (!te.retryable || attempt >= maxServerRetries) {
@@ -365,6 +427,8 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
       requestMs: response.ms,
     });
 
+    checkpoint();
+
     const parsed: ChannelParse = codec.parse({ ...response, content: split.content }, ctx);
     if (parsed.analysis || parsed.plan) {
       emit({ type: "plan", analysis: parsed.analysis, plan: parsed.plan });
@@ -404,6 +468,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
       if (downgrade && to) {
         changeChannel(to, downgrade);
         emit({ type: "repair", kind: "parse", reason: "channel changed", attempt: 1, max: 1 });
+        checkpoint();
         continue;
       }
       if (budget.exhausted) return finish("breakage_limit");
@@ -423,6 +488,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
         attempt: 1,
         max: 1,
       });
+      checkpoint();
       continue;
     }
 
@@ -485,6 +551,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
       if (budget.exhausted) return finish("breakage_limit");
       handBack(refusalPrompt(refusals, channel));
       emit({ type: "repair", kind: "refusal", reason: refusals[0]!.kind, attempt: 1, max: 1 });
+      checkpoint();
       continue;
     }
 
@@ -504,6 +571,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
         pendingDone = normalizeSummary(doneAction.summary);
         handBack(confirmationChallenge(doneAction.summary, channel));
         emit({ type: "notice", level: "info", text: "completion proposed; awaiting confirmation" });
+        checkpoint();
         continue;
       }
       if (doneAction.confirm !== true) {
@@ -512,6 +580,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
             "`confirm: true`. To keep working, take the next action instead.",
         );
         emit({ type: "notice", level: "warn", text: "completion not confirmed; session continues" });
+        checkpoint();
         continue;
       }
       if (normalizeSummary(doneAction.summary) !== pendingDone) {
@@ -524,6 +593,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
             "Repeat that summary verbatim with `confirm: true`, or keep working.",
         );
         emit({ type: "notice", level: "warn", text: "confirmation summary did not match" });
+        checkpoint();
         continue;
       }
       return finish("done", doneAction.summary);
@@ -546,6 +616,14 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
     let combinedOutput = "";
     for (const call of calls) {
       emit({ type: "tool_start", call });
+      // Durable intent, written before anything runs. Without it, a crash mid
+      // `apply_patch` is indistinguishable from a crash before it.
+      checkpoint({
+        id: call.id,
+        name: call.name,
+        argumentsHash: callDigest(call.name, call.arguments),
+        mutating: isMutating(call.name),
+      });
       const started = Date.now();
       const result = await executor.run(call, signal);
       const output = clampOutput(result.output);
@@ -561,6 +639,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
       );
       combinedOutput += output;
       if (!result.ok) anyFailure = true;
+      checkpoint();
     }
 
     const verdict = guard.observe(LoopGuard.signature(calls), combinedOutput);
@@ -589,6 +668,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
     } else if (!anyFailure) {
       repairsThisTask = 0;
     }
+    checkpoint();
   }
 
   return finish("turn_limit");

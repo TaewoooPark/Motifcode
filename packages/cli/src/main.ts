@@ -13,8 +13,21 @@ import { join } from "node:path";
 import { AgentRegistry, AgentScheduler, BUILTIN_AGENTS, concurrencyFor } from "@motifcode/agents";
 import { HttpTransport, runLoop, type LoopEvent } from "@motifcode/core";
 import { DEFAULT_HOOKS, type HookConfig } from "@motifcode/hooks";
-import { Journal, checkResumable, listSessions, loadResume, newHeader, toTrajectory } from "@motifcode/journal";
-import type { ChannelId } from "@motifcode/protocol";
+import {
+  Journal,
+  checkResumable,
+  listSessions,
+  loadResume,
+  newHeader,
+  type ResumeState,
+  type ScopeIdentity,
+} from "@motifcode/journal";
+import {
+  SAMPLING_DEFAULTS,
+  systemPromptHash,
+  toolSchemaHash,
+  type ChannelId,
+} from "@motifcode/protocol";
 import { BUILTIN_SKILLS, SkillRegistry, parseSkill } from "@motifcode/skills";
 import { CORE_TOOLS, CORE_TOOL_NAMES, lintTools, formatFindings } from "@motifcode/tools";
 import { Screen } from "@motifcode/tui";
@@ -185,6 +198,7 @@ async function main(): Promise<number> {
   const cwd = flagStr(args.flags, "cwd", process.cwd());
   const endpoint = flagStr(args.flags, "endpoint", process.env["MOTIF_ENDPOINT"] ?? "http://127.0.0.1:8080");
   const model = flagStr(args.flags, "model", process.env["MOTIF_MODEL"] ?? "Motif-Technologies/Motif-3");
+  let resumeFrom: ResumeState | undefined;
 
   switch (args.command) {
     case "help":
@@ -233,8 +247,14 @@ async function main(): Promise<number> {
         return 0;
       }
       for (const s of sessions) {
+        // The grade is shown next to the outcome, and only when there is one.
+        // `done` is the agent's claim about itself; a grade is a verdict from
+        // outside, and conflating them is how a self-report becomes a score.
+        const grade = s.grade ? ` grade=${s.grade.status}` : "";
+        const partial = s.truncatedTail ? " (truncated)" : "";
         process.stdout.write(
-          `${s.header.startedAt}  ${String(s.outcome ?? "?").padEnd(12)} ${s.events} events  ${s.path}\n`,
+          `${s.header.startedAt}  ${s.outcome.padEnd(12)}${grade} ${s.rootEvents} root events` +
+            `${s.childEvents > 0 ? ` +${s.childEvents} child` : ""}${partial}  ${s.path}\n`,
         );
       }
       return 0;
@@ -242,13 +262,18 @@ async function main(): Promise<number> {
 
     case "distil": {
       const dir = args.rest[0] ?? join(cwd, CONFIG_DIR, "sessions");
-      const kept: unknown[] = [];
-      for (const s of listSessions(dir)) {
-        const t = toTrajectory(loadResume(s.path));
-        if (t) kept.push(t);
-      }
-      process.stdout.write(JSON.stringify(kept, null, 2) + "\n");
-      process.stderr.write(`${kept.length} successful trajector${kept.length === 1 ? "y" : "ies"}\n`);
+      const sessions = listSessions(dir);
+      const graded = sessions.filter((s) => s.grade?.status === "passed");
+      const ungraded = sessions.filter((s) => s.grade === undefined);
+      // Export is gated on a grader's verdict, not on the model saying `done`.
+      // A session that never ran its tests, or hid a failure, would otherwise
+      // become training data and profiling corpus on its own say-so.
+      for (const s of graded) process.stdout.write(`${s.path}\n`);
+      process.stderr.write(
+        `${graded.length} of ${sessions.length} sessions passed a grader` +
+          (ungraded.length > 0 ? `; ${ungraded.length} were never graded and are excluded` : "") +
+          "\n",
+      );
       return 0;
     }
 
@@ -258,18 +283,7 @@ async function main(): Promise<number> {
         process.stderr.write("resume needs a session file — see `motif sessions`\n");
         return 2;
       }
-      const state = loadResume(file);
-      const blocker = checkResumable(state, toolsHash(CORE_TOOL_NAMES));
-      if (blocker) {
-        process.stderr.write(`cannot resume: ${blocker}\n`);
-        return 2;
-      }
-      process.stdout.write(
-        `resuming ${state.header.sessionId} (${state.events.length} events, ${state.interrupted ? "interrupted" : "complete"})\n`,
-      );
-      // The conversation is rebuilt from the recorded user turns; the loop then
-      // continues normally.
-      args.rest = state.userTurns.slice(-1);
+      resumeFrom = loadResume(file);
       break;
     }
 
@@ -277,18 +291,13 @@ async function main(): Promise<number> {
       break;
   }
 
-  const task = args.rest.join(" ").trim();
-  if (!task) {
-    process.stdout.write(HELP);
-    return 2;
-  }
-
   const channel: ChannelId = flagEnum(args.flags, "channel", CHANNELS, "toolcall");
   const channelPolicy = flagEnum(args.flags, "channel-policy", CHANNEL_POLICIES, "fixed");
   const maxTurns = flagInt(args.flags, "max-turns", 100, 1);
-  const maxOutputTokens = args.flags["max-output-tokens"] !== undefined
-    ? flagInt(args.flags, "max-output-tokens", 0, 1)
-    : undefined;
+  const maxOutputTokens =
+    args.flags["max-output-tokens"] !== undefined
+      ? flagInt(args.flags, "max-output-tokens", 0, 1)
+      : undefined;
   const seed = args.flags["seed"] !== undefined ? flagInt(args.flags, "seed", 0, 0) : undefined;
 
   // The two body-parsing channels are implemented end to end but have never
@@ -305,33 +314,101 @@ async function main(): Promise<number> {
         "pass --experimental-channel to try it",
     );
   }
+
   const skills = loadSkills(cwd);
   const agents = new AgentRegistry();
   agents.registerAll(BUILTIN_AGENTS);
   const hooks = loadHooks(cwd);
+  const projectNotes = loadProjectNotes(cwd);
+
+  const systemFor = (ch: ChannelId): string =>
+    buildSystemPrompt({
+      channel: ch,
+      tools: [...CORE_TOOLS],
+      skills,
+      agents,
+      ...(projectNotes !== undefined ? { projectNotes } : {}),
+      cwd,
+    });
+
+  const schemaHash = toolSchemaHash(CORE_TOOLS);
+  const promptHash = systemPromptHash(systemFor(channel));
+
+  // Resume, or start. A resume keeps the recorded task: continuing someone
+  // else's transcript with a different task is a new run wearing the old one's
+  // history.
+  let task: string;
+  if (resumeFrom) {
+    const blocker = checkResumable(resumeFrom, {
+      systemHash: promptHash,
+      toolSchemaHash: schemaHash,
+      model,
+    });
+    if (blocker) {
+      process.stderr.write(`cannot resume: ${blocker}\n`);
+      return 2;
+    }
+    task = resumeFrom.task ?? "";
+    process.stdout.write(
+      `resuming ${resumeFrom.header.runId} from turn ${resumeFrom.checkpoint!.turn}` +
+        `${resumeFrom.truncatedTail ? " (last record was truncated)" : ""}\n`,
+    );
+  } else {
+    task = args.rest.join(" ").trim();
+  }
+
+  if (!task) {
+    process.stdout.write(HELP);
+    return 2;
+  }
 
   const transport = new HttpTransport({ endpoint, model });
   const screen = new Screen();
-  const sessionId = `${new Date().toISOString().replace(/[:.]/g, "-")}`;
+  const runId = new Date().toISOString().replace(/[:.]/g, "-");
   const journal = new Journal(
-    join(cwd, CONFIG_DIR, "sessions", `${sessionId}.jsonl`),
+    join(cwd, CONFIG_DIR, "sessions", `${runId}.jsonl`),
     newHeader({
-      sessionId,
+      runId,
       cwd,
       model,
       endpoint,
-      tools: [...CORE_TOOL_NAMES],
-      toolsHash: toolsHash(CORE_TOOL_NAMES),
+      systemHash: promptHash,
+      toolSchemaHash: schemaHash,
+      harnessVersion: VERSION,
+      config: {
+        initialChannel: channel,
+        channelPolicy,
+        temperature: SAMPLING_DEFAULTS.temperature,
+        topP: SAMPLING_DEFAULTS.top_p,
+        ...(seed !== undefined ? { seed } : {}),
+        maxTurns,
+        ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+        maxRepairs: 2,
+      },
     }),
   );
+
+  const rootScope: ScopeIdentity = { scopeId: "root", scopeKind: "root" };
+  journal.record(rootScope, {
+    t: "scope_start",
+    task,
+    initialMessages: [{ role: "user", content: task }],
+  });
+  if (resumeFrom?.checkpoint) {
+    journal.record(rootScope, {
+      t: "resume",
+      fromSeq: resumeFrom.checkpoint.afterSeq,
+      previousRunId: resumeFrom.header.runId,
+    });
+  }
 
   if (args.flags["no-hero"] !== true) {
     screen.splash({ model, endpoint, channel, maxTokens: 262_144 });
   }
-  journal.user(task);
 
+  const rootSink = journal.sinkFor(rootScope);
   const emit = (e: LoopEvent) => {
-    journal.record(e);
+    rootSink(e);
     screen.apply(e);
   };
 
@@ -357,12 +434,22 @@ async function main(): Promise<number> {
           summary: `no such subagent: ${name}. Available: ${agents.list().map((a) => a.name).join(", ")}`,
         };
       }
-      const runId = nextRunId(`sub-${def.name}`);
+      const childScope: ScopeIdentity = {
+        scopeId: nextRunId(`sub-${def.name}`),
+        scopeKind: "subagent",
+        parentScopeId: rootScope.scopeId,
+        agentName: def.name,
+      };
       return scheduler.submit(name, prompt, async () => {
         // Its own executor, and its own `close()`. A child that throws or is
         // aborted still leaves a persistent shell behind unless the cleanup is
         // in `finally`.
         const childExecutor = new ToolExecutor({ cwd, skills });
+        journal.record(childScope, {
+          t: "scope_start",
+          task: prompt,
+          initialMessages: [{ role: "user", content: prompt }],
+        });
         try {
           const sub = await runLoop({
             transport,
@@ -381,19 +468,32 @@ async function main(): Promise<number> {
               }),
             userTask: prompt,
             executor: childExecutor,
-            // Subagent events are journalled but not painted: the parent's
-            // screen shows the queue, not the child's transcript.
-            emit: (e) => journal.record(e),
+            // Subagent events are journalled under their own scope but not
+            // painted: the parent's screen shows the queue, not the child's
+            // transcript. Under one scope they would also have been able to
+            // label the parent's run.
+            emit: journal.sinkFor(childScope),
+            onCheckpoint: journal.checkpointFor(childScope),
+            scopeId: childScope.scopeId,
+            repo: { cwd },
             channel,
             channelPolicy,
             maxTurns: def.maxTurns ?? 25,
             ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
             ...(seed !== undefined ? { seed } : {}),
           });
+          journal.record(childScope, {
+            t: "scope_end",
+            result: {
+              endReason: sub.reason,
+              ...(sub.summary !== undefined ? { summary: sub.summary } : {}),
+              turns: sub.turns,
+            },
+          });
           return {
             ok: sub.reason === "done",
             reason: sub.reason,
-            runId,
+            runId: childScope.scopeId,
             ...(sub.summary !== undefined ? { summary: sub.summary } : {}),
           };
         } finally {
@@ -407,24 +507,31 @@ async function main(): Promise<number> {
     const result = await runLoop({
       transport,
       tools: [...CORE_TOOLS],
-      system: (ch) =>
-        buildSystemPrompt({
-          channel: ch,
-          tools: [...CORE_TOOLS],
-          skills,
-          agents,
-          projectNotes: loadProjectNotes(cwd),
-          cwd,
-        }),
+      system: systemFor,
       userTask: task,
       executor,
       emit,
+      onCheckpoint: journal.checkpointFor(rootScope),
+      scopeId: rootScope.scopeId,
+      repo: { cwd },
       channel,
       channelPolicy,
       maxTurns,
       ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
       ...(seed !== undefined ? { seed } : {}),
+      ...(resumeFrom?.checkpoint ? { resume: resumeFrom.checkpoint } : {}),
     });
+    journal.record(rootScope, {
+      t: "scope_end",
+      result: {
+        endReason: result.reason,
+        ...(result.summary !== undefined ? { summary: result.summary } : {}),
+        turns: result.turns,
+      },
+    });
+    // Exit 0 means the agent finished its own loop cleanly. It is not a claim
+    // that the work is correct — that requires a grader, and `motif distil`
+    // reads the grade rather than this exit code.
     return result.reason === "done" ? 0 : 1;
   } finally {
     executor.close();
