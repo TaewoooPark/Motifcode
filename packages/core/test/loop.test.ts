@@ -29,7 +29,7 @@ const okExecutor: Executor = { run: async () => ({ ok: true, output: "ok" }) };
 const failExecutor: Executor = { run: async () => ({ ok: false, output: "error: no such file" }) };
 
 const TASK = "fix the failing test in src/parse.ts";
-const base = { tools: [...CORE_TOOLS], system: "You are motifcode.", userTask: TASK };
+const base = { tools: [...CORE_TOOLS], system: () => "You are motifcode.", userTask: TASK };
 
 function kinds(events: LoopEvent[], type: LoopEvent["type"]) {
   return events.filter((e) => e.type === type);
@@ -405,15 +405,25 @@ describe("the done contract", () => {
   });
 });
 
-describe("channel downgrade", () => {
-  it("moves off toolcall after repeated parse failures", async () => {
-    // Two consecutive failures is the trigger. The point is not to keep trying
-    // the channel that is failing — it is to move to one that cannot fail that
-    // way, which is the whole reason three channels exist.
-    const { events, emit } = collect();
+describe("channel policy", () => {
+  const corrupted = () => {
     const inner = new ScriptedTransport([toolCallBody("bash", { command: "ls" })], true);
-    const transport = new FaultTransport(inner, [{ at: [1, 2, 3, 4, 5, 6], kind: "corrupt" }]);
-    await runLoop({ ...base, transport, executor: okExecutor, emit, maxTurns: 8 });
+    return new FaultTransport(inner, [{ at: [1, 2, 3, 4, 5, 6], kind: "corrupt" }]);
+  };
+
+  it("moves off toolcall after repeated parse failures when adaptive", async () => {
+    // The point is not to keep trying the channel that is failing — it is to
+    // move to one that cannot fail that way, which is the whole reason three
+    // channels exist.
+    const { events, emit } = collect();
+    const r = await runLoop({
+      ...base,
+      transport: corrupted(),
+      executor: okExecutor,
+      emit,
+      maxTurns: 8,
+      channelPolicy: "adaptive",
+    });
     const downgrades = kinds(events, "channel_downgrade") as Extract<
       LoopEvent,
       { type: "channel_downgrade" }
@@ -421,6 +431,54 @@ describe("channel downgrade", () => {
     expect(downgrades.length).toBeGreaterThan(0);
     expect(downgrades[0]!.from).toBe("toolcall");
     expect(downgrades[0]!.to).toBe("object");
+    // Grouping stays with the channel the run started in: reclassifying an
+    // adaptive run by where it ended up would compare it against runs that
+    // never had the chance to move.
+    expect(r.initialChannel).toBe("toolcall");
+    expect(r.transitions[0]).toMatchObject({ from: "toolcall", to: "object" });
+  });
+
+  it("never changes channel under the fixed policy", async () => {
+    // Every benchmark runs fixed. A run that silently switched protocol
+    // mid-flight would be two experiments reported as one.
+    const { events, emit } = collect();
+    const r = await runLoop({
+      ...base,
+      transport: corrupted(),
+      executor: okExecutor,
+      emit,
+      maxTurns: 8,
+    });
+    expect(kinds(events, "channel_downgrade")).toHaveLength(0);
+    expect(r.transitions).toEqual([]);
+    expect(r.channel).toBe("toolcall");
+  });
+
+  it("restarts the transcript rather than translating it", async () => {
+    // The old transcript is written in a format the new channel does not use.
+    // Dressing it up as the new one would show the model a conversation it
+    // never had.
+    const { emit } = collect();
+    const inner = new ScriptedTransport([toolCallBody("bash", { command: "ls" })], true);
+    const transport = new FaultTransport(inner, [{ at: [1, 2, 3, 4, 5, 6], kind: "corrupt" }]);
+    await runLoop({
+      ...base,
+      // The system turn is a function of the channel, exactly as it is in the
+      // CLI: after a switch the old prompt would still be instructing the model
+      // in a format the parser no longer reads.
+      system: (ch) => `You are motifcode. Answer in the ${ch} format.`,
+      transport,
+      executor: okExecutor,
+      emit,
+      maxTurns: 6,
+      channelPolicy: "adaptive",
+    });
+    const afterSwitch = inner.seen.find((r) => r.raw === true);
+    expect(afterSwitch, "the object channel drives the completions endpoint").toBeDefined();
+    expect(afterSwitch!.messages.map((m) => m.role)).toEqual(["system", "user"]);
+    expect(String(afterSwitch!.messages[1]!.content)).toContain(TASK);
+    expect(String(afterSwitch!.messages[0]!.content)).toContain("object format");
+    expect(String(afterSwitch!.messages[0]!.content)).not.toContain("toolcall format");
   });
 });
 
@@ -471,7 +529,7 @@ describe("server death", () => {
     const { events, emit } = collect();
     const { TransportError } = await import("../src/transport.js");
     const transport = new ScriptedTransport([
-      new TransportError("engine core died", 500),
+      new TransportError("engine core died", { kind: "http", status: 500 }),
       toolCallBody("bash", { command: "ls" }),
       doneBody("d"),
       doneBody("d", { confirm: true }),
@@ -479,13 +537,13 @@ describe("server death", () => {
     const r = await runLoop({ ...base, transport, executor: okExecutor, emit });
     expect(r.reason).toBe("done");
     const warns = kinds(events, "notice") as Extract<LoopEvent, { type: "notice" }>[];
-    expect(warns.some((w) => w.level === "warn" && /server unavailable/.test(w.text))).toBe(true);
+    expect(warns.some((w) => w.level === "warn" && /retry 1\/3/.test(w.text))).toBe(true);
   });
 
   it("gives up after the retry budget", async () => {
     const { emit } = collect();
     const { TransportError } = await import("../src/transport.js");
-    const transport = new ScriptedTransport([new TransportError("dead", 500)], true);
+    const transport = new ScriptedTransport([new TransportError("dead", { kind: "http", status: 500 })], true);
     const r = await runLoop({ ...base, transport, executor: okExecutor, emit, maxServerRetries: 2 });
     expect(r.reason).toBe("transport_error");
   });

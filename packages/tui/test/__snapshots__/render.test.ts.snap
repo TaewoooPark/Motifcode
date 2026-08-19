@@ -11,7 +11,7 @@ exports[`hero > renders the large hero 1`] = `
 ▒▒▒▒▒     ▒▒▒▒▒    ▒▒▒▒▒▒▒       ▒▒▒▒▒    ▒▒▒▒▒ ▒▒▒▒▒         ▒▒▒▒▒▒▒▒▒     ▒▒▒▒▒▒▒    ▒▒▒▒▒▒▒▒▒▒   ▒▒▒▒▒▒▒▒▒▒ "
 `;
 
-exports[`instruments > reports the local-only readings 1`] = `"ch object  ·  parse 2/3  ·  prefix ✓ 93%  ·  ctx 5K/262K · kv 287MB  ·  27 tok/s"`;
+exports[`instruments > reports the local-only readings 1`] = `"ch object  ·  parse 2/3  ·  prefix ✓ 93%  ·  ctx 5K/262K · kv 287MB  ·  27 req tok/s"`;
 
 exports[`transcript > renders a full session 1`] = `
 "──  user  ──────────────────────────────────────────────────────────────

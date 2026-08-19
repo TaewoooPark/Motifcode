@@ -83,6 +83,7 @@ function flagInt(flags: Args["flags"], key: string, fallback: number, min: numbe
 }
 
 const CHANNELS = ["toolcall", "object", "raw"] as const;
+const CHANNEL_POLICIES = ["fixed", "adaptive"] as const;
 
 /** Distinguishes one delegated run from another in tool output and the journal. */
 let runSequence = 0;
@@ -164,9 +165,19 @@ Flags
   --endpoint <url>          model server (default http://127.0.0.1:8080)
   --model <name>            model id to request
   --channel <id>            toolcall | object | raw (default toolcall)
+  --channel-policy <p>      fixed | adaptive (default fixed)
   --max-turns <n>           turn ceiling (default 100)
+  --max-output-tokens <n>   cap on each model step
+  --seed <n>                sampling seed, passed to the server
   --cwd <path>              working directory
   --no-hero                 skip the splash
+
+The object and raw channels drive /v1/completions with a locally rendered
+prompt. Neither has been measured against Motif-3, so both need
+--experimental-channel to run. "fixed" never changes channel mid-session, which
+is what any comparable measurement requires; "adaptive" moves to a simpler
+channel after repeated parse failures, and that move restarts the conversation
+because the transcript formats are not interchangeable.
 `;
 
 async function main(): Promise<number> {
@@ -273,7 +284,27 @@ async function main(): Promise<number> {
   }
 
   const channel: ChannelId = flagEnum(args.flags, "channel", CHANNELS, "toolcall");
+  const channelPolicy = flagEnum(args.flags, "channel-policy", CHANNEL_POLICIES, "fixed");
   const maxTurns = flagInt(args.flags, "max-turns", 100, 1);
+  const maxOutputTokens = args.flags["max-output-tokens"] !== undefined
+    ? flagInt(args.flags, "max-output-tokens", 0, 1)
+    : undefined;
+  const seed = args.flags["seed"] !== undefined ? flagInt(args.flags, "seed", 0, 0) : undefined;
+
+  // The two body-parsing channels are implemented end to end but have never
+  // been run against Motif-3. Saying so with a flag is more honest than a
+  // README note nobody reads at the point of use.
+  if (channel !== "toolcall" && args.flags["experimental-channel"] !== true) {
+    throw new UsageError(
+      `the ${channel} channel has never been measured against Motif-3; pass --experimental-channel to try it`,
+    );
+  }
+  if (channelPolicy === "adaptive" && args.flags["experimental-channel"] !== true) {
+    throw new UsageError(
+      "adaptive channel policy restarts the conversation on a downgrade and has never been measured; " +
+        "pass --experimental-channel to try it",
+    );
+  }
   const skills = loadSkills(cwd);
   const agents = new AgentRegistry();
   agents.registerAll(BUILTIN_AGENTS);
@@ -340,20 +371,24 @@ async function main(): Promise<number> {
             // turn, exactly as the parent's own task is — a child that only
             // receives its role instructions has been told who it is and never
             // told what to do.
-            system: buildAgentPrompt({
-              name: def.name,
-              instructions: def.instructions,
-              tools: def.tools,
-              channel,
-              cwd,
-            }),
+            system: (ch) =>
+              buildAgentPrompt({
+                name: def.name,
+                instructions: def.instructions,
+                tools: def.tools,
+                channel: ch,
+                cwd,
+              }),
             userTask: prompt,
             executor: childExecutor,
             // Subagent events are journalled but not painted: the parent's
             // screen shows the queue, not the child's transcript.
             emit: (e) => journal.record(e),
             channel,
+            channelPolicy,
             maxTurns: def.maxTurns ?? 25,
+            ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+            ...(seed !== undefined ? { seed } : {}),
           });
           return {
             ok: sub.reason === "done",
@@ -372,19 +407,23 @@ async function main(): Promise<number> {
     const result = await runLoop({
       transport,
       tools: [...CORE_TOOLS],
-      system: buildSystemPrompt({
-        channel,
-        tools: [...CORE_TOOLS],
-        skills,
-        agents,
-        projectNotes: loadProjectNotes(cwd),
-        cwd,
-      }),
+      system: (ch) =>
+        buildSystemPrompt({
+          channel: ch,
+          tools: [...CORE_TOOLS],
+          skills,
+          agents,
+          projectNotes: loadProjectNotes(cwd),
+          cwd,
+        }),
       userTask: task,
       executor,
       emit,
       channel,
+      channelPolicy,
       maxTurns,
+      ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+      ...(seed !== undefined ? { seed } : {}),
     });
     return result.reason === "done" ? 0 : 1;
   } finally {

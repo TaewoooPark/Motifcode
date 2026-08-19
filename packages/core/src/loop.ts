@@ -1,42 +1,52 @@
 /**
  * The agent loop.
  *
- * Ordinary in shape — ask, act, feed back — with four departures that all trace
- * to something specific about Motif-3:
+ * Ordinary in shape — ask, act, feed back — with departures that all trace to
+ * something specific about Motif-3 or about the hardware it runs on:
  *
  *   1. A turn that produces no actions is not an answer. Finishing requires the
  *      `done` tool, because a dropped tool call and a final reply are otherwise
  *      indistinguishable, and that ambiguity is the documented way this model's
  *      sessions die quietly.
  *
- *   2. Failures get a structured repair turn rather than a free-form retry. The
- *      pruning literature found one repair turn erases a 2-bit quantisation
- *      penalty, and compressed models gain more from it than intact ones. We
- *      ship a pruned model; this loop is where that gain is collected.
+ *   2. Nothing runs until the whole turn has been checked. Schema-invalid
+ *      arguments, payloads recovered by inventing structure, and `done` mixed
+ *      with other actions all refuse the turn as a batch rather than applying
+ *      part of it.
  *
- *   3. Parse failures are budgeted, and crossing the budget changes the action
- *      channel rather than the prompt.
+ *   3. Parse failures are budgeted. Crossing the budget can change the action
+ *      channel, and a channel change is a real change: a different endpoint, a
+ *      different request body, a different way of writing the transcript down.
  *
- *   4. `done` is confirmed twice, following Terminus 2, so a hallucinated
- *      completion costs one turn instead of the task.
+ *   4. `done` is proposed and then confirmed, so a hallucinated completion
+ *      costs one turn instead of the task. Confirmation says the agent believes
+ *      it is finished. It is not evidence that the work is correct — that comes
+ *      from a grader outside this loop.
+ *
+ *   5. A dead server is an expected event, not an exception. A single local GPU
+ *      serving this checkpoint falls over, and the loop distinguishes "the
+ *      socket refused" from "the request was wrong".
  */
 
 import {
   ToolValidator,
   formatErrors,
-  getChannel,
+  getCodec,
   looksLikeLeakedToolCall,
   parseToolCalls,
   repairContext,
   splitThinking,
   type Action,
+  type ChannelCodec,
   type ChannelId,
+  type ChannelParse,
+  type CompletionRequest,
   type Tool,
 } from "@motifcode/protocol";
 import { BreakageBudget, LoopGuard, nextChannel, type BudgetState } from "./budget.js";
 import type { EventSink, LoopEvent, SessionEndReason, ToolInvocation } from "./events.js";
 import { Session } from "./session.js";
-import { TransportError, type Transport } from "./transport.js";
+import { TransportError, backoffDelay, sleep, type Transport } from "./transport.js";
 
 export interface ToolResult {
   ok: boolean;
@@ -48,36 +58,58 @@ export interface Executor {
   run(call: ToolInvocation, signal?: AbortSignal): Promise<ToolResult>;
 }
 
+/**
+ * Whether the loop may change channel mid-session.
+ *
+ * `fixed` is the setting every benchmark uses. A channel change is a prefix
+ * break and a different wire protocol, so a run that silently switched would be
+ * two experiments reported as one.
+ */
+export type ChannelPolicy = "fixed" | "adaptive";
+
 export interface LoopOptions {
   transport: Transport;
   tools: Tool[];
-  system: string;
+  /**
+   * The system prompt for a given channel.
+   *
+   * A function rather than a string because the channel can change, and the
+   * system turn has to change with it: after a downgrade the old prompt would
+   * be instructing the model in a format the parser no longer reads.
+   */
+  system: (channel: ChannelId) => string;
   /**
    * The task this session exists to perform, verbatim.
    *
    * Required, and required to be non-blank. A session whose first request is
    * system-only asks the model to work on nothing, and every downstream
    * artifact — trajectory, benchmark row, profiling corpus — inherits that
-   * emptiness while still looking like a real run. The one honest way to stop
-   * that is to make the task impossible to omit.
+   * emptiness while still looking like a real run.
    */
   userTask: string;
   executor: Executor;
   emit: EventSink;
   channel?: ChannelId;
+  channelPolicy?: ChannelPolicy;
   maxTurns?: number;
   maxRepairs?: number;
   /** Retries for a server that died mid-session; GB10 makes this routine. */
   maxServerRetries?: number;
+  /** Output cap per model step. Sent on the wire, not merely assumed. */
+  maxOutputTokens?: number;
+  temperature?: number;
+  topP?: number;
+  seed?: number;
   signal?: AbortSignal;
+  /** Injected for deterministic backoff in tests. */
+  random?: () => number;
 }
 
-/** Thrown before any model request when the caller supplied no task. */
-export class EmptyTaskError extends Error {
-  constructor() {
-    super("a session needs a non-empty task: the first user message cannot be blank");
-    this.name = "EmptyTaskError";
-  }
+export interface ChannelTransition {
+  turn: number;
+  from: ChannelId;
+  to: ChannelId;
+  reason: string;
 }
 
 export interface LoopResult {
@@ -85,7 +117,12 @@ export interface LoopResult {
   summary?: string;
   turns: number;
   budget: Readonly<BudgetState>;
+  /** Where the session ended up. Use `initialChannel` to group runs. */
   channel: ChannelId;
+  initialChannel: ChannelId;
+  channelPolicy: ChannelPolicy;
+  transitions: ChannelTransition[];
+  transportErrors: number;
 }
 
 const MAX_TOOL_OUTPUT = 10_000;
@@ -105,6 +142,14 @@ export function clampOutput(text: string, maxBytes = MAX_TOOL_OUTPUT): string {
   const tail = buf.subarray(bytes - half).toString("utf8");
   const omitted = bytes - Buffer.byteLength(head) - Buffer.byteLength(tail);
   return `${head}\n… ${omitted} bytes omitted …\n${tail}`;
+}
+
+/** Thrown before any model request when the caller supplied no task. */
+export class EmptyTaskError extends Error {
+  constructor() {
+    super("a session needs a non-empty task: the first user message cannot be blank");
+    this.name = "EmptyTaskError";
+  }
 }
 
 /**
@@ -162,11 +207,15 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
 
   if (opts.userTask.trim() === "") throw new EmptyTaskError();
 
-  let channel: ChannelId = opts.channel ?? "toolcall";
+  const initialChannel: ChannelId = opts.channel ?? "toolcall";
+  const channelPolicy: ChannelPolicy = opts.channelPolicy ?? "fixed";
+  let channel: ChannelId = initialChannel;
+  let codec: ChannelCodec = getCodec(channel);
+
   // `system -> user(task)`. The task keeps its own turn and its own bytes: the
   // exact string the caller passed is what the model reads.
   const session = new Session({
-    system,
+    system: system(channel),
     tools,
     initialMessages: [{ role: "user", content: opts.userTask }],
   });
@@ -191,11 +240,64 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
   let turn = 0;
   let repairsThisTask = 0;
   let pendingDone: string | null = null;
-  let serverRetries = 0;
+  let transportErrors = 0;
+  const transitions: ChannelTransition[] = [];
 
   const finish = (reason: SessionEndReason, summary?: string): LoopResult => {
     emit({ type: "session_end", reason, summary });
-    return { reason, summary, turns: turn, budget: budget.snapshot, channel };
+    return {
+      reason,
+      summary,
+      turns: turn,
+      budget: budget.snapshot,
+      channel,
+      initialChannel,
+      channelPolicy,
+      transitions,
+      transportErrors,
+    };
+  };
+
+  const requestOptions = {
+    ...(opts.maxOutputTokens !== undefined ? { maxTokens: opts.maxOutputTokens } : {}),
+    ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
+    ...(opts.topP !== undefined ? { topP: opts.topP } : {}),
+    ...(opts.seed !== undefined ? { seed: opts.seed } : {}),
+    ...(signal ? { signal } : {}),
+  };
+
+  /**
+   * Move to a new channel by starting a new session segment.
+   *
+   * Not by swapping a parser. The old transcript is written in a format the new
+   * channel does not use, and dressing it up as the new one would show the model
+   * a conversation it never had. Instead the segment restarts with the new
+   * channel's system prompt and the original task, and says plainly that the
+   * format changed. The filesystem is untouched, which is the state that
+   * actually matters; only the conversation restarts.
+   */
+  const changeChannel = (to: ChannelId, reason: string): void => {
+    transitions.push({ turn, from: channel, to, reason });
+    emit({ type: "channel_downgrade", from: channel, to, reason });
+    channel = to;
+    codec = getCodec(to);
+    session.restart(system(to), [
+      {
+        role: "user",
+        content: [
+          opts.userTask,
+          "",
+          "---",
+          "",
+          `Note: the action format changed to ${to} because ${reason}. Earlier turns of`,
+          "this session used a different format and are not shown. Any files you already",
+          "changed are still changed — check the working tree before redoing work.",
+        ].join("\n"),
+      },
+    ]);
+    budget.onChannelChange();
+    guard.reset();
+    pendingDone = null;
   };
 
   while (turn < maxTurns) {
@@ -203,34 +305,45 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
     turn++;
     emit({ type: "turn_start", turn });
 
-    const { sharedChars, totalChars } = session.renderWithPrefix();
+    const request: CompletionRequest = codec.buildRequest(session, tools, requestOptions);
+    const { sharedChars, totalChars } = session.observePrefix(request.prompt ?? session.render());
     emit({ type: "prefix", sharedChars, totalChars });
 
     let response;
-    try {
-      response = await transport.complete({
-        messages: [...session.history],
-        tools,
-        signal,
-      });
-      serverRetries = 0;
-    } catch (err) {
-      if (err instanceof TransportError && err.isServerDeath && serverRetries < maxServerRetries) {
-        serverRetries++;
+    let attempt = 0;
+    for (;;) {
+      try {
+        response = await transport.complete(request);
+        break;
+      } catch (err) {
+        const te =
+          err instanceof TransportError
+            ? err
+            : new TransportError(`transport failed: ${String(err)}`, {
+                kind: "protocol",
+                cause: err,
+              });
+        transportErrors++;
+        if (te.kind === "aborted") return finish("aborted");
+        if (!te.retryable || attempt >= maxServerRetries) {
+          emit({ type: "notice", level: "error", text: `${te.kind}: ${te.message}` });
+          return finish("transport_error");
+        }
+        attempt++;
+        const delay = backoffDelay(attempt, opts.random ? { random: opts.random } : {});
         emit({
           type: "notice",
           level: "warn",
-          text: `server unavailable (${err.message}); retry ${serverRetries}/${maxServerRetries}. Session state is intact.`,
+          text: `${te.kind}: ${te.message}; retry ${attempt}/${maxServerRetries} in ${delay}ms. Session state is intact.`,
         });
-        turn--;
-        continue;
+        try {
+          await sleep(delay, signal);
+        } catch {
+          return finish("aborted");
+        }
       }
-      emit({ type: "notice", level: "error", text: String(err) });
-      return finish("transport_error");
     }
 
-    // The server's reasoning parser gives us `reasoning_content` directly; on
-    // the raw path we split it ourselves. Either way it goes into history.
     // The server's reasoning parser gives us `reasoning_content` directly; on
     // the raw path we split it ourselves. Either way it goes into history.
     const split =
@@ -243,16 +356,16 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
       emit({ type: "reasoning_end", chars: split.reasoning.length, ms: response.ms });
     }
 
-    const usage = session.usage();
-    const outTokens = response.usage?.completionTokens ?? 0;
     emit({
       type: "usage",
-      contextTokens: usage.tokens,
-      kvBytes: usage.kvBytes,
-      tokensPerSecond: response.ms > 0 ? (outTokens / response.ms) * 1000 : 0,
+      contextTokens: session.usage().tokens,
+      kvBytes: session.usage().kvBytes,
+      promptTokens: response.usage?.promptTokens,
+      completionTokens: response.usage?.completionTokens,
+      requestMs: response.ms,
     });
 
-    const parsed = getChannel(channel).parse(split.content, ctx, response.toolCalls);
+    const parsed: ChannelParse = codec.parse({ ...response, content: split.content }, ctx);
     if (parsed.analysis || parsed.plan) {
       emit({ type: "plan", analysis: parsed.analysis, plan: parsed.plan });
     }
@@ -261,9 +374,16 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
     for (const sample of parsed.unrecoverable) {
       emit({ type: "parse_failure", kind: "unrecoverable", sample: sample.slice(0, 200) });
     }
-    if (parsed.truncated) {
-      emit({ type: "parse_failure", kind: "truncated", sample: "" });
+    if (parsed.truncated) emit({ type: "parse_failure", kind: "truncated", sample: "" });
+    for (const sample of parsed.invalidArguments ?? []) {
+      emit({ type: "parse_failure", kind: "rejected", sample: sample.slice(0, 200) });
     }
+
+    /** Record the model's turn and a harness reply, in this channel's format. */
+    const handBack = (text: string): void => {
+      session.appendAll(codec.serializeAssistant(split.content, split.reasoning, parsed));
+      session.appendAll(codec.serializeHarnessTurn(text));
+    };
 
     // No actions: either the model leaked broken syntax, or it tried to answer
     // in prose. Both are non-terminal here.
@@ -271,46 +391,42 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
       const leaked =
         parsed.unrecoverable.length > 0 ||
         parsed.truncated ||
-        (channel === "toolcall" &&
-          looksLikeLeakedToolCall(parseToolCalls(split.content, ctx)));
-      if (leaked) {
+        (parsed.invalidArguments?.length ?? 0) > 0 ||
+        (channel === "toolcall" && looksLikeLeakedToolCall(parseToolCalls(split.content, ctx)));
+      if (leaked && parsed.unrecoverable.length === 0 && !parsed.truncated) {
         emit({ type: "parse_failure", kind: "leaked", sample: parsed.content.slice(0, 200) });
       }
       budget.recordFailure();
+      pendingDone = null;
 
-      const downgrade = budget.downgradeReason();
-      if (downgrade) {
-        const to = nextChannel(channel);
-        if (to) {
-          emit({ type: "channel_downgrade", from: channel, to, reason: downgrade });
-          channel = to;
-          budget.onChannelChange();
-        } else if (budget.exhausted) {
-          return finish("breakage_limit");
-        }
-      } else if (budget.exhausted) {
-        return finish("breakage_limit");
+      const downgrade = channelPolicy === "adaptive" ? budget.downgradeReason() : null;
+      const to = downgrade ? nextChannel(channel) : null;
+      if (downgrade && to) {
+        changeChannel(to, downgrade);
+        emit({ type: "repair", kind: "parse", reason: "channel changed", attempt: 1, max: 1 });
+        continue;
       }
+      if (budget.exhausted) return finish("breakage_limit");
 
-      session.appendAssistant({ content: split.content, reasoning: split.reasoning });
-      session.append({
-        role: "user",
-        content: repairPrompt(
+      handBack(
+        repairPrompt(
           leaked
-            ? "Your last turn did not produce a usable action. It looks like tool-call syntax that failed to parse."
+            ? "Your last turn did not produce a usable action. It looks like action syntax that failed to parse."
             : "Your last turn produced no action.",
           channel,
         ),
+      );
+      emit({
+        type: "repair",
+        kind: "parse",
+        reason: leaked ? "unparsed action" : "no action",
+        attempt: 1,
+        max: 1,
       });
-      emit({ type: "repair", reason: leaked ? "unparsed action" : "no action", attempt: 1, max: 1 });
       continue;
     }
 
     // ---- the action gate -------------------------------------------------
-    //
-    // Everything between parsing and execution happens here, and nothing gets
-    // past it partially. Each check below is a way a turn can parse cleanly and
-    // still not mean what it appears to.
     const refusals: Refusal[] = [];
 
     // A response that hit the token cap is missing its tail by definition. The
@@ -358,21 +474,17 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
     }
 
     if (refusals.length > 0) {
-      // A turn whose actions cannot be run is a lost turn, exactly like one
-      // that did not parse — so it counts against the same budget. Anything
-      // else would let a model that emits well-formed nonsense run forever.
+      // A turn whose actions cannot be run is a lost turn, exactly like one that
+      // did not parse — so it counts against the same budget. Anything else
+      // would let a model that emits well-formed nonsense run forever.
       budget.recordFailure();
       pendingDone = null;
       for (const r of refusals) {
         emit({ type: "parse_failure", kind: "rejected", sample: `${r.kind}: ${r.detail}`.slice(0, 200) });
       }
       if (budget.exhausted) return finish("breakage_limit");
-      session.appendAssistant({ content: split.content, reasoning: split.reasoning });
-      session.append({
-        role: "user",
-        content: refusalPrompt(refusals, channel),
-      });
-      emit({ type: "repair", reason: refusals[0]!.kind, attempt: 1, max: 1 });
+      handBack(refusalPrompt(refusals, channel));
+      emit({ type: "repair", kind: "refusal", reason: refusals[0]!.kind, attempt: 1, max: 1 });
       continue;
     }
 
@@ -390,19 +502,15 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
     if (doneAction) {
       if (pendingDone === null) {
         pendingDone = normalizeSummary(doneAction.summary);
-        session.appendAssistant({ content: split.content, reasoning: split.reasoning });
-        session.append({ role: "user", content: confirmationChallenge(doneAction.summary, channel) });
+        handBack(confirmationChallenge(doneAction.summary, channel));
         emit({ type: "notice", level: "info", text: "completion proposed; awaiting confirmation" });
         continue;
       }
       if (doneAction.confirm !== true) {
-        session.appendAssistant({ content: split.content, reasoning: split.reasoning });
-        session.append({
-          role: "user",
-          content:
-            "That was not a confirmation. To end the session, repeat the same summary with " +
+        handBack(
+          "That was not a confirmation. To end the session, repeat the same summary with " +
             "`confirm: true`. To keep working, take the next action instead.",
-        });
+        );
         emit({ type: "notice", level: "warn", text: "completion not confirmed; session continues" });
         continue;
       }
@@ -411,13 +519,10 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
         // harness never proposed is not a confirmation of anything.
         const proposed = pendingDone;
         pendingDone = null;
-        session.appendAssistant({ content: split.content, reasoning: split.reasoning });
-        session.append({
-          role: "user",
-          content:
-            `The confirmation did not match the summary you proposed:\n\n${proposed}\n\n` +
+        handBack(
+          `The confirmation did not match the summary you proposed:\n\n${proposed}\n\n` +
             "Repeat that summary verbatim with `confirm: true`, or keep working.",
-        });
+        );
         emit({ type: "notice", level: "warn", text: "confirmation summary did not match" });
         continue;
       }
@@ -435,11 +540,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
       validated: true,
     }));
 
-    session.appendAssistant({
-      content: parsed.content,
-      reasoning: split.reasoning,
-      toolCalls: calls.map((c) => ({ id: c.id, name: c.name, arguments: c.arguments })),
-    });
+    session.appendAll(codec.serializeAssistant(split.content, split.reasoning, parsed));
 
     let anyFailure = false;
     let combinedOutput = "";
@@ -449,7 +550,15 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
       const result = await executor.run(call, signal);
       const output = clampOutput(result.output);
       emit({ type: "tool_end", id: call.id, ok: result.ok, output, ms: Date.now() - started });
-      session.appendToolResult(call.id, output);
+      session.appendAll(
+        codec.serializeObservation({
+          callId: call.id,
+          name: call.name,
+          arguments: call.arguments,
+          output,
+          ok: result.ok,
+        }),
+      );
       combinedOutput += output;
       if (!result.ok) anyFailure = true;
     }
@@ -460,24 +569,25 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
       return finish("loop_detected");
     }
 
-    // The repair turn. Not a retry — a structured hand-back of what failed, so
-    // the model corrects rather than wanders.
+    // The tool-failure repair turn.
+    //
+    // This is a product behaviour: a command exited non-zero, and the model is
+    // handed the output rather than left to guess. It is deliberately *not* the
+    // one-repair protocol from the pruning literature, which grades a first
+    // attempt with an external test suite and shows the model the failing case
+    // exactly once. Reporting one as the other would claim a result this loop
+    // has not produced.
     if (anyFailure && repairsThisTask < maxRepairs) {
       repairsThisTask++;
-      emit({ type: "repair", reason: "tool failure", attempt: repairsThisTask, max: maxRepairs });
-      session.append({
-        role: "user",
-        content:
+      emit({ type: "repair", kind: "tool_failure", reason: "tool failure", attempt: repairsThisTask, max: maxRepairs });
+      session.appendAll(
+        codec.serializeHarnessTurn(
           "The command above failed. Read its output carefully, identify the specific cause, " +
-          "and fix it. Do not repeat the same command unchanged.",
-      });
+            "and fix it. Do not repeat the same command unchanged.",
+        ),
+      );
     } else if (!anyFailure) {
       repairsThisTask = 0;
-    }
-
-    if (session.needsCompaction()) {
-      emit({ type: "notice", level: "info", text: "compacting context" });
-      session.compact("(summary pending — the summariser lands with the skills package)");
     }
   }
 
@@ -505,12 +615,13 @@ function confirmationChallenge(summary: string, channel: ChannelId): string {
 
 function refusalPrompt(refusals: readonly Refusal[], channel: ChannelId): string {
   const lines = refusals.map((r) => `  - ${r.detail}`);
-  const advice =
-    refusals.some((r) => r.kind === "output_truncated" || r.kind === "incomplete_payload")
-      ? "Emit the whole action again from the start. Keep long arguments — patches especially — short enough to finish in one response."
-      : refusals.some((r) => r.kind === "mixed_done")
-        ? "Send either the remaining actions or `done`, not both in one turn."
-        : "Check each argument against the schema you were given: required fields, types, and no extra keys.";
+  const advice = refusals.some(
+    (r) => r.kind === "output_truncated" || r.kind === "incomplete_payload",
+  )
+    ? "Emit the whole action again from the start. Keep long arguments — patches especially — short enough to finish in one response."
+    : refusals.some((r) => r.kind === "mixed_done")
+      ? "Send either the remaining actions or `done`, not both in one turn."
+      : "Check each argument against the schema you were given: required fields, types, and no extra keys.";
   return [
     "None of the actions in that turn were run. The harness refuses a turn as a whole rather",
     "than applying part of it, so the repository is exactly as you left it.",
@@ -537,7 +648,7 @@ function hashTools(names: string[]): string {
   // Not cryptographic — just a stable fingerprint of the frozen tool list, so
   // the status line can show at a glance whether the prefix still matches.
   let h = 2166136261;
-  for (const ch of names.join(" ")) {
+  for (const ch of names.join(" ")) {
     h ^= ch.codePointAt(0)!;
     h = Math.imul(h, 16777619);
   }

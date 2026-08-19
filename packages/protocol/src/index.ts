@@ -6,3 +6,5 @@ export * from "./toolcall.js";
 export * from "./scrubber.js";
 export * from "./channel.js";
 export * from "./validate.js";
+export * from "./wire.js";
+export * from "./codec.js";

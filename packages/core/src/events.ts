@@ -63,12 +63,48 @@ export type LoopEvent =
   | { type: "tool_start"; call: ToolInvocation }
   | { type: "tool_end"; id: string; ok: boolean; output: string; ms: number }
   | { type: "hook"; event: string; label: string; ok: boolean }
-  | { type: "repair"; reason: string; attempt: number; max: number }
+  | {
+      type: "repair";
+      /**
+       * Which repair this is, because three different things were being called
+       * the same name.
+       *
+       * `parse` and `refusal` are the harness handing back a turn it could not
+       * use. `tool_failure` is the product behaviour: a command exited non-zero
+       * and the model gets its output. None of them is the one-repair protocol
+       * from the pruning literature, which grades a first attempt with an
+       * external test suite and shows the model the failing case exactly once —
+       * that lives in the evaluation layer and is counted separately, because
+       * reporting one as the other would claim a result this loop has not
+       * produced.
+       */
+      kind: "parse" | "refusal" | "tool_failure";
+      reason: string;
+      attempt: number;
+      max: number;
+    }
   | { type: "parse_failure"; kind: ParseFailureKind; sample: string }
   | { type: "channel_downgrade"; from: ChannelId; to: ChannelId; reason: string }
   | { type: "queue"; agent: string; state: "queued" | "running" | "done" }
   | { type: "prefix"; sharedChars: number; totalChars: number; invalidatedBy?: string }
-  | { type: "usage"; contextTokens: number; kvBytes: number; tokensPerSecond: number }
+  | {
+      type: "usage";
+      /** Estimated from characters. The server's count is `promptTokens`. */
+      contextTokens: number;
+      kvBytes: number;
+      /** Server-reported, when the server reports it. */
+      promptTokens?: number;
+      completionTokens?: number;
+      /**
+       * Whole-request wall time, prefill and queueing included.
+       *
+       * Deliberately not divided into a tok/s here. `completionTokens / ms` is
+       * request-effective throughput, not decode throughput, and the two differ
+       * by however long the prefill took — which on a 256K context is most of
+       * it. Whoever displays this has to say which one they mean.
+       */
+      requestMs: number;
+    }
   | { type: "loop_detected"; signature: string; repeats: number }
   | { type: "notice"; level: "info" | "warn" | "error"; text: string }
   | { type: "session_end"; reason: SessionEndReason; summary?: string };

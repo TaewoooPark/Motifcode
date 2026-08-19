@@ -49,7 +49,8 @@ export interface ContextUsage {
 }
 
 export class Session {
-  private readonly messages: Message[] = [];
+  /** Readable by codecs through `SessionView`; mutated only through this class. */
+  readonly messages: Message[] = [];
   private lastPrompt = "";
   readonly tools: Tool[];
   readonly compactAt: number;
@@ -107,25 +108,59 @@ export class Session {
     this.messages.push({ role: "tool", tool_call_id: id, content });
   }
 
-  /** Render the prompt and report how much of the previous one it shares. */
-  renderWithPrefix(): { prompt: string; sharedChars: number; totalChars: number } {
-    const prompt = renderPrompt({
+  /**
+   * The prompt as the frozen template renders it.
+   *
+   * On the raw endpoint this string *is* the request body, so the prefix
+   * statistic below and the bytes the model reads cannot drift apart.
+   */
+  render(): string {
+    return renderPrompt({
       messages: [...this.messages],
       tools: this.tools,
       addGenerationPrompt: true,
     });
-    const shared = this.lastPrompt === "" ? 0 : sharedPrefixLength(this.lastPrompt, prompt);
-    const result = { prompt, sharedChars: shared, totalChars: prompt.length };
-    this.lastPrompt = prompt;
-    return result;
   }
 
+  /**
+   * How much of this prompt the previous one shared, in characters.
+   *
+   * Characters, and reported as characters. This is textual overlap, not a
+   * server prefix-cache hit: the server tokenises, and a cache hit depends on
+   * block boundaries and eviction that this process cannot see. Calling it a
+   * cache hit rate would be inventing a measurement.
+   */
+  observePrefix(prompt: string): { sharedChars: number; totalChars: number } {
+    const shared = this.lastPrompt === "" ? 0 : sharedPrefixLength(this.lastPrompt, prompt);
+    this.lastPrompt = prompt;
+    return { sharedChars: shared, totalChars: prompt.length };
+  }
+
+  /**
+   * Begin a new segment: a new system turn and a fresh opening.
+   *
+   * Used when the action channel changes. The alternative — rewriting the old
+   * transcript into the new channel's shape — would show the model a
+   * conversation it never had, in a format it was previously told not to use.
+   * The working tree is untouched, which is the state that actually matters.
+   */
+  restart(system: string, initialMessages: Message[]): void {
+    this.messages.length = 0;
+    this.messages.push({ role: "system", content: system });
+    for (const m of initialMessages) this.messages.push(m);
+    this.lastPrompt = "";
+  }
+
+  /**
+   * Context usage, from a character estimate.
+   *
+   * `tokens` here is an estimate and is labelled as one everywhere it surfaces.
+   * The real number comes from the server's `usage.prompt_tokens`, which the
+   * loop reports separately; this exists so the status line has something to
+   * show before the first response arrives.
+   */
   usage(): ContextUsage {
-    const chars = renderPrompt({
-      messages: [...this.messages],
-      tools: this.tools,
-      addGenerationPrompt: true,
-    }).length;
+    const chars = this.render().length;
     const tokens = Math.round(chars / this.charsPerToken);
     return {
       tokens,
@@ -142,9 +177,19 @@ export class Session {
   /**
    * Append a summary segment and drop the summarised middle.
    *
-   * The system turn and the most recent exchanges are kept verbatim; everything
-   * between them collapses into one user-role note. The prefix up to the system
-   * turn survives, which is the part worth keeping.
+   * NOT WIRED UP. There is no summariser, and the loop no longer calls this.
+   *
+   * The version that shipped replaced the middle of the transcript with the
+   * literal string "(summary pending…)" — the initial task, the decisions, the
+   * file findings and every tool result between them, gone, silently, in the
+   * middle of a long task. Cutting the tail at a message boundary could also
+   * separate an assistant tool call from its result, leaving a dangling
+   * observation the template has nowhere to put.
+   *
+   * Kept because the shape is right and the summariser is the missing half. It
+   * must not be called again until that exists, tool-call groups stay atomic,
+   * and a fidelity test shows the compacted context answers the same questions
+   * about the task as the original.
    */
   compact(summary: string, keepRecent = 6): void {
     const head = this.messages[0]!;

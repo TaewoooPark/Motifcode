@@ -26,6 +26,7 @@ const MAIN = join(REPO, "packages/cli/src/main.ts");
 interface ChatBody {
   messages: { role: string; content?: string; tool_calls?: unknown[] }[];
   tools?: { function?: { name?: string } }[];
+  prompt?: string;
   model?: string;
 }
 
@@ -214,5 +215,57 @@ describe("cli process end to end", () => {
     const r = await runCli(["   ", "--endpoint", server.endpoint, "--no-hero"], dir);
     expect(r.code).toBe(2);
     expect(server.bodies).toHaveLength(0);
+  }, 30_000);
+});
+
+describe("channels are honest about what has been measured", () => {
+  let dir: string;
+  let server: MockServer;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "motif-chan-"));
+  });
+
+  afterEach(async () => {
+    await server?.stop();
+  });
+
+  it("refuses an unmeasured channel without the experimental flag", async () => {
+    server = new MockServer(() => toolCall("done", { summary: "s" }));
+    await server.start();
+    for (const chan of ["object", "raw"]) {
+      const r = await runCli(["t", "--channel", chan, "--endpoint", server.endpoint, "--no-hero"], dir);
+      expect(r.code, chan).toBe(2);
+      expect(r.stderr).toContain("never been measured");
+    }
+    expect(server.bodies).toHaveLength(0);
+  }, 30_000);
+
+  it("refuses adaptive policy without the experimental flag", async () => {
+    server = new MockServer(() => toolCall("done", { summary: "s" }));
+    await server.start();
+    const r = await runCli(
+      ["t", "--channel-policy", "adaptive", "--endpoint", server.endpoint, "--no-hero"],
+      dir,
+    );
+    expect(r.code).toBe(2);
+    expect(server.bodies).toHaveLength(0);
+  }, 30_000);
+
+  it("drives the completions endpoint once object is opted into", async () => {
+    server = new MockServer((turn) =>
+      turn === 1
+        ? '</think>{"task_complete": true, "summary": "s"}'
+        : '</think>{"task_complete": true, "summary": "s", "confirm": true}',
+    );
+    await server.start();
+    const r = await runCli(
+      ["t", "--channel", "object", "--experimental-channel", "--endpoint", server.endpoint, "--no-hero"],
+      dir,
+    );
+    expect(r.code).toBe(0);
+    expect(server.urls[0]).toBe("/v1/completions");
+    expect(server.bodies[0]).toHaveProperty("prompt");
+    expect(server.bodies[0]).not.toHaveProperty("messages");
   }, 30_000);
 });

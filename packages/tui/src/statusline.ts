@@ -56,17 +56,18 @@ function contextReading(inst: Instruments): Reading {
   const severity: Severity = frac > 0.85 ? "bad" : frac > 0.6 ? "warn" : "ok";
   return {
     label: "ctx",
-    value: `${fmtTokens(inst.contextTokens)}/${fmtTokens(inst.maxTokens)} · kv ${fmtBytes(inst.kvBytes)}`,
+    value: `${inst.contextTokensMeasured ? "" : "~"}${fmtTokens(inst.contextTokens)}/${fmtTokens(inst.maxTokens)} · kv ${fmtBytes(inst.kvBytes)}`,
     severity,
   };
 }
 
 function speedReading(inst: Instruments): Reading {
-  const tps = inst.tokensPerSecond;
-  // 33 tok/s is the reported median decode speed of a production coding agent;
-  // it is the only reference point that means anything to a user here.
+  const tps = inst.requestTokensPerSecond;
+  // Labelled `req` because it is completion tokens over the whole request,
+  // prefill and queueing included. Calling it `tok/s` invites comparison with
+  // decode rates measured a completely different way.
   const severity: Severity = tps === 0 ? "ok" : tps >= 20 ? "ok" : tps >= 10 ? "warn" : "bad";
-  return { label: "", value: tps > 0 ? `${tps.toFixed(0)} tok/s` : "—", severity };
+  return { label: "", value: tps > 0 ? `${tps.toFixed(0)} req tok/s` : "—", severity };
 }
 
 export function fmtBytes(bytes: number): string {

@@ -21,7 +21,7 @@ import {
 } from "../src/index.js";
 
 const TASK = "rename the helper and update its callers";
-const base = { tools: [...CORE_TOOLS], system: "You are motifcode.", userTask: TASK };
+const base = { tools: [...CORE_TOOLS], system: () => "You are motifcode.", userTask: TASK };
 const okExecutor: Executor = { run: async () => ({ ok: true, output: "ok" }) };
 
 function record(): { events: LoopEvent[]; emit: (e: LoopEvent) => void } {

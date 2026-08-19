@@ -59,20 +59,32 @@ How the model expresses what it wants to do is a **runtime switch**, and none of
 the three options was invented here. Each is borrowed from a harness in which
 Motif-3 posted a published score.
 
-| channel | shape | provenance |
-|---|---|---|
-| `toolcall` | native `<tool_call>{json}</tool_call>` | SWE-bench Verified **76.2** — mini-SWE-agent |
-| `object` | the whole response is `{analysis, plan, commands[], task_complete}` | Terminal-Bench 2.1 **74.9** — Terminus 2, default parser |
-| `raw` | the whole response is XML, command bodies **verbatim and unescaped** | Terminus 2's alternative parser — never measured on Motif |
+A channel is not a parser. It picks the endpoint, the request body, the stop
+sequences, and how the transcript is written down for the next turn:
+
+| channel | endpoint | assistant turn | observation | provenance |
+|---|---|---|---|---|
+| `toolcall` | `/v1/chat/completions` | native `content` + `tool_calls` | `role: "tool"` | SWE-bench Verified **76.2** — mini-SWE-agent |
+| `object` | `/v1/completions`, prompt rendered here | the model's JSON verbatim | a user turn | Terminal-Bench 2.1 **74.9** — Terminus 2, default parser |
+| `raw` | `/v1/completions`, prompt rendered here | the model's XML verbatim | a user turn | Terminus 2's alternative parser — never measured on Motif |
+
+Keeping the model's own body verbatim is the part that is easy to get wrong.
+Parse a JSON response into actions, write those actions back as native
+`tool_calls`, and from turn two the model is reading a transcript in the format
+it was told not to use.
 
 `raw` is the experiment. Terminus 2's own instructions for it read *"DO NOT
 XML-encode special characters — write them directly"*: the channel exists to
 avoid string escaping, and string escaping is exactly what this model is
 documented to get wrong. **The 74.9 was scored while paying that tax.**
 
-When the breakage budget is exceeded the session downgrades on its own,
-`toolcall → object → raw`, toward the channel that cannot suffer the failure
-being observed.
+Neither `object` nor `raw` has been run against Motif-3, so both need
+`--experimental-channel`. The default policy is `fixed`: the channel never
+changes mid-session, which is what any comparable measurement requires.
+`--channel-policy adaptive` moves toward a simpler channel after repeated parse
+failures, and that move restarts the conversation with a new system turn — the
+transcript formats are not interchangeable, and pretending otherwise would show
+the model a conversation it never had.
 
 ---
 

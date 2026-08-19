@@ -46,9 +46,19 @@ export interface Instruments {
   prefixShared: number;
   prefixTotal: number;
   contextTokens: number;
+  /** True once the server reported the count; false while it is a char estimate. */
+  contextTokensMeasured: boolean;
   maxTokens: number;
   kvBytes: number;
-  tokensPerSecond: number;
+  /**
+   * Completion tokens divided by whole-request wall time.
+   *
+   * This is request-effective throughput, not decode throughput: it includes
+   * prefill, queueing and time to first token, which on a long context is most
+   * of it. The status line says `req tok/s` for that reason. A real decode rate
+   * needs streaming, which the action path deliberately does not use.
+   */
+  requestTokensPerSecond: number;
   turn: number;
 }
 
@@ -72,7 +82,8 @@ export function initialState(): ViewState {
       contextTokens: 0,
       maxTokens: 262_144,
       kvBytes: 0,
-      tokensPerSecond: 0,
+      contextTokensMeasured: false,
+      requestTokensPerSecond: 0,
       turn: 0,
     },
     pendingThink: "",
@@ -171,11 +182,22 @@ export function reduce(state: ViewState, event: LoopEvent): ViewState {
       inst.prefixTotal = event.totalChars;
       break;
 
-    case "usage":
-      inst.contextTokens = event.contextTokens;
+    case "usage": {
+      // Prefer the server's own count; the character estimate is a placeholder
+      // for the first turn and is labelled as one.
+      if (event.promptTokens !== undefined) {
+        inst.contextTokens = event.promptTokens;
+        inst.contextTokensMeasured = true;
+      } else if (!inst.contextTokensMeasured) {
+        inst.contextTokens = event.contextTokens;
+      }
       inst.kvBytes = event.kvBytes;
-      if (event.tokensPerSecond > 0) inst.tokensPerSecond = event.tokensPerSecond;
+      const out = event.completionTokens ?? 0;
+      if (out > 0 && event.requestMs > 0) {
+        inst.requestTokensPerSecond = (out / event.requestMs) * 1000;
+      }
       break;
+    }
 
     case "loop_detected":
       cells.push({ kind: "loop", signature: event.signature, repeats: event.repeats });

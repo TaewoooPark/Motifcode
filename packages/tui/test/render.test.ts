@@ -55,7 +55,7 @@ const SESSION: LoopEvent[] = [
   { type: "prefix", sharedChars: 0, totalChars: 4200 },
   { type: "reasoning_delta", text: "forward/reverse를 나눠 피팅해야 하는데 지금은 합쳐서 돌고 있다" },
   { type: "reasoning_end", chars: 42, ms: 12400 },
-  { type: "usage", contextTokens: 4700, kvBytes: 287_000_000, tokensPerSecond: 27.4 },
+  { type: "usage", contextTokens: 4700, kvBytes: 287_000_000, promptTokens: 4700, completionTokens: 274, requestMs: 10_000 },
   {
     type: "tool_start",
     call: { id: "c1", name: "bash", arguments: { command: "rg -n 'ohe_subtract' hallbar/backend/" }, repaired: false, validated: true },
@@ -76,7 +76,7 @@ const SESSION: LoopEvent[] = [
   },
   { type: "tool_end", id: "c2", ok: false, output: "test_ohe.py: 2 failed", ms: 1900 },
   { type: "hook", event: "PostToolUse", label: "fmt", ok: true },
-  { type: "repair", reason: "tool failure", attempt: 1, max: 2 },
+  { type: "repair", kind: "tool_failure", reason: "tool failure", attempt: 1, max: 2 },
   { type: "turn_start", turn: 3 },
   { type: "parse_failure", kind: "unrecoverable", sample: '{"name": "bash", "arguments": {"command": "grep -c \\$HOME' },
   { type: "parse_failure", kind: "leaked", sample: "<tool_call>{ ??? " },
