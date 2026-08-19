@@ -1,0 +1,74 @@
+/**
+ * The event stream.
+ *
+ * The loop emits; the TUI renders; the recorder writes. Nothing downstream
+ * reaches back into the loop, which is what makes a recorded session replayable
+ * and the rendering snapshot-testable.
+ *
+ * Several event types exist only because of this model. `parse_failure` and
+ * `channel_downgrade` track a failure mode the vendor documented; `prefix`
+ * exposes cache health that a hosted API would never tell you; `repair` marks
+ * the recovery loop that a pruned checkpoint depends on.
+ */
+
+import type { Action, ChannelId } from "@motifcode/protocol";
+
+export interface ToolInvocation {
+  /** Synthesised by the harness — the model never emits ids. */
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+  /** True when the call only parsed after repair. Feeds the breakage budget. */
+  repaired: boolean;
+}
+
+export type ParseFailureKind =
+  /** No rung recovered the block. */
+  | "unrecoverable"
+  /** Zero calls, but the text still carries tool syntax — not a final answer. */
+  | "leaked"
+  /** An opener with no closer, usually a length cap. */
+  | "truncated";
+
+export type LoopEvent =
+  | {
+      type: "session_start";
+      model: string;
+      endpoint: string;
+      channel: ChannelId;
+      tools: string[];
+      /** Stable hash of the rendered tools block; the prefix lives or dies with it. */
+      toolsHash: string;
+    }
+  | { type: "turn_start"; turn: number }
+  | { type: "reasoning_delta"; text: string }
+  | { type: "content_delta"; text: string }
+  | { type: "reasoning_end"; chars: number; ms: number }
+  | { type: "plan"; analysis?: string; plan?: string }
+  | { type: "tool_start"; call: ToolInvocation }
+  | { type: "tool_end"; id: string; ok: boolean; output: string; ms: number }
+  | { type: "hook"; event: string; label: string; ok: boolean }
+  | { type: "repair"; reason: string; attempt: number; max: number }
+  | { type: "parse_failure"; kind: ParseFailureKind; sample: string }
+  | { type: "channel_downgrade"; from: ChannelId; to: ChannelId; reason: string }
+  | { type: "queue"; agent: string; state: "queued" | "running" | "done" }
+  | { type: "prefix"; sharedChars: number; totalChars: number; invalidatedBy?: string }
+  | { type: "usage"; contextTokens: number; kvBytes: number; tokensPerSecond: number }
+  | { type: "loop_detected"; signature: string; repeats: number }
+  | { type: "notice"; level: "info" | "warn" | "error"; text: string }
+  | { type: "session_end"; reason: SessionEndReason; summary?: string };
+
+export type SessionEndReason =
+  | "done"
+  | "turn_limit"
+  | "breakage_limit"
+  | "loop_detected"
+  | "aborted"
+  | "transport_error";
+
+export type EventSink = (event: LoopEvent) => void;
+
+/** Convenience for the common `action -> events` mapping. */
+export function describeAction(action: Action): string {
+  return action.kind === "done" ? "done" : action.name;
+}

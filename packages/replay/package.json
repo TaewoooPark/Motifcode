@@ -1,0 +1,13 @@
+{
+  "name": "@motifcode/replay",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Record, replay and fault-inject the model transport",
+  "main": "./src/index.ts",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@motifcode/core": "workspace:*",
+    "@motifcode/protocol": "workspace:*"
+  }
+}

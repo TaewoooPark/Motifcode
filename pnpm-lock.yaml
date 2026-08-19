@@ -21,13 +21,34 @@ importers:
         specifier: ^2.1.9
         version: 2.1.9(@types/node@22.20.1)
 
+  packages/core:
+    dependencies:
+      '@motifcode/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+
   packages/protocol: {}
+
+  packages/replay:
+    dependencies:
+      '@motifcode/core':
+        specifier: workspace:*
+        version: link:../core
+      '@motifcode/protocol':
+        specifier: workspace:*
+        version: link:../protocol
 
   packages/tools:
     dependencies:
       '@motifcode/protocol':
         specifier: workspace:*
         version: link:../protocol
+
+  packages/tui:
+    dependencies:
+      '@motifcode/core':
+        specifier: workspace:*
+        version: link:../core
 
 packages:
 

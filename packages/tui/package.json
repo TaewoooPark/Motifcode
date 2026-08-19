@@ -1,0 +1,10 @@
+{
+  "name": "@motifcode/tui",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Terminal UI: typed cells, two-region streaming, local instruments",
+  "main": "./src/index.ts",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": { "@motifcode/core": "workspace:*" }
+}

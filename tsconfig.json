@@ -6,10 +6,27 @@
     "declaration": false,
     "declarationMap": false,
     "paths": {
-      "@motifcode/protocol": ["./packages/protocol/src/index.ts"],
-      "@motifcode/tools": ["./packages/tools/src/index.ts"]
+      "@motifcode/protocol": [
+        "./packages/protocol/src/index.ts"
+      ],
+      "@motifcode/tools": [
+        "./packages/tools/src/index.ts"
+      ],
+      "@motifcode/core": [
+        "./packages/core/src/index.ts"
+      ],
+      "@motifcode/replay": [
+        "./packages/replay/src/index.ts"
+      ],
+      "@motifcode/tui": [
+        "./packages/tui/src/index.ts"
+      ]
     },
     "baseUrl": "."
   },
-  "include": ["packages/*/src/**/*.ts", "packages/*/test/**/*.ts", "vitest.config.ts"]
+  "include": [
+    "packages/*/src/**/*.ts",
+    "packages/*/test/**/*.ts",
+    "vitest.config.ts"
+  ]
 }

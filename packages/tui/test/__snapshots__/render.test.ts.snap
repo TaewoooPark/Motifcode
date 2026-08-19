@@ -1,0 +1,55 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`hero > renders the large hero 1`] = `
+" ██████   ██████    ███████    ███████████ █████ ███████████   █████████     ███████    ██████████   ██████████
+▒▒██████ ██████   ███▒▒▒▒▒███ ▒█▒▒▒███▒▒▒█▒▒███ ▒▒███▒▒▒▒▒▒█  ███▒▒▒▒▒███  ███▒▒▒▒▒███ ▒▒███▒▒▒▒███ ▒▒███▒▒▒▒▒█
+ ▒███▒█████▒███  ███     ▒▒███▒   ▒███  ▒  ▒███  ▒███   █ ▒  ███     ▒▒▒  ███     ▒▒███ ▒███   ▒▒███ ▒███  █ ▒
+ ▒███▒▒███ ▒███ ▒███      ▒███    ▒███     ▒███  ▒███████   ▒███         ▒███      ▒███ ▒███    ▒███ ▒██████
+ ▒███ ▒▒▒  ▒███ ▒███      ▒███    ▒███     ▒███  ▒███▒▒▒█   ▒███         ▒███      ▒███ ▒███    ▒███ ▒███▒▒█
+ ▒███      ▒███ ▒▒███     ███     ▒███     ▒███  ▒███  ▒    ▒▒███     ███▒▒███     ███  ▒███    ███  ▒███ ▒   █
+ █████     █████ ▒▒▒███████▒      █████    █████ █████       ▒▒█████████  ▒▒▒███████▒   ██████████   ██████████
+▒▒▒▒▒     ▒▒▒▒▒    ▒▒▒▒▒▒▒       ▒▒▒▒▒    ▒▒▒▒▒ ▒▒▒▒▒         ▒▒▒▒▒▒▒▒▒     ▒▒▒▒▒▒▒    ▒▒▒▒▒▒▒▒▒▒   ▒▒▒▒▒▒▒▒▒▒ "
+`;
+
+exports[`instruments > reports the local-only readings 1`] = `"ch object  ·  parse 2/3  ·  prefix ✓ 93%  ·  ctx 5K/262K · kv 287MB  ·  27 tok/s"`;
+
+exports[`transcript > renders a full session 1`] = `
+"──  user  ──────────────────────────────────────────────────────────────
+  hallbar 백엔드에서 OHE 배경 제거가 역방향 스윕에서 안 먹어
+
+──  session  ───────────────────────────────────────────────────────────
+  Motif-3-Coder-A13B  ·  http://zgx-1c3b:8080
+  ch toolcall  ·  tools[8] done bash read apply_patch term skill task mcp  ·  #9f3c1a20
+
+──  think  ────────────────────────────────────  12.4s · 42 chars  [tab]
+  │ forward/reverse를 나눠 피팅해야 하는데 지금은 합쳐서 돌고 있다
+
+──  bash  ────────────────────────────────────────────────────────  84ms
+  $ rg -n 'ohe_subtract' hallbar/backend/
+  hallbar/backend/ohe_subtraction.py:41  def ohe_subtract(rxy, field, ...)
+
+──  apply_patch ✗  ──────────────────────────────────  repaired · 1900ms
+  $ --- a/ohe_subtraction.py
+  $ +++ b/ohe_subtraction.py
+  test_ohe.py: 2 failed
+  ↳ hook  fmt ✓
+
+──  ↻ repair  ─────────────────────────────────────────────  attempt 1/2
+  │ tool failure — handing the result back
+
+──  ⚠ parse  ────────────────────────────────────────────  unrecoverable
+  │ {"name": "bash", "arguments": {"command": "grep -c \\$HOME
+
+──  ⚠ parse  ───────────────────────────────────────────────────  leaked
+  │ <tool_call>{ ??? 
+
+──  channel  ────────────────────────────────────────  toolcall → object
+  │ 2 consecutive parse failures
+
+──  queue  ─────────────────────────────────────────────────────────────
+  │ reviewer  queued
+
+──  end  ─────────────────────────────────────────────────────────  done
+  OHE 배경 제거를 sweep 방향별로 분리했습니다.
+"
+`;
