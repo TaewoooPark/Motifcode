@@ -1,0 +1,14 @@
+{
+  "name": "@motifcode/eval",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Immutable benchmark manifests, planned denominators, trusted grading and paired statistics",
+  "main": "./src/index.ts",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@motifcode/core": "workspace:*",
+    "@motifcode/journal": "workspace:*",
+    "@motifcode/protocol": "workspace:*"
+  }
+}

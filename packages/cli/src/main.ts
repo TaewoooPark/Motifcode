@@ -16,12 +16,18 @@ import { DEFAULT_HOOKS, type HookConfig } from "@motifcode/hooks";
 import {
   Journal,
   checkResumable,
+  distil,
   listSessions,
   loadResume,
   newHeader,
+  parseJournal,
+  toTrajectories,
+  type DistilFilter,
+  type DistilFormat,
   type ResumeState,
   type ScopeIdentity,
 } from "@motifcode/journal";
+import { readFileSync as readFile } from "node:fs";
 import {
   SAMPLING_DEFAULTS,
   systemPromptHash,
@@ -54,7 +60,7 @@ function parseArgs(argv: string[]): Args {
       if (eq !== -1) flags[a.slice(2, eq)] = a.slice(eq + 1);
       else if (argv[i + 1] && !argv[i + 1]!.startsWith("-")) flags[a.slice(2)] = argv[++i]!;
       else flags[a.slice(2)] = true;
-    } else if (rest.length === 0 && ["doctor", "sessions", "resume", "skills", "agents", "lint", "distil", "help", "version"].includes(a)) {
+    } else if (rest.length === 0 && ["doctor", "sessions", "resume", "skills", "agents", "lint", "distil", "metrics", "help", "version"].includes(a)) {
       command = a;
     } else {
       rest.push(a);
@@ -97,6 +103,8 @@ function flagInt(flags: Args["flags"], key: string, fallback: number, min: numbe
 
 const CHANNELS = ["toolcall", "object", "raw"] as const;
 const CHANNEL_POLICIES = ["fixed", "adaptive"] as const;
+const DISTIL_FORMATS = ["trajectory-jsonl", "profile-jsonl"] as const satisfies readonly DistilFormat[];
+const DISTIL_FILTERS = ["grader-passed", "grader-failed", "all"] as const satisfies readonly DistilFilter[];
 
 /** Distinguishes one delegated run from another in tool output and the journal. */
 let runSequence = 0;
@@ -172,7 +180,8 @@ const HELP = `motif ${VERSION} — a coding agent built for Motif-3
   motif skills              list available skills
   motif agents              list available subagents
   motif lint                lint the tool schemas
-  motif distil <dir>        export successful trajectories for training
+  motif distil <dir>        export graded trajectories
+  motif metrics <dir>       per-run metrics, one JSON object per line
 
 Flags
   --endpoint <url>          model server (default http://127.0.0.1:8080)
@@ -184,6 +193,16 @@ Flags
   --seed <n>                sampling seed, passed to the server
   --cwd <path>              working directory
   --no-hero                 skip the splash
+
+distil flags
+  --format <f>              trajectory-jsonl | profile-jsonl (default trajectory-jsonl)
+  --filter <f>              grader-passed | grader-failed | all (default grader-passed)
+  --include-children        also export subagent scopes
+
+A trajectory carries structured messages for training; a profile document
+carries one rendered text per line for the routing profiler. They are different
+contracts on purpose — presenting one as the other is how a profiling corpus
+ends up measuring the wrong distribution.
 
 The object and raw channels drive /v1/completions with a locally rendered
 prompt. Neither has been measured against Motif-3, so both need
@@ -262,18 +281,51 @@ async function main(): Promise<number> {
 
     case "distil": {
       const dir = args.rest[0] ?? join(cwd, CONFIG_DIR, "sessions");
-      const sessions = listSessions(dir);
-      const graded = sessions.filter((s) => s.grade?.status === "passed");
-      const ungraded = sessions.filter((s) => s.grade === undefined);
+      const format = flagEnum(args.flags, "format", DISTIL_FORMATS, "trajectory-jsonl");
+      const filter = flagEnum(args.flags, "filter", DISTIL_FILTERS, "grader-passed");
+      const includeChildren = args.flags["include-children"] === true;
+
+      let exported = 0;
+      let scanned = 0;
+      let ungraded = 0;
+      for (const s of listSessions(dir)) {
+        scanned++;
+        const parsed = parseJournal(readFile(s.path, "utf8"));
+        if (s.grade === undefined) ungraded++;
+        for (const line of distil(parsed, { format, filter, includeChildren })) {
+          process.stdout.write(line + "\n");
+          exported++;
+        }
+      }
       // Export is gated on a grader's verdict, not on the model saying `done`.
       // A session that never ran its tests, or hid a failure, would otherwise
       // become training data and profiling corpus on its own say-so.
-      for (const s of graded) process.stdout.write(`${s.path}\n`);
       process.stderr.write(
-        `${graded.length} of ${sessions.length} sessions passed a grader` +
-          (ungraded.length > 0 ? `; ${ungraded.length} were never graded and are excluded` : "") +
+        `${exported} document(s) from ${scanned} session(s) as ${format}, filter ${filter}` +
+          (ungraded > 0 && filter === "grader-passed"
+            ? `; ${ungraded} session(s) were never graded and are excluded`
+            : "") +
           "\n",
       );
+      return 0;
+    }
+
+    case "metrics": {
+      const dir = args.rest[0] ?? join(cwd, CONFIG_DIR, "sessions");
+      for (const s of listSessions(dir)) {
+        const parsed = parseJournal(readFile(s.path, "utf8"));
+        for (const t of toTrajectories(parsed)) {
+          process.stdout.write(
+            JSON.stringify({
+              runId: t.runId,
+              scopeId: t.scopeId,
+              endReason: t.agentResult.endReason,
+              grade: t.grade.status,
+              metrics: t.metrics,
+            }) + "\n",
+          );
+        }
+      }
       return 0;
     }
 

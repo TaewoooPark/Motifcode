@@ -19,6 +19,7 @@ export default defineConfig({
       "@motifcode/hooks": pkg("hooks"),
       "@motifcode/journal": pkg("journal"),
       "@motifcode/cli": pkg("cli"),
+      "@motifcode/eval": pkg("eval"),
     },
   },
   test: {

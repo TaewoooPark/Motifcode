@@ -63,6 +63,18 @@ importers:
         specifier: workspace:*
         version: link:../protocol
 
+  packages/eval:
+    dependencies:
+      '@motifcode/core':
+        specifier: workspace:*
+        version: link:../core
+      '@motifcode/journal':
+        specifier: workspace:*
+        version: link:../journal
+      '@motifcode/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+
   packages/hooks: {}
 
   packages/journal:

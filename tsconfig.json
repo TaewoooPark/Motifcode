@@ -35,6 +35,9 @@
       ],
       "@motifcode/cli": [
         "./packages/cli/src/index.ts"
+      ],
+      "@motifcode/eval": [
+        "./packages/eval/src/index.ts"
       ]
     },
     "baseUrl": "."
