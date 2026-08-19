@@ -1,209 +1,340 @@
 #!/usr/bin/env python3
-"""Choose which experts to keep, from two routing profiles.
+"""Choosing which experts to keep.
 
-Takes a target profile (agentic coding) and a reference profile (general chat,
-reasoning, Korean) and ranks experts by how much more the target needs them.
+The previous version offered three criteria — `count`, `mass` and `blend` — and
+described them as three independent methods to be compared. They were not. All
+three were a ratio of a target corpus to a reference corpus, so all three shared
+the same failure: an expert that both corpora lean on heavily scores near 1.0
+and gets dropped, even though every token depends on it. The pruning literature
+saw exactly that collapse pushing pure contrast to 50% on Qwen. Three criteria
+agreeing is not corroboration when they are the same criterion.
 
-Why contrastive
----------------
-Motif-3 was trained with explicit load balancing, so raw usage is close to
-uniform by construction and ranking by it finds nothing. What survives that
-flattening is the *difference* between corpora: an expert that fires
-disproportionately on coding is one the coding model needs, even when both
-absolute rates sit near 1/384.
+What replaces them is a family with an actual spread of assumptions:
 
-Three criteria, deliberately
-----------------------------
-The literature is blunt about this: the winning selection strategy flipped
-between the two model families that have been studied, so a recipe validated
-elsewhere cannot be assumed to transfer. Produce all three, prune all three,
-measure all three. Picking one on taste is how you spend a rental on a wrong
-answer.
+  `reap`          absolute saliency: the gate weight an expert received times
+                  the norm of what it produced, summed. A direct estimate of how
+                  much the residual stream changes if the expert disappears.
+                  The production default.
+  `gate_mass`     absolute routing flow on the target corpus, ignoring output
+                  magnitude. Cheaper, and disagrees with REAP where an expert is
+                  chosen often but contributes little.
+  `man`           mean activation norm: output magnitude, ignoring gate weight.
+                  The other half of REAP, useful for telling which half is
+                  carrying the ranking.
+  `guard_reap`    protect the experts the *reference* corpus most depends on,
+                  then spend the remaining budget on target REAP. This is the
+                  one that directly answers the contrast failure: general
+                  capability is preserved by construction rather than by hope.
+  `hybrid_share`  F_T^2 / (F_T + F_R + eps): rewards target flow while refusing
+                  to drop an expert with large absolute flow anywhere.
+  `random`        the control. Multi-seed, same per-layer budget.
+  `contrastive`   the old default, kept as a *negative* control so its failure
+                  can be measured instead of assumed.
 
-  `count`   contrastive selection frequency. Includes the load-balancing bias,
-            since selection is `topk(scores + expert_bias)`.
-  `mass`    contrastive gate weight. The bias does not enter the returned
-            scores, so this reflects how hard the model leans on an expert once
-            it has picked it.
-  `blend`   geometric mean of the two, for when they disagree and neither is
-            obviously right.
-
-Per-layer, not global
----------------------
-Allocation is per layer by default. A global ranking can empty one layer's
-expert bank while leaving another untouched, and a layer with two surviving
-experts is a different model, not a smaller one. `--global-alloc` exists so the
-alternative can be measured rather than assumed away.
-
-Output
-------
-`{"criterion": ..., "keep_ratio": ..., "layers": {"3": [sorted expert ids], ...}}`
-
-`surgery.py` consumes it. Ids are sorted ascending within each layer so the
-surviving router logits keep their relative order.
+The exact formula for each is written into the output, because "REAP" means
+several things in the wild and a keep-list whose definition is implicit cannot
+be reproduced.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
-import math
 from pathlib import Path
+from typing import Callable
 
-# A floor for the reference rate, so an expert the reference corpus never
-# touched does not produce a division by zero and an infinite score. Set it
-# below any plausible real rate: with 384 experts and top-8, uniform usage is
-# about 2e-2, so 1e-9 is far under the noise.
-EPS = 1e-9
+import numpy as np
+
+from stats import ProfileError, ProfileManifest, comparable, load_profile
+
+EPS = 1e-12
+
+# The formula, verbatim, for the manifest. A name is not a definition.
+FORMULAS: dict[str, str] = {
+    "reap": "sum_over_routed_tokens(g_e(x) * ||f_e(x)||_2), target corpus",
+    "gate_mass": "sum_over_routed_tokens(g_e(x)), target corpus",
+    "man": "norm_sum[e] / max(counts[e], 1), target corpus",
+    "guard_reap": "reference gate_mass top-N protected, remainder ranked by target reap",
+    "hybrid_share": "F_T^2 / (F_T + F_R + eps) where F = gate_sum",
+    "random": "uniform sample of the same per-layer size, seeded",
+    "contrastive": "(target_rate / reference_rate) — NEGATIVE CONTROL, see module docstring",
+}
+
+CRITERIA = tuple(FORMULAS)
+
+# Which criteria need a reference profile at all. Asking for one when it is not
+# used invites the belief that it was.
+NEEDS_REFERENCE = {"guard_reap", "hybrid_share", "contrastive"}
 
 
-def load_profile(path: Path) -> dict:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    for key in ("layers", "num_experts", "tokens"):
-        if key not in data:
-            raise ValueError(f"{path}: profile is missing '{key}'")
-    return data
+class SelectionError(ValueError):
+    """A selection that must not be written. Never a warning."""
 
 
-def _normalise(values: list[float], total: float) -> list[float]:
-    """Rate per token, so corpora of different sizes compare."""
-    if total <= 0:
-        return [0.0] * len(values)
-    return [v / total for v in values]
+def _layer_index(manifest: ProfileManifest, layer: int) -> int:
+    return manifest.moe_layers.index(layer)
+
+
+def _rate(values: np.ndarray, tokens: int) -> np.ndarray:
+    """Per-token rate, so corpora of different sizes can be compared at all."""
+    return values / max(tokens, 1)
 
 
 def score_layer(
-    target: dict, reference: dict, layer: str, criterion: str, num_experts: int
-) -> list[float]:
-    t = target["layers"].get(layer)
-    r = reference["layers"].get(layer)
-    if t is None:
-        raise ValueError(f"target profile has no layer {layer}")
-    if r is None:
-        # A layer the reference never reached tells us nothing contrastive;
-        # fall back to raw target usage rather than inventing a ratio.
-        r = {"count": [0.0] * num_experts, "mass": [0.0] * num_experts}
+    criterion: str,
+    layer: int,
+    target: tuple[dict, ProfileManifest],
+    reference: tuple[dict, ProfileManifest] | None,
+) -> np.ndarray:
+    stats_t, man_t = target
+    i = _layer_index(man_t, layer)
 
-    def ratio(field: str) -> list[float]:
-        tv = _normalise([float(x) for x in t[field]], float(target["tokens"]))
-        rv = _normalise([float(x) for x in r[field]], float(reference["tokens"]))
-        return [tvi / (rvi + EPS) for tvi, rvi in zip(tv, rv)]
+    if criterion == "reap":
+        return np.asarray(stats_t["reap_sum"][i], dtype=np.float64)
 
-    if criterion == "count":
-        return ratio("count")
-    if criterion == "mass":
-        return ratio("mass")
-    if criterion == "blend":
-        c = ratio("count")
-        m = ratio("mass")
-        # Geometric mean: a criterion that is high on one axis and near zero on
-        # the other should not win on the average of the two.
-        return [math.sqrt(max(a, 0.0) * max(b, 0.0)) for a, b in zip(c, m)]
-    raise ValueError(f"unknown criterion: {criterion}")
+    if criterion == "gate_mass":
+        return np.asarray(stats_t["gate_sum"][i], dtype=np.float64)
 
+    if criterion == "man":
+        counts = np.maximum(np.asarray(stats_t["counts"][i], dtype=np.float64), 1.0)
+        return np.asarray(stats_t["norm_sum"][i], dtype=np.float64) / counts
 
-def select_per_layer(
-    target: dict, reference: dict, criterion: str, keep_ratio: float
-) -> dict[str, list[int]]:
-    num_experts = int(target["num_experts"])
-    keep_n = max(1, round(num_experts * keep_ratio))
-    out: dict[str, list[int]] = {}
-    for layer in sorted(target["layers"], key=int):
-        scores = score_layer(target, reference, layer, criterion, num_experts)
-        ranked = sorted(range(num_experts), key=lambda e: scores[e], reverse=True)
-        # Ascending ids: the router's surviving logits must keep their relative
-        # order, or the slice silently permutes experts.
-        out[layer] = sorted(ranked[:keep_n])
-    return out
+    if reference is None:
+        raise SelectionError(f"criterion {criterion!r} needs a reference profile")
+    stats_r, man_r = reference
+    j = _layer_index(man_r, layer)
+
+    if criterion == "hybrid_share":
+        ft = _rate(np.asarray(stats_t["gate_sum"][i], dtype=np.float64), man_t.total_tokens)
+        fr = _rate(np.asarray(stats_r["gate_sum"][j], dtype=np.float64), man_r.total_tokens)
+        # Squaring the numerator is what keeps this from collapsing to a ratio:
+        # an expert with large absolute target flow stays high even when the
+        # reference uses it just as much.
+        return (ft * ft) / (ft + fr + EPS)
+
+    if criterion == "contrastive":
+        ft = _rate(np.asarray(stats_t["gate_sum"][i], dtype=np.float64), man_t.total_tokens)
+        fr = _rate(np.asarray(stats_r["gate_sum"][j], dtype=np.float64), man_r.total_tokens)
+        return ft / (fr + EPS)
+
+    raise SelectionError(f"unknown criterion {criterion!r}")
 
 
-def select_global(
-    target: dict, reference: dict, criterion: str, keep_ratio: float
-) -> dict[str, list[int]]:
-    """Rank across all layers at once, then allocate what falls out.
+def keep_for_layer(
+    criterion: str,
+    layer: int,
+    keep_n: int,
+    target: tuple[dict, ProfileManifest],
+    reference: tuple[dict, ProfileManifest] | None,
+    seed: int,
+    guard_n: int,
+) -> list[int]:
+    stats_t, man_t = target
+    n_experts = man_t.num_experts
 
-    Kept so the per-layer default can be compared against something rather than
-    merely asserted. Watch the per-layer counts it produces: an emptied layer is
-    a broken model, not a smaller one.
+    if criterion == "random":
+        # Its own generator, seeded from (seed, layer), so a random control is
+        # reproducible and two layers do not receive the same "random" set.
+        rng = np.random.default_rng(abs(hash((seed, layer, "random"))) % (2**63))
+        return sorted(int(e) for e in rng.choice(n_experts, size=keep_n, replace=False))
+
+    if criterion == "guard_reap":
+        if reference is None:
+            raise SelectionError("guard_reap needs a reference profile")
+        stats_r, man_r = reference
+        j = _layer_index(man_r, layer)
+        # Protect what general use depends on most, then spend what is left on
+        # the target. The guard is the whole point: it makes preservation of
+        # off-domain capability a property of the construction rather than
+        # something to be discovered afterwards on a benchmark.
+        ref_flow = np.asarray(stats_r["gate_sum"][j], dtype=np.float64)
+        guarded = set(int(e) for e in _rank(ref_flow, layer, seed)[: min(guard_n, keep_n)])
+        target_scores = score_layer("reap", layer, target, None)
+        chosen = list(guarded)
+        for e in _rank(target_scores, layer, seed):
+            if len(chosen) >= keep_n:
+                break
+            if int(e) not in guarded:
+                chosen.append(int(e))
+        return sorted(chosen[:keep_n])
+
+    scores = score_layer(criterion, layer, target, reference)
+    return sorted(int(e) for e in _rank(scores, layer, seed)[:keep_n])
+
+
+def _rank(scores: np.ndarray, layer: int, seed: int) -> np.ndarray:
+    """Rank descending, breaking ties deterministically but not by index.
+
+    `argsort` breaks ties by expert id, which is a real bias: with a
+    load-balanced router many experts score identically, and preferring low ids
+    means the surviving bank is skewed toward one end of the original ordering
+    for no reason anyone chose. A seeded hash per (layer, expert) breaks them
+    arbitrarily and reproducibly instead.
     """
-    num_experts = int(target["num_experts"])
-    layers = sorted(target["layers"], key=int)
-    flat: list[tuple[float, str, int]] = []
-    for layer in layers:
-        scores = score_layer(target, reference, layer, criterion, num_experts)
-        flat.extend((scores[e], layer, e) for e in range(num_experts))
-    total_keep = max(len(layers), round(len(flat) * keep_ratio))
-    flat.sort(key=lambda x: x[0], reverse=True)
-    chosen: dict[str, list[int]] = {layer: [] for layer in layers}
-    for _score, layer, e in flat[:total_keep]:
-        chosen[layer].append(e)
-    for layer in layers:
-        # Never leave a layer with nothing: a MoE layer needs at least top-k
-        # experts to route to, and a layer below that is a crash, not a result.
-        if len(chosen[layer]) < 8:
-            scores = score_layer(target, reference, layer, criterion, num_experts)
-            ranked = sorted(range(num_experts), key=lambda e: scores[e], reverse=True)
-            for e in ranked:
-                if e not in chosen[layer]:
-                    chosen[layer].append(e)
-                if len(chosen[layer]) >= 8:
-                    break
-        chosen[layer] = sorted(chosen[layer])
-    return chosen
+    n = scores.shape[0]
+    jitter = np.empty(n, dtype=np.float64)
+    for e in range(n):
+        digest = hashlib.sha256(f"{seed}:{layer}:{e}".encode()).digest()
+        jitter[e] = int.from_bytes(digest[:8], "big") / 2**64
+    order = np.lexsort((jitter, -scores))
+    return order
+
+
+def select(
+    criterion: str,
+    keep_ratio: float,
+    target: tuple[dict, ProfileManifest],
+    reference: tuple[dict, ProfileManifest] | None,
+    seed: int,
+    guard_n: int,
+) -> dict[str, list[int]]:
+    stats_t, man_t = target
+    keep_n = round(man_t.num_experts * keep_ratio)
+    _check_inputs(criterion, keep_ratio, keep_n, target, reference)
+    return {
+        str(layer): keep_for_layer(criterion, layer, keep_n, target, reference, seed, guard_n)
+        for layer in man_t.moe_layers
+    }
+
+
+def _check_inputs(
+    criterion: str,
+    keep_ratio: float,
+    keep_n: int,
+    target: tuple[dict, ProfileManifest],
+    reference: tuple[dict, ProfileManifest] | None,
+) -> None:
+    """Fail before writing anything, not after."""
+    problems: list[str] = []
+    _, man_t = target
+
+    if criterion not in CRITERIA:
+        problems.append(f"unknown criterion {criterion!r}; known: {', '.join(CRITERIA)}")
+    if not 0 < keep_ratio <= 1:
+        problems.append(f"keep_ratio must be in (0, 1]; got {keep_ratio}")
+    if keep_n < man_t.experts_top_k:
+        # A layer with fewer experts than the router selects per token is not a
+        # smaller model, it is a crash.
+        problems.append(
+            f"keep_ratio {keep_ratio} leaves {keep_n} experts, below top_k={man_t.experts_top_k}"
+        )
+    if criterion in NEEDS_REFERENCE and reference is None:
+        problems.append(f"criterion {criterion!r} needs --reference")
+    if criterion not in NEEDS_REFERENCE and reference is not None:
+        # Silently ignoring it would let someone believe the reference corpus
+        # influenced a selection that never looked at it.
+        problems.append(
+            f"criterion {criterion!r} does not use a reference profile; passing one is misleading"
+        )
+    if reference is not None:
+        problems.extend(comparable(man_t, reference[1]))
+
+    if problems:
+        raise SelectionError("; ".join(problems))
 
 
 def summarise(keep: dict[str, list[int]], num_experts: int) -> str:
-    sizes = [len(v) for v in keep.values()]
-    overlap: set[int] | None = None
+    sizes = {len(v) for v in keep.values()}
+    shared: set[int] | None = None
     for ids in keep.values():
-        overlap = set(ids) if overlap is None else (overlap & set(ids))
+        shared = set(ids) if shared is None else shared & set(ids)
     return (
-        f"layers {len(keep)} · keep {min(sizes)}–{max(sizes)} of {num_experts} · "
-        f"shared across every layer {len(overlap or set())}"
+        f"layers {len(keep)} · keep {sorted(sizes)} of {num_experts} · "
+        f"shared by every layer {len(shared or set())}"
     )
+
+
+def keep_list_document(
+    keep: dict[str, list[int]],
+    criterion: str,
+    keep_ratio: float,
+    seed: int,
+    guard_n: int,
+    target: ProfileManifest,
+    reference: ProfileManifest | None,
+) -> dict:
+    payload = {
+        "schema_version": "motifcode.keeplist/v1",
+        "criterion": criterion,
+        "formula": FORMULAS[criterion],
+        "keep_ratio": keep_ratio,
+        "allocation": "per-layer",
+        "seed": seed,
+        "guard_n": guard_n if criterion == "guard_reap" else None,
+        "num_experts": target.num_experts,
+        "experts_top_k": target.experts_top_k,
+        "source_revision": target.source_revision,
+        "target_corpus_sha256": target.corpus_manifest_sha256,
+        "reference_corpus_sha256": reference.corpus_manifest_sha256 if reference else None,
+        "layers": keep,
+    }
+    payload["keep_list_sha256"] = hashlib.sha256(
+        json.dumps(payload["layers"], sort_keys=True).encode()
+    ).hexdigest()
+    return payload
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("--target", type=Path, required=True, help="agentic coding profile")
-    ap.add_argument("--reference", type=Path, required=True, help="general profile")
-    ap.add_argument(
-        "--criterion", default="blend", choices=["count", "mass", "blend"], help="ranking"
-    )
+    ap.add_argument("--target", type=Path, required=True, help="profile.stats.safetensors")
+    ap.add_argument("--reference", type=Path, help="a second profile, for guard/hybrid/contrast")
+    ap.add_argument("--criterion", default="reap", choices=CRITERIA)
     ap.add_argument("--keep-ratio", type=float, default=0.5)
-    ap.add_argument("--global-alloc", action="store_true", help="rank across layers, not within")
+    ap.add_argument("--seed", type=int, default=17, help="tie-breaks and the random control")
+    ap.add_argument(
+        "--guard-n",
+        type=int,
+        default=96,
+        help="guard_reap: how many reference-critical experts to protect per layer",
+    )
+    ap.add_argument(
+        "--global-alloc",
+        action="store_true",
+        help="unsupported; see the error it produces",
+    )
     ap.add_argument("--out", type=Path, required=True)
     args = ap.parse_args()
 
+    if args.global_alloc:
+        # Refused here, before anything is read or written. Global allocation
+        # gives layers different survivor counts, and `num_experts` is a single
+        # value in config.json that every loader and every fused kernel reads.
+        # A keep-list this tool cannot turn into a loadable checkpoint should
+        # not be produced at all.
+        raise SystemExit(
+            "--global-alloc is not supported: it produces a different expert count per layer, "
+            "and config.json, the checkpoint tensor shapes, the activation-scale sidecar and the "
+            "fused MoE kernels all assume one `num_experts` for the whole model. Making it work "
+            "is a redesign of all four, not a flag."
+        )
+
     target = load_profile(args.target)
-    reference = load_profile(args.reference)
-    if target["num_experts"] != reference["num_experts"]:
-        raise SystemExit("profiles disagree on num_experts")
+    reference = load_profile(args.reference) if args.reference else None
 
-    keep = (
-        select_global(target, reference, args.criterion, args.keep_ratio)
-        if args.global_alloc
-        else select_per_layer(target, reference, args.criterion, args.keep_ratio)
+    try:
+        keep = select(
+            args.criterion, args.keep_ratio, target, reference, args.seed, args.guard_n
+        )
+    except (SelectionError, ProfileError) as err:
+        raise SystemExit(f"selection refused: {err}") from err
+
+    doc = keep_list_document(
+        keep,
+        args.criterion,
+        args.keep_ratio,
+        args.seed,
+        args.guard_n,
+        target[1],
+        reference[1] if reference else None,
     )
-
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(
-        json.dumps(
-            {
-                "criterion": args.criterion,
-                "keep_ratio": args.keep_ratio,
-                "allocation": "global" if args.global_alloc else "per-layer",
-                "num_experts": target["num_experts"],
-                "layers": keep,
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-    print(summarise(keep, int(target["num_experts"])))
-    print(f"wrote {args.out}")
+    args.out.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(summarise(keep, target[1].num_experts))
+    print(f"criterion {args.criterion}: {FORMULAS[args.criterion]}")
+    print(f"wrote {args.out}  (keep-list sha256 {doc['keep_list_sha256'][:16]}…)")
 
 
 if __name__ == "__main__":
