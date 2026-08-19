@@ -25,6 +25,16 @@ import {
 export interface SessionOptions {
   system: string;
   tools: Tool[];
+  /**
+   * Turns that follow the system turn when the session opens.
+   *
+   * For a new session this is exactly one user message: the task. It is a
+   * separate turn rather than an appendix to the system prompt for two
+   * reasons — folding user text into the system role erases the boundary a
+   * prompt-injection defence depends on, and a per-session system turn breaks
+   * the cached prefix that the frozen tool list exists to protect.
+   */
+  initialMessages?: Message[];
   /** Fraction of the window at which compaction is considered. */
   compactAt?: number;
   /** Rough characters-per-token, until the real tokenizer is wired in. */
@@ -53,6 +63,7 @@ export class Session {
     this.compactAt = opts.compactAt ?? 0.85;
     this.charsPerToken = opts.charsPerToken ?? 3.6;
     this.messages.push({ role: "system", content: opts.system });
+    for (const m of opts.initialMessages ?? []) this.messages.push(m);
   }
 
   get history(): readonly Message[] {

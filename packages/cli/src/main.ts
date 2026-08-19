@@ -55,6 +55,42 @@ function flagStr(flags: Args["flags"], key: string, fallback: string): string {
   return typeof v === "string" ? v : fallback;
 }
 
+/** Raised for bad usage. Reported as one line and exit 2, never as a stack. */
+class UsageError extends Error {}
+
+function flagEnum<T extends string>(
+  flags: Args["flags"],
+  key: string,
+  allowed: readonly T[],
+  fallback: T,
+): T {
+  const v = flags[key];
+  if (v === undefined) return fallback;
+  if (typeof v !== "string" || !allowed.includes(v as T)) {
+    throw new UsageError(`--${key} must be one of ${allowed.join(", ")}; got ${String(v)}`);
+  }
+  return v as T;
+}
+
+function flagInt(flags: Args["flags"], key: string, fallback: number, min: number): number {
+  const v = flags[key];
+  if (v === undefined) return fallback;
+  const n = typeof v === "string" ? Number(v) : NaN;
+  if (!Number.isInteger(n) || n < min) {
+    throw new UsageError(`--${key} must be an integer >= ${min}; got ${String(v)}`);
+  }
+  return n;
+}
+
+const CHANNELS = ["toolcall", "object", "raw"] as const;
+
+/** Distinguishes one delegated run from another in tool output and the journal. */
+let runSequence = 0;
+function nextRunId(prefix: string): string {
+  runSequence += 1;
+  return `${prefix}-${String(runSequence).padStart(3, "0")}`;
+}
+
 /* ------------------------------------------------------------------ */
 
 const CONFIG_DIR = ".motif";
@@ -236,7 +272,8 @@ async function main(): Promise<number> {
     return 2;
   }
 
-  const channel = flagStr(args.flags, "channel", "toolcall") as ChannelId;
+  const channel: ChannelId = flagEnum(args.flags, "channel", CHANNELS, "toolcall");
+  const maxTurns = flagInt(args.flags, "max-turns", 100, 1);
   const skills = loadSkills(cwd);
   const agents = new AgentRegistry();
   agents.registerAll(BUILTIN_AGENTS);
@@ -276,29 +313,59 @@ async function main(): Promise<number> {
     hooks,
     skills,
     onHook: (label, ok) => emit({ type: "hook", event: "PostToolUse", label, ok }),
-    runAgent: (name, prompt) =>
-      scheduler.submit(name, prompt, async () => {
-        const def = agents.get(name);
-        if (!def) return `no such subagent: ${name}. Available: ${agents.list().map((a) => a.name).join(", ")}`;
-        const sub = await runLoop({
-          transport,
-          tools: def.tools,
-          system: buildAgentPrompt({
-            name: def.name,
-            instructions: def.instructions,
+    runAgent: async (name, prompt) => {
+      const def = agents.get(name);
+      if (!def) {
+        // No generation at all for an unknown name: spawning a loop to
+        // discover the agent does not exist costs a model round-trip and
+        // produces a summary the parent would have to distrust anyway.
+        return {
+          ok: false,
+          reason: "unknown_agent",
+          runId: "-",
+          summary: `no such subagent: ${name}. Available: ${agents.list().map((a) => a.name).join(", ")}`,
+        };
+      }
+      const runId = nextRunId(`sub-${def.name}`);
+      return scheduler.submit(name, prompt, async () => {
+        // Its own executor, and its own `close()`. A child that throws or is
+        // aborted still leaves a persistent shell behind unless the cleanup is
+        // in `finally`.
+        const childExecutor = new ToolExecutor({ cwd, skills });
+        try {
+          const sub = await runLoop({
+            transport,
             tools: def.tools,
+            // The system prompt carries the role. The delegated task is a user
+            // turn, exactly as the parent's own task is — a child that only
+            // receives its role instructions has been told who it is and never
+            // told what to do.
+            system: buildAgentPrompt({
+              name: def.name,
+              instructions: def.instructions,
+              tools: def.tools,
+              channel,
+              cwd,
+            }),
+            userTask: prompt,
+            executor: childExecutor,
+            // Subagent events are journalled but not painted: the parent's
+            // screen shows the queue, not the child's transcript.
+            emit: (e) => journal.record(e),
             channel,
-            cwd,
-          }),
-          executor: new ToolExecutor({ cwd, skills }),
-          // Subagent events are journalled but not painted: the parent's screen
-          // shows the queue, not the child's transcript.
-          emit: (e) => journal.record(e),
-          channel,
-          maxTurns: def.maxTurns ?? 25,
-        });
-        return sub.summary ?? `(subagent ended: ${sub.reason})`;
-      }),
+            maxTurns: def.maxTurns ?? 25,
+          });
+          return {
+            ok: sub.reason === "done",
+            reason: sub.reason,
+            runId,
+            ...(sub.summary !== undefined ? { summary: sub.summary } : {}),
+          };
+        } finally {
+          childExecutor.close();
+        }
+      });
+    },
   });
 
   try {
@@ -313,10 +380,11 @@ async function main(): Promise<number> {
         projectNotes: loadProjectNotes(cwd),
         cwd,
       }),
+      userTask: task,
       executor,
       emit,
       channel,
-      maxTurns: Number(flagStr(args.flags, "max-turns", "100")),
+      maxTurns,
     });
     return result.reason === "done" ? 0 : 1;
   } finally {
@@ -327,7 +395,14 @@ async function main(): Promise<number> {
 
 main()
   .then((code) => process.exit(code))
-  .catch((err) => {
-    process.stderr.write(`${String(err)}\n`);
+  .catch((err: unknown) => {
+    // Bad usage gets one line and exit 2; anything else is a real failure and
+    // keeps its message. Neither prints a stack — a stack trace tells a user
+    // nothing about a mistyped flag.
+    if (err instanceof UsageError) {
+      process.stderr.write(`${err.message}\n`);
+      process.exit(2);
+    }
+    process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
     process.exit(1);
   });

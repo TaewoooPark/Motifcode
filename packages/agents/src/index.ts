@@ -81,6 +81,10 @@ export interface QueueEntry {
   result?: string;
 }
 
+function describe(value: unknown): string {
+  return typeof value === "string" ? value : JSON.stringify(value);
+}
+
 /**
  * Runs subagents with a concurrency cap.
  *
@@ -101,11 +105,11 @@ export class AgentScheduler {
     return this.queue;
   }
 
-  async submit(
+  async submit<T>(
     agent: string,
     prompt: string,
-    run: (agent: string, prompt: string) => Promise<string>,
-  ): Promise<string> {
+    run: (agent: string, prompt: string) => Promise<T>,
+  ): Promise<T> {
     const entry: QueueEntry = { agent, prompt, state: "queued" };
     this.queue.push(entry);
     this.onChange?.(entry);
@@ -120,7 +124,7 @@ export class AgentScheduler {
     try {
       const result = await run(agent, prompt);
       entry.state = "done";
-      entry.result = result;
+      entry.result = describe(result);
       this.onChange?.(entry);
       return result;
     } catch (err) {

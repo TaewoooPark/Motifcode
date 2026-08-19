@@ -50,6 +50,16 @@ export interface LoopOptions {
   transport: Transport;
   tools: Tool[];
   system: string;
+  /**
+   * The task this session exists to perform, verbatim.
+   *
+   * Required, and required to be non-blank. A session whose first request is
+   * system-only asks the model to work on nothing, and every downstream
+   * artifact — trajectory, benchmark row, profiling corpus — inherits that
+   * emptiness while still looking like a real run. The one honest way to stop
+   * that is to make the task impossible to omit.
+   */
+  userTask: string;
   executor: Executor;
   emit: EventSink;
   channel?: ChannelId;
@@ -58,6 +68,14 @@ export interface LoopOptions {
   /** Retries for a server that died mid-session; GB10 makes this routine. */
   maxServerRetries?: number;
   signal?: AbortSignal;
+}
+
+/** Thrown before any model request when the caller supplied no task. */
+export class EmptyTaskError extends Error {
+  constructor() {
+    super("a session needs a non-empty task: the first user message cannot be blank");
+    this.name = "EmptyTaskError";
+  }
 }
 
 export interface LoopResult {
@@ -111,8 +129,16 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
     signal,
   } = opts;
 
+  if (opts.userTask.trim() === "") throw new EmptyTaskError();
+
   let channel: ChannelId = opts.channel ?? "toolcall";
-  const session = new Session({ system, tools });
+  // `system -> user(task)`. The task keeps its own turn and its own bytes: the
+  // exact string the caller passed is what the model reads.
+  const session = new Session({
+    system,
+    tools,
+    initialMessages: [{ role: "user", content: opts.userTask }],
+  });
   const budget = new BreakageBudget();
   const guard = new LoopGuard();
   const ctx = repairContext(tools);

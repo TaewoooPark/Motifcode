@@ -20,12 +20,28 @@ import type { Executor, ToolResult, ToolInvocation } from "@motifcode/core";
 import { runHooks, runShell, wasBlocked, type HookConfig } from "@motifcode/hooks";
 import type { SkillRegistry } from "@motifcode/skills";
 
+/**
+ * What a delegated run reports back.
+ *
+ * Structured rather than a bare string because a child that hit its turn limit,
+ * lost the server or was aborted has *also* produced text, and folding that into
+ * a plain summary makes an abandoned subtask read to the parent as a finished
+ * one. `ok` is true only when the child actually called `done`.
+ */
+export interface SubagentOutcome {
+  ok: boolean;
+  /** The child's `AgentResult.endReason`. */
+  reason: string;
+  summary?: string;
+  runId: string;
+}
+
 export interface ExecutorOptions {
   cwd: string;
   hooks?: HookConfig;
   skills?: SkillRegistry;
   /** Runs a subagent; supplied by the CLI so this module stays loop-agnostic. */
-  runAgent?: (agent: string, prompt: string) => Promise<string>;
+  runAgent?: (agent: string, prompt: string) => Promise<SubagentOutcome>;
   /** Called for MCP proxy calls. Absent means no servers are connected. */
   callMcp?: (server: string, method: string, args: unknown) => Promise<string>;
   onHook?: (label: string, ok: boolean) => void;
@@ -210,8 +226,19 @@ export class ToolExecutor implements Executor {
       case "task": {
         const run = this.opts.runAgent;
         if (!run) return { ok: false, output: "subagents are not available in this session" };
+        const prompt = str(args, "prompt");
+        if (prompt.trim() === "") {
+          // Rejected before anything is spawned: a child with no task burns a
+          // model run to produce a summary of nothing.
+          return { ok: false, output: "task needs a non-empty `prompt`; nothing was delegated" };
+        }
         try {
-          return { ok: true, output: await run(str(args, "agent"), str(args, "prompt")) };
+          const out = await run(str(args, "agent"), prompt);
+          const head = `[${out.runId}] `;
+          if (!out.ok) {
+            return { ok: false, output: `${head}subagent did not finish (${out.reason})${out.summary ? `: ${out.summary}` : ""}` };
+          }
+          return { ok: true, output: `${head}${out.summary ?? "(no summary)"}` };
         } catch (err) {
           return { ok: false, output: String(err) };
         }

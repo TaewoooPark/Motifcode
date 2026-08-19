@@ -163,6 +163,50 @@ describe("executor", () => {
     expect(r.output).toContain("not available");
   });
 
+  it("refuses to delegate an empty prompt", async () => {
+    // A child with no task still costs a model run, and comes back with a
+    // summary of nothing that the parent has no way to recognise as empty.
+    let spawned = 0;
+    const ex = new ToolExecutor({
+      cwd,
+      runAgent: async () => {
+        spawned++;
+        return { ok: true, reason: "done", runId: "r1", summary: "s" };
+      },
+    });
+    const r = await ex.run({ id: "1", name: "task", arguments: { agent: "explorer", prompt: "  " }, repaired: false });
+    ex.close();
+    expect(r.ok).toBe(false);
+    expect(spawned).toBe(0);
+  });
+
+  it("reports an unfinished subagent as a tool failure, not a summary", async () => {
+    // A child that hit its turn limit has also produced text. Folding that into
+    // an ok result makes an abandoned subtask read to the parent as a finished
+    // one, which is exactly the confusion the parent cannot detect.
+    const ex = new ToolExecutor({
+      cwd,
+      runAgent: async () => ({ ok: false, reason: "turn_limit", runId: "r7", summary: "got partway" }),
+    });
+    const r = await ex.run({ id: "1", name: "task", arguments: { agent: "explorer", prompt: "look" }, repaired: false });
+    ex.close();
+    expect(r.ok).toBe(false);
+    expect(r.output).toContain("turn_limit");
+    expect(r.output).toContain("r7");
+  });
+
+  it("passes a finished subagent's summary through with its run id", async () => {
+    const ex = new ToolExecutor({
+      cwd,
+      runAgent: async () => ({ ok: true, reason: "done", runId: "r8", summary: "found it in parse.ts" }),
+    });
+    const r = await ex.run({ id: "1", name: "task", arguments: { agent: "explorer", prompt: "look" }, repaired: false });
+    ex.close();
+    expect(r.ok).toBe(true);
+    expect(r.output).toContain("found it in parse.ts");
+    expect(r.output).toContain("r8");
+  });
+
   it("lets a PreToolUse hook veto a call", async () => {
     const ex = new ToolExecutor({
       cwd,

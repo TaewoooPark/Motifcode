@@ -120,7 +120,7 @@ Needs Node 20+ and pnpm.
 
 ```bash
 pnpm install
-pnpm test          # 176 TypeScript tests
+pnpm test          # TypeScript unit, integration and CLI end-to-end tests
 pnpm lint:tools    # schema linter — fails the build on loose schemas
 pnpm typecheck
 

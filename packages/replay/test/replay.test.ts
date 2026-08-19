@@ -20,7 +20,8 @@ import {
   toolCallBody,
 } from "../src/index.js";
 
-const base = { tools: [...CORE_TOOLS], system: "You are motifcode." };
+const TASK = "rename the helper and update its callers";
+const base = { tools: [...CORE_TOOLS], system: "You are motifcode.", userTask: TASK };
 const okExecutor: Executor = { run: async () => ({ ok: true, output: "ok" }) };
 
 function record(): { events: LoopEvent[]; emit: (e: LoopEvent) => void } {
@@ -57,7 +58,8 @@ describe("record then replay", () => {
     const first = live.exchanges[0]!;
     expect(first.request.toolNames[0]).toBe("done");
     expect(first.request.toolNames).toHaveLength(CORE_TOOLS.length);
-    expect(first.request.lastRole).toBe("system");
+    // The task is the last thing the model reads before it is asked to act.
+    expect(first.request.lastRole).toBe("user");
   });
 
   it("fails loudly when the recording runs short", async () => {

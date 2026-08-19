@@ -13,8 +13,14 @@ __pycache__/
 *.gguf
 # goldens are committed on purpose: CI must run without Python
 
-# Pruning handoff notes and work products. The guide is personal planning; the
-# work directory holds profiles, keep-lists and checkpoints — none of it belongs
-# in the repository.
-model_guide.md
+# Pruning work products: profiles, keep-lists and checkpoints. The normative
+# guide itself is tracked at docs/model_guide.md — code and guide drift only
+# gets caught in review if both are in the same commit.
 prune-work/
+
+# Patch handoff and working notes — process documents, not deliverables.
+PATCH_HANDOFF.md
+HANDOFF*.md
+NOTES*.md
+WORKLOG*.md
+scratch/

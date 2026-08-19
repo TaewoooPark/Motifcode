@@ -11,7 +11,14 @@
 import { describe, expect, it } from "vitest";
 import { CORE_TOOLS } from "@motifcode/tools";
 import { FaultTransport, ScriptedTransport, doneBody, toolCallBody } from "@motifcode/replay";
-import { runLoop, resetIds, clampOutput, type Executor, type LoopEvent } from "../src/index.js";
+import {
+  EmptyTaskError,
+  runLoop,
+  resetIds,
+  clampOutput,
+  type Executor,
+  type LoopEvent,
+} from "../src/index.js";
 
 function collect() {
   const events: LoopEvent[] = [];
@@ -21,11 +28,55 @@ function collect() {
 const okExecutor: Executor = { run: async () => ({ ok: true, output: "ok" }) };
 const failExecutor: Executor = { run: async () => ({ ok: false, output: "error: no such file" }) };
 
-const base = { tools: [...CORE_TOOLS], system: "You are motifcode." };
+const TASK = "fix the failing test in src/parse.ts";
+const base = { tools: [...CORE_TOOLS], system: "You are motifcode.", userTask: TASK };
 
 function kinds(events: LoopEvent[], type: LoopEvent["type"]) {
   return events.filter((e) => e.type === type);
 }
+
+describe("the task reaches the model", () => {
+  it("opens the conversation with system then the exact user task", async () => {
+    // The whole harness is downstream of this. A first request that carries
+    // only a system turn asks the model to work on nothing, and every
+    // trajectory, benchmark row and profiling document built on top of it
+    // inherits that while still looking like a real run.
+    const { emit } = collect();
+    const transport = new ScriptedTransport([doneBody("x"), doneBody("x", { confirm: true })]);
+    await runLoop({ ...base, transport, executor: okExecutor, emit });
+
+    const first = transport.seen[0]!;
+    expect(first.messages.map((m) => m.role)).toEqual(["system", "user"]);
+    expect(first.messages[1]!.content).toBe(TASK);
+  });
+
+  it("keeps the task byte-for-byte, including newlines and non-ASCII", async () => {
+    const task = "패치를 적용해줘:\n\n```\n\\$HOME\t<tag> & \"quote\"\n```\n";
+    const { emit } = collect();
+    const transport = new ScriptedTransport([doneBody("x"), doneBody("x", { confirm: true })]);
+    await runLoop({ ...base, userTask: task, transport, executor: okExecutor, emit });
+    expect(transport.seen[0]!.messages[1]!.content).toBe(task);
+  });
+
+  it("keeps the task out of the system turn", async () => {
+    // Folding user text into the system role erases the boundary a
+    // prompt-injection defence depends on, and gives every session its own
+    // system prefix — which is the cached prefix, gone.
+    const { emit } = collect();
+    const transport = new ScriptedTransport([doneBody("x"), doneBody("x", { confirm: true })]);
+    await runLoop({ ...base, transport, executor: okExecutor, emit });
+    expect(String(transport.seen[0]!.messages[0]!.content)).not.toContain(TASK);
+  });
+
+  it("refuses a blank task before any request is made", async () => {
+    const { emit } = collect();
+    const transport = new ScriptedTransport([doneBody("x")]);
+    await expect(
+      runLoop({ ...base, userTask: "   \n ", transport, executor: okExecutor, emit }),
+    ).rejects.toBeInstanceOf(EmptyTaskError);
+    expect(transport.seen).toHaveLength(0);
+  });
+});
 
 describe("happy path", () => {
   it("runs a tool then finishes on confirmed done", async () => {
