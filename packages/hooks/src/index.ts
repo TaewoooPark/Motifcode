@@ -15,7 +15,7 @@
  * ladder was built from.
  */
 
-import { spawn } from "node:child_process";
+import { runShell } from "./spawn.js";
 
 export type HookEvent =
   | "SessionStart"
@@ -82,62 +82,27 @@ export function selectHooks(config: HookConfig, ctx: HookContext): HookDef[] {
 }
 
 export async function runHook(def: HookDef, ctx: HookContext): Promise<HookOutcome> {
-  const started = Date.now();
-  return new Promise((resolve) => {
-    const child = spawn(def.command, {
-      shell: true,
-      cwd: ctx.cwd ?? process.cwd(),
-      env: {
-        ...process.env,
-        MOTIF_EVENT: ctx.event,
-        MOTIF_TOOL: ctx.tool ?? "",
-        MOTIF_PATHS: (ctx.paths ?? []).join(" "),
-        MOTIF_PAYLOAD: ctx.payload ?? "",
-      },
-    });
-
-    let out = "";
-    const cap = (chunk: Buffer) => {
-      // Hook output is advisory; a runaway hook must not eat the context.
-      // Slice the chunk rather than testing before appending — a single read
-      // can be 64 KB, so checking the length first still lets the whole thing
-      // through once.
-      const room = OUTPUT_CAP - out.length;
-      if (room <= 0) return;
-      out += chunk.toString().slice(0, room);
-    };
-    child.stdout?.on("data", cap);
-    child.stderr?.on("data", cap);
-
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-    }, def.timeoutMs ?? DEFAULT_TIMEOUT);
-
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      const ok = code === 0;
-      resolve({
-        command: def.command,
-        label: label(def.command),
-        ok,
-        output: out.trim(),
-        ms: Date.now() - started,
-        blocked: !ok && def.blocking === true && ctx.event === "PreToolUse",
-      });
-    });
-
-    child.on("error", (err) => {
-      clearTimeout(timer);
-      resolve({
-        command: def.command,
-        label: label(def.command),
-        ok: false,
-        output: String(err),
-        ms: Date.now() - started,
-        blocked: def.blocking === true && ctx.event === "PreToolUse",
-      });
-    });
+  const result = await runShell(def.command, {
+    cwd: ctx.cwd ?? process.cwd(),
+    env: {
+      ...process.env,
+      MOTIF_EVENT: ctx.event,
+      MOTIF_TOOL: ctx.tool ?? "",
+      MOTIF_PATHS: (ctx.paths ?? []).join(" "),
+      MOTIF_PAYLOAD: ctx.payload ?? "",
+    },
+    timeoutMs: def.timeoutMs ?? DEFAULT_TIMEOUT,
+    outputCap: OUTPUT_CAP,
   });
+  const ok = result.code === 0 && !result.timedOut;
+  return {
+    command: def.command,
+    label: label(def.command),
+    ok,
+    output: result.output.trim(),
+    ms: result.ms,
+    blocked: !ok && def.blocking === true && ctx.event === "PreToolUse",
+  };
 }
 
 /** Run every matching hook in order, stopping if a blocking one vetoes. */
@@ -150,6 +115,8 @@ export async function runHooks(config: HookConfig, ctx: HookContext): Promise<Ho
   }
   return outcomes;
 }
+
+export { runShell } from "./spawn.js";
 
 export function wasBlocked(outcomes: readonly HookOutcome[]): boolean {
   return outcomes.some((o) => o.blocked);

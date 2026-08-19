@@ -17,7 +17,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Executor, ToolResult, ToolInvocation } from "@motifcode/core";
-import { runHooks, wasBlocked, type HookConfig } from "@motifcode/hooks";
+import { runHooks, runShell, wasBlocked, type HookConfig } from "@motifcode/hooks";
 import type { SkillRegistry } from "@motifcode/skills";
 
 export interface ExecutorOptions {
@@ -100,24 +100,14 @@ export class PersistentShell {
 /* ------------------------------------------------------------------ */
 
 async function runBash(command: string, cwd: string, timeoutMs: number): Promise<ToolResult> {
-  return new Promise((resolveResult) => {
-    const child = spawn(command, { shell: true, cwd });
-    let out = "";
-    const cap = (c: Buffer) => {
-      if (out.length < 200_000) out += c.toString();
-    };
-    child.stdout?.on("data", cap);
-    child.stderr?.on("data", cap);
-    const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      resolveResult({ ok: code === 0, output: out.trim() || `(exit ${code})` });
-    });
-    child.on("error", (err) => {
-      clearTimeout(timer);
-      resolveResult({ ok: false, output: String(err) });
-    });
-  });
+  // Same process-group handling as hooks: a command that spawns children and
+  // then times out would otherwise hang the loop on Linux, which is where this
+  // actually runs.
+  const r = await runShell(command, { cwd, timeoutMs });
+  if (r.timedOut) {
+    return { ok: false, output: `${r.output.trim()}\n(killed after ${Math.round(r.ms / 1000)}s)`.trim() };
+  }
+  return { ok: r.code === 0, output: r.output.trim() || `(exit ${r.code})` };
 }
 
 function readSlice(path: string, cwd: string, offset?: number, limit?: number): ToolResult {

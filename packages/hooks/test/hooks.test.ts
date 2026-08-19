@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { runHook, runHooks, selectHooks, wasBlocked, type HookConfig } from "../src/index.js";
+import { runHook, runHooks, runShell, selectHooks, wasBlocked, type HookConfig } from "../src/index.js";
 
 describe("matching", () => {
   const config: HookConfig = {
@@ -98,4 +98,26 @@ describe("blocking", () => {
     // nothing left to block.
     expect(wasBlocked(outcomes)).toBe(false);
   });
+});
+
+describe("process groups", () => {
+  it("kills grandchildren, not just the shell", async () => {
+    // `shell: true` gives you a shell, not your command. Killing the shell
+    // leaves `sleep` running, and on Linux it holds the inherited pipes open so
+    // `close` never fires and the caller hangs forever. macOS happened to work,
+    // which is why this only failed in CI — on the platform we deploy to.
+    const started = Date.now();
+    const out = await runHook(
+      { command: "sleep 30 & sleep 30 & wait", timeoutMs: 150 },
+      { event: "PostToolUse" },
+    );
+    expect(out.ok).toBe(false);
+    expect(Date.now() - started).toBeLessThan(3000);
+  }, 8000);
+
+  it("reports a timeout as a failure with its partial output", async () => {
+    const r = await runShell("echo before; sleep 30", { timeoutMs: 200 });
+    expect(r.timedOut).toBe(true);
+    expect(r.output).toContain("before");
+  }, 8000);
 });
