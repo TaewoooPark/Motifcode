@@ -11,6 +11,7 @@
  */
 
 import { KV_BYTES_PER_TOKEN, MAX_CONTEXT, SAMPLING_DEFAULTS } from "@motifcode/protocol";
+import { detectSandbox } from "./sandbox.js";
 
 export type CheckState = "ok" | "warn" | "fail" | "unknown";
 
@@ -38,6 +39,21 @@ export async function doctor(opts: DoctorOptions): Promise<Check[]> {
   const fetchImpl = opts.fetchImpl ?? globalThis.fetch;
   const endpoint = opts.endpoint.replace(/\/+$/, "");
   const checks: Check[] = [];
+
+  // Reported whether or not a server is reachable: it decides whether a
+  // read-only subagent can run anything at all, and a user who finds out at the
+  // moment the explorer refuses will not know why.
+  const sandbox = detectSandbox();
+  checks.push(
+    sandbox.kind === "none"
+      ? {
+          name: "sandbox",
+          state: "warn",
+          detail: `no read-only sandbox: ${sandbox.reason ?? "unavailable"}`,
+          fix: "read-only subagents cannot run commands here; install bubblewrap on Linux, or use only writing agents",
+        }
+      : { name: "sandbox", state: "ok", detail: `read-only agents run under ${sandbox.kind}` },
+  );
 
   let models: ModelsResponse | null = null;
   try {

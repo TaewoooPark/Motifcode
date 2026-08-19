@@ -7,6 +7,7 @@
  */
 
 import type { Cell, ViewState } from "./cells.js";
+import { sanitize } from "./sanitize.js";
 import { displayWidth, truncateEndToWidth, truncateToWidth } from "./width.js";
 
 export interface RenderOptions {
@@ -46,7 +47,20 @@ function summarizeArgs(args: Record<string, unknown>): string {
   return truncateToWidth(v, 400);
 }
 
+/**
+ * Cells to lines, with every byte made safe to print.
+ *
+ * The sanitiser runs on the finished lines rather than on each untrusted field,
+ * so nothing can be added later that forgets to call it. The harness's own
+ * decoration — box-drawing characters, the rules — is printable text and passes
+ * through unchanged; the writer adds ANSI styling afterwards, which is the only
+ * ANSI that reaches the terminal.
+ */
 export function renderCell(cell: Cell, opts: RenderOptions): string[] {
+  return renderCellRaw(cell, opts).map(sanitize);
+}
+
+function renderCellRaw(cell: Cell, opts: RenderOptions): string[] {
   const width = opts.width;
   const outputLines = opts.outputLines ?? DEFAULTS.outputLines;
 
@@ -208,5 +222,5 @@ export function renderTail(state: ViewState, opts: RenderOptions): string[] {
   const last = state.pendingThink.split("\n").filter((l) => l.trim() !== "").pop() ?? "";
   const room = Math.max(10, opts.width - 12);
   const preview = truncateEndToWidth(last, room);
-  return [`  think │ ${preview}`];
+  return [sanitize(`  think │ ${preview}`)];
 }

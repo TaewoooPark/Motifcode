@@ -1,6 +1,7 @@
 export * from "./width.js";
 export * from "./hero.js";
 export * from "./cells.js";
+export * from "./sanitize.js";
 export * from "./render.js";
 export * from "./statusline.js";
 export * from "./stream.js";

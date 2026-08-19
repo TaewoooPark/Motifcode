@@ -1,24 +1,29 @@
 /**
  * Tool execution.
  *
- * The eight frozen tools, made real. Two of them are worth explaining.
+ * The eight frozen tools, made real, behind two boundaries the model cannot
+ * argue with: every call has already passed its registered schema, and every
+ * call is checked against the agent's execution policy before anything runs.
  *
  * `bash` is stateless: a fresh subshell per call, no directory or environment
  * carried between them. That is the shape SWE-bench Verified 76.2 was scored
  * in, and it is cache-friendly and easy to reason about.
  *
  * `term` is stateful: one long-lived shell that keeps its working directory,
- * its environment and any program running inside it. Terminal-Bench 74.9 was
- * scored that way, and it is the difference between being able to drive a
- * debugger or a REPL and not.
+ * its environment and any program running inside it. It is a pipe, not a
+ * pseudo-terminal, and the tool description says so — a full-screen program
+ * will not render, and advertising otherwise sends the model into an
+ * interaction that cannot work.
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Executor, ToolResult, ToolInvocation } from "@motifcode/core";
-import { runHooks, runShell, wasBlocked, type HookConfig } from "@motifcode/hooks";
+import { runHooks, runShell, wasBlocked, type HookConfig, type HookEvent } from "@motifcode/hooks";
 import type { SkillRegistry } from "@motifcode/skills";
+import { approve, fullPolicy, type ExecutionPolicy } from "./policy.js";
+import { detectSandbox, makeScratch } from "./sandbox.js";
 
 /**
  * What a delegated run reports back.
@@ -40,23 +45,29 @@ export interface ExecutorOptions {
   cwd: string;
   hooks?: HookConfig;
   skills?: SkillRegistry;
+  /**
+   * What this agent may do.
+   *
+   * Defaults to full access for the root session, which owns the working
+   * directory it was pointed at. Subagents get a narrower one.
+   */
+  policy?: ExecutionPolicy;
   /** Runs a subagent; supplied by the CLI so this module stays loop-agnostic. */
   runAgent?: (agent: string, prompt: string) => Promise<SubagentOutcome>;
   /** Called for MCP proxy calls. Absent means no servers are connected. */
   callMcp?: (server: string, method: string, args: unknown) => Promise<string>;
-  onHook?: (label: string, ok: boolean) => void;
+  onHook?: (event: HookEvent, label: string, ok: boolean) => void;
   timeoutMs?: number;
 }
 
 /**
- * Read an argument that the validator has already checked.
+ * Read an argument the validator has already checked.
  *
  * No coercion. `String(v)` used to turn a number into a plausible command and
  * `Number(v)` used to turn `"abc"` into a NaN timeout, both of which produced a
  * call the model never made. Every invocation reaching this module carries the
  * `validated` marker, so a missing or wrong-typed value here is a harness bug
- * rather than model output, and the empty-string fallback is a last resort that
- * should be unreachable.
+ * rather than model output.
  */
 function str(args: Record<string, unknown>, key: string): string {
   const v = args[key];
@@ -70,65 +81,181 @@ function num(args: Record<string, unknown>, key: string): number | undefined {
 
 /* ------------------------------------------------------------------ */
 
+/** Control keys in tmux notation, as Terminus 2 specifies them. */
+const CONTROL_KEY = /^C-([a-z])$/;
+
+/**
+ * Split keystrokes into literal text and control keys.
+ *
+ * A blanket `replace(/C-([a-z])/g, ...)` rewrote the notation anywhere it
+ * appeared, so `echo "press C-c to quit"` sent an actual interrupt instead of
+ * printing the sentence. Control notation is only a control key when it stands
+ * alone as a token.
+ */
+export function encodeKeystrokes(input: string): string {
+  if (input === "") return "";
+  return input
+    .split(/(\s+)/)
+    .map((token) => {
+      const m = CONTROL_KEY.exec(token);
+      if (!m) return token;
+      return String.fromCharCode(m[1]!.toLowerCase().charCodeAt(0) - 96);
+    })
+    .join("");
+}
+
+export interface TerminalSend {
+  output: string;
+  alive: boolean;
+  exitCode?: number;
+}
+
 /**
  * A shell that stays alive between calls.
  *
  * Not a PTY: without a pseudo-terminal, full-screen programs will not render.
- * Saying so plainly is better than pretending — a REPL, a debugger and a
- * long-running build all work, and `vim` does not.
+ * A REPL, a debugger and a long-running build all work, and `vim` does not.
+ *
+ * Output is read through a monotonic cursor rather than by clearing a buffer.
+ * The old code emptied the buffer before each send, so anything that arrived
+ * late — the tail of the previous command, a background job's line — was
+ * either lost or attributed to the wrong call.
  */
 export class PersistentShell {
   private proc: ChildProcess | null = null;
   private buffer = "";
+  private cursor = 0;
+  private exitCode: number | undefined;
+  private exited = false;
 
   constructor(private readonly cwd: string) {}
 
   private ensure(): ChildProcess {
-    if (this.proc && !this.proc.killed) return this.proc;
+    if (this.proc !== null && !this.exited) return this.proc;
     const proc = spawn(process.env["SHELL"] ?? "/bin/bash", ["-i"], {
       cwd: this.cwd,
       env: { ...process.env, PS1: "", TERM: "dumb" },
       stdio: ["pipe", "pipe", "pipe"],
+      detached: true,
     });
+    this.buffer = "";
+    this.cursor = 0;
+    this.exited = false;
+    this.exitCode = undefined;
     const capture = (c: Buffer) => {
       this.buffer += c.toString();
-      if (this.buffer.length > 200_000) this.buffer = this.buffer.slice(-100_000);
+      // Trim from the front, and move the cursor with it, so a long-running
+      // session cannot grow without bound and cannot lose its place either.
+      if (this.buffer.length > 400_000) {
+        const drop = this.buffer.length - 200_000;
+        this.buffer = this.buffer.slice(drop);
+        this.cursor = Math.max(0, this.cursor - drop);
+      }
     };
     proc.stdout?.on("data", capture);
     proc.stderr?.on("data", capture);
+    proc.on("exit", (code) => {
+      this.exited = true;
+      this.exitCode = code ?? undefined;
+    });
+    proc.on("error", () => {
+      this.exited = true;
+    });
     this.proc = proc;
     return proc;
   }
 
-  /** Send keystrokes verbatim, wait, and return whatever appeared. */
-  async send(keystrokes: string, durationS: number): Promise<string> {
+  get alive(): boolean {
+    return this.proc !== null && !this.exited;
+  }
+
+  /** Send keystrokes verbatim, wait, and return everything that arrived since. */
+  async send(
+    keystrokes: string,
+    durationS: number,
+    signal?: AbortSignal,
+  ): Promise<TerminalSend> {
     const proc = this.ensure();
-    this.buffer = "";
-    if (keystrokes !== "") {
-      // tmux-style control keys, as Terminus 2 specifies them.
-      const resolved = keystrokes.replace(/C-([a-z])/g, (_m, ch: string) =>
-        String.fromCharCode(ch.toLowerCase().charCodeAt(0) - 96),
-      );
-      proc.stdin?.write(resolved);
-    }
+    if (keystrokes !== "") proc.stdin?.write(encodeKeystrokes(keystrokes));
+
     const wait = Math.min(Math.max(durationS, 0), 60) * 1000;
-    await new Promise((r) => setTimeout(r, wait));
-    return this.buffer;
+    await new Promise<void>((r) => {
+      const timer = setTimeout(done, wait);
+      const onAbort = () => done();
+      function done(): void {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        r();
+      }
+      if (signal?.aborted) done();
+      else signal?.addEventListener("abort", onAbort, { once: true });
+    });
+
+    const output = this.buffer.slice(this.cursor);
+    this.cursor = this.buffer.length;
+    return {
+      output,
+      alive: this.alive,
+      ...(this.exitCode !== undefined ? { exitCode: this.exitCode } : {}),
+    };
   }
 
   close(): void {
-    this.proc?.kill();
+    const pid = this.proc?.pid;
+    if (pid !== undefined) {
+      // The group, not the leader: a shell that started a build leaves the
+      // build running if only the shell is signalled.
+      try {
+        process.kill(-pid, "SIGKILL");
+      } catch {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          /* already gone */
+        }
+      }
+    }
     this.proc = null;
+    this.exited = true;
   }
 }
 
 /* ------------------------------------------------------------------ */
 
-async function runBash(command: string, cwd: string, timeoutMs: number): Promise<ToolResult> {
+async function runBash(
+  command: string,
+  cwd: string,
+  timeoutMs: number,
+  policy: ExecutionPolicy,
+  scratch: () => string,
+  signal?: AbortSignal,
+): Promise<ToolResult> {
   // Same process-group handling as hooks: a command that spawns children and
   // then times out would otherwise hang the loop on Linux, which is where this
   // actually runs.
-  const r = await runShell(command, { cwd, timeoutMs });
+  let argv: string[] | undefined;
+  if (!policy.allowWrite) {
+    const wrapped = detectSandbox().wrap(command, { cwd, scratch: scratch() });
+    if (!wrapped) {
+      return {
+        ok: false,
+        output:
+          "this agent is read-only and no read-only sandbox is available on this host, " +
+          "so running a program cannot be made safe. Install bubblewrap (Linux), or delegate " +
+          "the work to an agent that is allowed to write.",
+      };
+    }
+    argv = wrapped.slice(1);
+    command = wrapped[0]!;
+  }
+
+  const r = await runShell(command, {
+    cwd,
+    timeoutMs,
+    ...(argv ? { argv } : {}),
+    ...(signal ? { signal } : {}),
+  });
+  if (r.aborted) return { ok: false, output: `${r.output.trim()}\n(cancelled)`.trim() };
   if (r.timedOut) {
     return { ok: false, output: `${r.output.trim()}\n(killed after ${Math.round(r.ms / 1000)}s)`.trim() };
   }
@@ -150,7 +277,7 @@ function readSlice(path: string, cwd: string, offset?: number, limit?: number): 
   }
 }
 
-/** Files a unified diff touches, for the hook environment. */
+/** Files a unified diff touches, for the hook payload. */
 export function patchPaths(patch: string): string[] {
   const paths = new Set<string>();
   for (const line of patch.split("\n")) {
@@ -165,30 +292,60 @@ export function patchPaths(patch: string): string[] {
 export class ToolExecutor implements Executor {
   private readonly shell: PersistentShell;
   private readonly timeoutMs: number;
+  private readonly policy: ExecutionPolicy;
+  private scratch: string | undefined;
+
+  /** The one writable directory a sandboxed command gets, created on demand. */
+  private scratchDir(): string {
+    this.scratch ??= makeScratch();
+    return this.scratch;
+  }
 
   constructor(private readonly opts: ExecutorOptions) {
     this.shell = new PersistentShell(opts.cwd);
     this.timeoutMs = opts.timeoutMs ?? 120_000;
+    this.policy =
+      opts.policy ??
+      fullPolicy(opts.cwd, ["done", "bash", "read", "apply_patch", "term", "skill", "task", "mcp"]);
   }
 
-  async run(call: ToolInvocation): Promise<ToolResult> {
+  async run(call: ToolInvocation, signal?: AbortSignal): Promise<ToolResult> {
     const { cwd, hooks } = this.opts;
-    const args = call.arguments;
+
+    // Policy first. A call the agent is not allowed to make should not reach a
+    // hook, which might have side effects of its own.
+    const decision = approve(this.policy, call);
+    if (!decision.allowed) {
+      return { ok: false, output: `refused by execution policy: ${decision.reason}` };
+    }
 
     if (hooks) {
-      const pre = await runHooks(hooks, { event: "PreToolUse", tool: call.name, cwd });
-      for (const h of pre) this.opts.onHook?.(h.label, h.ok);
+      const pre = await runHooks(hooks, {
+        event: "PreToolUse",
+        tool: call.name,
+        cwd,
+        payload: { arguments: call.arguments },
+        ...(signal ? { signal } : {}),
+      });
+      for (const h of pre) this.opts.onHook?.("PreToolUse", h.label, h.ok);
       if (wasBlocked(pre)) {
         return { ok: false, output: `blocked by a PreToolUse hook: ${pre[pre.length - 1]?.output ?? ""}` };
       }
     }
 
-    const result = await this.dispatch(call.name, args);
+    const result = await this.dispatch(call, signal);
 
     if (hooks) {
-      const paths = call.name === "apply_patch" ? patchPaths(str(args, "patch")) : [];
-      const post = await runHooks(hooks, { event: "PostToolUse", tool: call.name, paths, cwd });
-      for (const h of post) this.opts.onHook?.(h.label, h.ok);
+      const paths = call.name === "apply_patch" ? patchPaths(str(call.arguments, "patch")) : [];
+      const post = await runHooks(hooks, {
+        event: "PostToolUse",
+        tool: call.name,
+        paths,
+        cwd,
+        payload: { ok: result.ok },
+        ...(signal ? { signal } : {}),
+      });
+      for (const h of post) this.opts.onHook?.("PostToolUse", h.label, h.ok);
       // Hook output is appended, not merged: a failing formatter is information
       // the model should see without it looking like the tool itself failed.
       const failed = post.filter((h) => !h.ok);
@@ -202,29 +359,50 @@ export class ToolExecutor implements Executor {
     return result;
   }
 
-  private async dispatch(name: string, args: Record<string, unknown>): Promise<ToolResult> {
+  private async dispatch(call: ToolInvocation, signal?: AbortSignal): Promise<ToolResult> {
     const cwd = this.opts.cwd;
-    switch (name) {
+    const args = call.arguments;
+    switch (call.name) {
       case "bash":
-        return runBash(str(args, "command"), cwd, (num(args, "timeout_s") ?? 120) * 1000);
+        return runBash(
+          str(args, "command"),
+          cwd,
+          (num(args, "timeout_s") ?? 120) * 1000,
+          this.policy,
+          () => this.scratchDir(),
+          signal,
+        );
 
       case "term": {
-        const out = await this.shell.send(str(args, "keystrokes"), num(args, "duration_s") ?? 1);
-        return { ok: true, output: out || "(no output yet — send empty keystrokes to wait longer)" };
+        const r = await this.shell.send(str(args, "keystrokes"), num(args, "duration_s") ?? 1, signal);
+        if (!r.alive) {
+          // Saying so beats returning empty output that reads as "nothing
+          // happened yet" for the rest of the session.
+          return {
+            ok: false,
+            output: `${r.output}\n(the terminal session has exited${r.exitCode !== undefined ? ` with code ${r.exitCode}` : ""}; the next \`term\` call will start a fresh shell)`.trim(),
+          };
+        }
+        return { ok: true, output: r.output || "(no output yet — send empty keystrokes to wait longer)" };
       }
 
       case "read":
         return readSlice(str(args, "path"), cwd, num(args, "offset"), num(args, "limit"));
 
-      case "apply_patch":
-        // `git apply` rather than a bespoke patcher: it already understands
-        // context, renames and binary files, and its errors are ones people
-        // know how to read.
-        return runBash(
-          `git apply --whitespace=nowarn - <<'MOTIF_PATCH_EOF'\n${str(args, "patch")}\nMOTIF_PATCH_EOF`,
+      case "apply_patch": {
+        // argv and stdin, never a shell. The patch is data: a heredoc
+        // delimiter, a backtick or a `$(...)` inside it is text here, and a
+        // program if it goes through a shell.
+        const r = await runShell("git", {
+          argv: ["apply", "--whitespace=nowarn", "-"],
           cwd,
-          this.timeoutMs,
-        );
+          stdin: str(args, "patch"),
+          timeoutMs: this.timeoutMs,
+          ...(signal ? { signal } : {}),
+        });
+        if (r.aborted) return { ok: false, output: "(cancelled)" };
+        return { ok: r.code === 0, output: r.output.trim() || (r.code === 0 ? "applied" : `(exit ${r.code})`) };
+      }
 
       case "skill": {
         const reg = this.opts.skills;
@@ -245,7 +423,10 @@ export class ToolExecutor implements Executor {
           const out = await run(str(args, "agent"), prompt);
           const head = `[${out.runId}] `;
           if (!out.ok) {
-            return { ok: false, output: `${head}subagent did not finish (${out.reason})${out.summary ? `: ${out.summary}` : ""}` };
+            return {
+              ok: false,
+              output: `${head}subagent did not finish (${out.reason})${out.summary ? `: ${out.summary}` : ""}`,
+            };
           }
           return { ok: true, output: `${head}${out.summary ?? "(no summary)"}` };
         } catch (err) {
@@ -254,8 +435,8 @@ export class ToolExecutor implements Executor {
       }
 
       case "mcp": {
-        const call = this.opts.callMcp;
-        if (!call) return { ok: false, output: "no MCP servers are connected" };
+        const callMcp = this.opts.callMcp;
+        if (!callMcp) return { ok: false, output: "no MCP servers are connected" };
         let parsed: unknown = {};
         const raw = str(args, "args");
         if (raw) {
@@ -266,7 +447,7 @@ export class ToolExecutor implements Executor {
           }
         }
         try {
-          return { ok: true, output: await call(str(args, "server"), str(args, "method"), parsed) };
+          return { ok: true, output: await callMcp(str(args, "server"), str(args, "method"), parsed) };
         } catch (err) {
           return { ok: false, output: String(err) };
         }
@@ -277,7 +458,7 @@ export class ToolExecutor implements Executor {
         return { ok: true, output: "" };
 
       default:
-        return { ok: false, output: `unknown tool: ${name}` };
+        return { ok: false, output: `unknown tool: ${call.name}` };
     }
   }
 

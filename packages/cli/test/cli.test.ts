@@ -284,7 +284,10 @@ describe("doctor", () => {
       }) as unknown as typeof fetch,
     });
     expect(worstState(checks)).toBe("fail");
-    expect(checks).toHaveLength(1);
+    // The sandbox check does not depend on a server and is reported either
+    // way: a user who first learns the explorer cannot run commands at the
+    // moment it refuses one has been told too late.
+    expect(checks.map((c) => c.name)).toEqual(["sandbox", "endpoint"]);
   });
 
   it("warns when the box cannot hold the full checkpoint", async () => {

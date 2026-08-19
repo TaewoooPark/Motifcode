@@ -16,6 +16,7 @@
  */
 
 import { runShell } from "./spawn.js";
+import { hookEnvironment } from "./trust.js";
 
 export type HookEvent =
   | "SessionStart"
@@ -44,11 +45,12 @@ export type HookConfig = Partial<Record<HookEvent, HookDef[]>>;
 export interface HookContext {
   event: HookEvent;
   tool?: string;
-  /** Paths the tool touched, exported as `MOTIF_PATHS`. */
+  /** Paths the tool touched. Passed on stdin, not in the environment. */
   paths?: string[];
-  /** Free-form payload, exported as `MOTIF_PAYLOAD`. */
-  payload?: string;
+  /** Structured payload for the hook, delivered as JSON on stdin. */
+  payload?: unknown;
   cwd?: string;
+  signal?: AbortSignal;
 }
 
 export interface HookOutcome {
@@ -82,17 +84,28 @@ export function selectHooks(config: HookConfig, ctx: HookContext): HookDef[] {
 }
 
 export async function runHook(def: HookDef, ctx: HookContext): Promise<HookOutcome> {
+  // Payload goes in on stdin as JSON, not through the environment. A
+  // space-joined `MOTIF_PATHS` cannot represent a filename containing a space,
+  // and an environment variable is visible to every process the hook starts.
+  const stdin = JSON.stringify({
+    event: ctx.event,
+    tool: ctx.tool ?? null,
+    paths: ctx.paths ?? [],
+    payload: ctx.payload ?? null,
+    cwd: ctx.cwd ?? process.cwd(),
+  });
   const result = await runShell(def.command, {
     cwd: ctx.cwd ?? process.cwd(),
-    env: {
-      ...process.env,
+    // Allowlisted, not inherited. There is no reason for a formatter to see an
+    // API token, and no way to know in advance that it will not look.
+    env: hookEnvironment(process.env, {
       MOTIF_EVENT: ctx.event,
       MOTIF_TOOL: ctx.tool ?? "",
-      MOTIF_PATHS: (ctx.paths ?? []).join(" "),
-      MOTIF_PAYLOAD: ctx.payload ?? "",
-    },
+    }),
+    stdin,
     timeoutMs: def.timeoutMs ?? DEFAULT_TIMEOUT,
     outputCap: OUTPUT_CAP,
+    ...(ctx.signal ? { signal: ctx.signal } : {}),
   });
   const ok = result.code === 0 && !result.timedOut;
   return {
@@ -117,6 +130,7 @@ export async function runHooks(config: HookConfig, ctx: HookContext): Promise<Ho
 }
 
 export { runShell } from "./spawn.js";
+export * from "./trust.js";
 
 export function wasBlocked(outcomes: readonly HookOutcome[]): boolean {
   return outcomes.some((o) => o.blocked);

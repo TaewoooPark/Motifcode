@@ -20,6 +20,7 @@ import type { AgentDef } from "./index.js";
 export const BUILTIN_AGENTS: readonly AgentDef[] = Object.freeze([
   {
     name: "explorer",
+    readOnly: true,
     description: "Read-only reconnaissance of unfamiliar code — returns a map, changes nothing",
     toolCount: 3, // done, bash, read
     maxTurns: 20,
@@ -39,6 +40,7 @@ export const BUILTIN_AGENTS: readonly AgentDef[] = Object.freeze([
   },
   {
     name: "reviewer",
+    readOnly: true,
     description: "Correctness review of a change — findings with concrete failing inputs",
     toolCount: 3,
     maxTurns: 25,
@@ -81,6 +83,7 @@ export const BUILTIN_AGENTS: readonly AgentDef[] = Object.freeze([
   },
   {
     name: "planner",
+    readOnly: true,
     description: "Design an approach before any code is written — options and trade-offs",
     toolCount: 3,
     maxTurns: 20,

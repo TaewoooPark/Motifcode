@@ -441,3 +441,4 @@ export function checkResumable(
 }
 
 export * from "./distil.js";
+export * from "./redact.js";

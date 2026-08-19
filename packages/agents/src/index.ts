@@ -31,6 +31,14 @@ export interface AgentDef {
    * everything.
    */
   toolCount: number;
+  /**
+   * This agent must not change anything.
+   *
+   * Enforced by the executor's policy, not by the instructions. A prompt that
+   * asks an agent not to write is a request; a policy that will not run a
+   * program outside a read-only sandbox is a boundary.
+   */
+  readOnly?: boolean;
   /** Appended to the subagent's system prompt. */
   instructions: string;
   /** Turn ceiling. Subagents should be cheap and bounded. */

@@ -48,12 +48,25 @@ describe("execution", () => {
     expect(out.blocked).toBe(false);
   });
 
-  it("exports the context to the environment", async () => {
+  it("names the event and tool in the environment", async () => {
     const out = await runHook(
-      { command: 'echo "$MOTIF_EVENT $MOTIF_TOOL $MOTIF_PATHS"' },
-      { event: "PostToolUse", tool: "apply_patch", paths: ["a.ts", "b.ts"] },
+      { command: 'echo "$MOTIF_EVENT $MOTIF_TOOL"' },
+      { event: "PostToolUse", tool: "apply_patch" },
     );
-    expect(out.output).toBe("PostToolUse apply_patch a.ts b.ts");
+    expect(out.output).toBe("PostToolUse apply_patch");
+  });
+
+  it("delivers paths on stdin as JSON rather than as a joined string", async () => {
+    // `MOTIF_PATHS="a.ts b.ts"` cannot represent a filename containing a
+    // space, and an environment variable is visible to every process the hook
+    // starts.
+    const out = await runHook(
+      { command: "cat" },
+      { event: "PostToolUse", tool: "apply_patch", paths: ["a.ts", "a file with spaces.ts"] },
+    );
+    const payload = JSON.parse(out.output) as { paths: string[]; event: string };
+    expect(payload.event).toBe("PostToolUse");
+    expect(payload.paths).toEqual(["a.ts", "a file with spaces.ts"]);
   });
 
   it("kills a hook that overruns its timeout", async () => {

@@ -18,6 +18,8 @@ export interface RunResult {
   code: number | null;
   output: string;
   timedOut: boolean;
+  /** The caller's signal fired; the process group was killed. */
+  aborted: boolean;
   ms: number;
 }
 
@@ -27,6 +29,24 @@ export interface RunOptions {
   timeoutMs: number;
   /** Characters of combined stdout+stderr to keep. */
   outputCap?: number;
+  /** Written to the child's stdin and closed. */
+  stdin?: string;
+  /**
+   * Cancels the command and everything it started.
+   *
+   * Without this, Ctrl-C left a compile running and the loop waiting on a
+   * process nobody could see any more.
+   */
+  signal?: AbortSignal;
+  /**
+   * Run `command` directly with these arguments instead of through a shell.
+   *
+   * Used wherever the payload is data rather than a program — `git apply`
+   * reading a patch on stdin, for instance. A patch containing a heredoc
+   * delimiter, backticks or `$()` is just text here, where in a shell it is a
+   * program.
+   */
+  argv?: string[];
 }
 
 /** SIGKILL the whole group; the leader alone is not enough. */
@@ -51,15 +71,23 @@ export function runShell(command: string, opts: RunOptions): Promise<RunResult> 
 
   return new Promise((resolve) => {
     const spawnOpts: SpawnOptions = {
-      shell: true,
+      shell: opts.argv === undefined,
       // Its own process group, so one signal reaches every descendant.
       detached: true,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [opts.stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"],
     };
     if (opts.cwd !== undefined) spawnOpts.cwd = opts.cwd;
     if (opts.env !== undefined) spawnOpts.env = opts.env;
 
-    const child = spawn(command, spawnOpts);
+    const child = opts.argv === undefined ? spawn(command, spawnOpts) : spawn(command, opts.argv, spawnOpts);
+
+    if (opts.stdin !== undefined) {
+      child.stdin?.on("error", () => {
+        // A command that exits without reading stdin gives EPIPE. That is the
+        // command's business, not a failure of this function.
+      });
+      child.stdin?.end(opts.stdin);
+    }
 
     let out = "";
     const collect = (chunk: Buffer) => {
@@ -71,13 +99,25 @@ export function runShell(command: string, opts: RunOptions): Promise<RunResult> 
     child.stderr?.on("data", collect);
 
     let timedOut = false;
+    let aborted = false;
     let settled = false;
     const finish = (code: number | null) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve({ code, output: out, timedOut, ms: Date.now() - started });
+      opts.signal?.removeEventListener("abort", onAbort);
+      resolve({ code, output: out, timedOut, aborted, ms: Date.now() - started });
     };
+
+    const onAbort = () => {
+      aborted = true;
+      killGroup(child.pid);
+      setTimeout(() => finish(null), 200);
+    };
+    if (opts.signal) {
+      if (opts.signal.aborted) onAbort();
+      else opts.signal.addEventListener("abort", onAbort, { once: true });
+    }
 
     const timer = setTimeout(() => {
       timedOut = true;

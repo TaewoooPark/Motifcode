@@ -130,6 +130,25 @@ export interface LoopOptions {
    * to know a command may have half-happened.
    */
   onCheckpoint?: (checkpoint: LoopCheckpoint) => void;
+  /**
+   * Lifecycle notifications for whatever runs hooks.
+   *
+   * `hooks` declared seven events and only two were ever called; `OnParseFail`
+   * in particular was documented as the way a project collects its own corpus
+   * of the failures it sees, and never fired. The loop knows when these happen
+   * and nothing else does, so the notification has to originate here.
+   */
+  lifecycle?: (event: LifecycleEvent, context: LifecycleContext) => Promise<void>;
+}
+
+/** Points in a session that something outside the loop may want to observe. */
+export type LifecycleEvent = "SessionStart" | "SessionEnd" | "OnParseFail" | "OnRepair";
+
+export interface LifecycleContext {
+  scopeId: string;
+  turn: number;
+  channel: ChannelId;
+  detail?: string;
 }
 
 export interface ChannelTransition {
@@ -260,6 +279,16 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
   // where the bad call gets in.
   const validator = new ToolValidator(tools);
 
+  const lifecycle = async (event: LifecycleEvent, detail?: string): Promise<void> => {
+    if (!opts.lifecycle) return;
+    await opts.lifecycle(event, {
+      scopeId,
+      turn,
+      channel,
+      ...(detail !== undefined ? { detail } : {}),
+    });
+  };
+
   const toolNames = tools.map((t) => ("function" in t && t.function ? t.function.name : ""));
   emit({
     type: "session_start",
@@ -277,6 +306,8 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
   let callSequence = resume?.nextCallSequence ?? 1;
   let seq = resume?.afterSeq ?? 0;
   const transitions: ChannelTransition[] = [];
+
+  void lifecycle("SessionStart");
 
   const nextId = (): string => `${scopeId}-c${callSequence++}`;
 
@@ -308,6 +339,9 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
   };
 
   const finish = (reason: SessionEndReason, summary?: string): LoopResult => {
+    // Fire and forget: a hook must not be able to prevent a session ending, and
+    // awaiting one here would let a wedged script hold the process open.
+    void lifecycle("SessionEnd", reason);
     emit({ type: "session_end", reason, summary });
     return {
       reason,
@@ -437,6 +471,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
 
     for (const sample of parsed.unrecoverable) {
       emit({ type: "parse_failure", kind: "unrecoverable", sample: sample.slice(0, 200) });
+      await lifecycle("OnParseFail", sample.slice(0, 2000));
     }
     if (parsed.truncated) emit({ type: "parse_failure", kind: "truncated", sample: "" });
     for (const sample of parsed.invalidArguments ?? []) {
@@ -488,6 +523,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
         attempt: 1,
         max: 1,
       });
+      await lifecycle("OnRepair", leaked ? "unparsed action" : "no action");
       checkpoint();
       continue;
     }
@@ -551,6 +587,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
       if (budget.exhausted) return finish("breakage_limit");
       handBack(refusalPrompt(refusals, channel));
       emit({ type: "repair", kind: "refusal", reason: refusals[0]!.kind, attempt: 1, max: 1 });
+      await lifecycle("OnRepair", refusals[0]!.detail);
       checkpoint();
       continue;
     }
@@ -659,6 +696,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
     if (anyFailure && repairsThisTask < maxRepairs) {
       repairsThisTask++;
       emit({ type: "repair", kind: "tool_failure", reason: "tool failure", attempt: repairsThisTask, max: maxRepairs });
+      await lifecycle("OnRepair", "tool failure");
       session.appendAll(
         codec.serializeHarnessTurn(
           "The command above failed. Read its output carefully, identify the specific cause, " +

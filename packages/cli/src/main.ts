@@ -12,7 +12,15 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { AgentRegistry, AgentScheduler, BUILTIN_AGENTS, concurrencyFor } from "@motifcode/agents";
 import { HttpTransport, runLoop, type LoopEvent } from "@motifcode/core";
-import { DEFAULT_HOOKS, type HookConfig } from "@motifcode/hooks";
+import { DEFAULT_HOOKS } from "@motifcode/hooks";
+import {
+  approve as approveTrust,
+  checkTrust,
+  loadTrustStore,
+  runHooks,
+  saveTrustStore,
+  type HookConfig,
+} from "@motifcode/hooks";
 import {
   Journal,
   checkResumable,
@@ -21,6 +29,7 @@ import {
   loadResume,
   newHeader,
   parseJournal,
+  redactJournal,
   toTrajectories,
   type DistilFilter,
   type DistilFormat,
@@ -35,10 +44,11 @@ import {
   type ChannelId,
 } from "@motifcode/protocol";
 import { BUILTIN_SKILLS, SkillRegistry, parseSkill } from "@motifcode/skills";
-import { CORE_TOOLS, CORE_TOOL_NAMES, lintTools, formatFindings } from "@motifcode/tools";
+import { CORE_TOOLS, CORE_TOOL_NAMES, lintTools, formatFindings, toolPrefix } from "@motifcode/tools";
 import { Screen } from "@motifcode/tui";
 import { doctor, formatChecks, worstState } from "./doctor.js";
 import { ToolExecutor } from "./executor.js";
+import { policyForAgent } from "./policy.js";
 import { buildAgentPrompt, buildSystemPrompt } from "./prompt.js";
 
 const VERSION = "0.0.1";
@@ -60,7 +70,7 @@ function parseArgs(argv: string[]): Args {
       if (eq !== -1) flags[a.slice(2, eq)] = a.slice(eq + 1);
       else if (argv[i + 1] && !argv[i + 1]!.startsWith("-")) flags[a.slice(2)] = argv[++i]!;
       else flags[a.slice(2)] = true;
-    } else if (rest.length === 0 && ["doctor", "sessions", "resume", "skills", "agents", "lint", "distil", "metrics", "help", "version"].includes(a)) {
+    } else if (rest.length === 0 && ["doctor", "sessions", "resume", "skills", "agents", "lint", "distil", "metrics", "trust", "redact", "help", "version"].includes(a)) {
       command = a;
     } else {
       rest.push(a);
@@ -140,16 +150,56 @@ function loadSkills(cwd: string): SkillRegistry {
   return reg;
 }
 
-function loadHooks(cwd: string): HookConfig {
+/**
+ * Load project hooks, but only from a repository that has been trusted.
+ *
+ * Reading `.motif/settings.json` and running what it says used to be
+ * unconditional, which made cloning a repository and opening it sufficient to
+ * execute arbitrary code as the user — with the full environment, tokens
+ * included, inherited by the child. The trust decision lives outside the
+ * repository, because a file inside the thing being trusted cannot authorise
+ * itself, and it is keyed by content hash, because the interesting attack is a
+ * project that is benign when you approve it and is not after the next pull.
+ */
+function loadHooks(cwd: string, opts: { trustFlag?: string | boolean }): HookConfig {
   const file = join(cwd, CONFIG_DIR, "settings.json");
   if (!existsSync(file)) return DEFAULT_HOOKS;
+
+  const content = readFileSync(file, "utf8");
+  let parsed: { hooks?: HookConfig };
   try {
-    const parsed = JSON.parse(readFileSync(file, "utf8")) as { hooks?: HookConfig };
-    return parsed.hooks ?? DEFAULT_HOOKS;
+    parsed = JSON.parse(content) as { hooks?: HookConfig };
   } catch (err) {
     process.stderr.write(`ignoring ${file}: ${String(err)}\n`);
     return DEFAULT_HOOKS;
   }
+  if (!parsed.hooks) return DEFAULT_HOOKS;
+
+  const decision = checkTrust(loadTrustStore(), cwd, content);
+  if (decision.trusted) return parsed.hooks;
+
+  // A non-interactive run can pre-authorise an exact hash. That is how a
+  // benchmark or CI job opts in without a prompt, and pinning the hash means
+  // the authorisation does not survive a change to the file.
+  if (typeof opts.trustFlag === "string") {
+    const again = checkTrust(
+      approveTrust(loadTrustStore(), cwd, content),
+      cwd,
+      content,
+    );
+    if (again.trusted && again.record.settingsSha256 === opts.trustFlag) return parsed.hooks;
+    process.stderr.write(
+      `--trust-project-hooks does not match: this settings.json hashes to ` +
+        `${again.trusted ? again.record.settingsSha256 : "?"}\n`,
+    );
+    return DEFAULT_HOOKS;
+  }
+
+  process.stderr.write(
+    `project hooks in ${file} are not enabled: ${decision.detail}.\n` +
+      `Review the file, then run \`motif trust\` in this directory to approve it.\n`,
+  );
+  return DEFAULT_HOOKS;
 }
 
 function loadProjectNotes(cwd: string): string | undefined {
@@ -180,8 +230,10 @@ const HELP = `motif ${VERSION} — a coding agent built for Motif-3
   motif skills              list available skills
   motif agents              list available subagents
   motif lint                lint the tool schemas
+  motif trust               approve this repository's .motif/settings.json hooks
   motif distil <dir>        export graded trajectories
   motif metrics <dir>       per-run metrics, one JSON object per line
+  motif redact <file>       print a journal with recognised secrets masked
 
 Flags
   --endpoint <url>          model server (default http://127.0.0.1:8080)
@@ -227,6 +279,43 @@ async function main(): Promise<number> {
     case "version":
       process.stdout.write(`${VERSION}\n`);
       return 0;
+
+    case "redact": {
+      const file = args.rest[0];
+      if (!file) {
+        process.stderr.write("redact needs a journal file — see `motif sessions`\n");
+        return 2;
+      }
+      const { text, hits } = redactJournal(readFileSync(file, "utf8"));
+      process.stdout.write(text);
+      // Pattern-based redaction is never complete, and saying which rules fired
+      // is the only way a reader can tell the difference between "clean" and
+      // "the rules did not recognise it".
+      process.stderr.write(
+        hits.length > 0
+          ? `masked: ${hits.join(", ")}. Pattern matching is not exhaustive; check before sharing.\n`
+          : "no recognised secrets. Pattern matching is not exhaustive; check before sharing.\n",
+      );
+      return 0;
+    }
+
+    case "trust": {
+      const file = join(cwd, CONFIG_DIR, "settings.json");
+      if (!existsSync(file)) {
+        process.stderr.write(`${file} does not exist; there is nothing to approve\n`);
+        return 2;
+      }
+      const content = readFileSync(file, "utf8");
+      const store = approveTrust(loadTrustStore(), cwd, content);
+      saveTrustStore(store);
+      const record = store.records[store.records.length - 1]!;
+      process.stdout.write(
+        `approved project hooks for ${record.path}\n` +
+          `settings sha256 ${record.settingsSha256}\n` +
+          `Changing that file revokes this approval.\n`,
+      );
+      return 0;
+    }
 
     case "lint": {
       const findings = lintTools(CORE_TOOLS);
@@ -370,20 +459,28 @@ async function main(): Promise<number> {
   const skills = loadSkills(cwd);
   const agents = new AgentRegistry();
   agents.registerAll(BUILTIN_AGENTS);
-  const hooks = loadHooks(cwd);
+  const hooks = loadHooks(cwd, { trustFlag: args.flags["trust-project-hooks"] });
   const projectNotes = loadProjectNotes(cwd);
 
   const systemFor = (ch: ChannelId): string =>
     buildSystemPrompt({
       channel: ch,
-      tools: [...CORE_TOOLS],
+      tools: activeTools,
       skills,
       agents,
       ...(projectNotes !== undefined ? { projectNotes } : {}),
       cwd,
     });
 
-  const schemaHash = toolSchemaHash(CORE_TOOLS);
+  // No MCP adapter is wired up yet, so the tool is not advertised. Offering a
+  // tool that always answers "no MCP servers are connected" spends prefix
+  // tokens on every request to teach the model about a capability it does not
+  // have. `mcp` is last in the canonical order, so leaving it out is exactly a
+  // prefix and costs no cache.
+  const mcpConnected = false;
+  const activeTools = mcpConnected ? [...CORE_TOOLS] : toolPrefix(CORE_TOOLS.length - 1);
+  const activeToolNames = CORE_TOOL_NAMES.slice(0, activeTools.length);
+  const schemaHash = toolSchemaHash(activeTools);
   const promptHash = systemPromptHash(systemFor(channel));
 
   // Resume, or start. A resume keeps the recorded task: continuing someone
@@ -472,7 +569,8 @@ async function main(): Promise<number> {
     cwd,
     hooks,
     skills,
-    onHook: (label, ok) => emit({ type: "hook", event: "PostToolUse", label, ok }),
+    policy: policyForAgent({ root: cwd, tools: activeToolNames, readOnly: false }),
+    onHook: (event, label, ok) => emit({ type: "hook", event, label, ok }),
     runAgent: async (name, prompt) => {
       const def = agents.get(name);
       if (!def) {
@@ -496,7 +594,16 @@ async function main(): Promise<number> {
         // Its own executor, and its own `close()`. A child that throws or is
         // aborted still leaves a persistent shell behind unless the cleanup is
         // in `finally`.
-        const childExecutor = new ToolExecutor({ cwd, skills });
+        // The child's policy comes from its declaration, not from its prompt.
+        const childExecutor = new ToolExecutor({
+          cwd,
+          skills,
+          policy: policyForAgent({
+            root: cwd,
+            tools: CORE_TOOL_NAMES.slice(0, def.toolCount),
+            readOnly: def.readOnly === true,
+          }),
+        });
         journal.record(childScope, {
           t: "scope_start",
           task: prompt,
@@ -558,12 +665,20 @@ async function main(): Promise<number> {
   try {
     const result = await runLoop({
       transport,
-      tools: [...CORE_TOOLS],
+      tools: activeTools,
       system: systemFor,
       userTask: task,
       executor,
       emit,
       onCheckpoint: journal.checkpointFor(rootScope),
+      lifecycle: async (event, context) => {
+        const outcomes = await runHooks(hooks, {
+          event,
+          cwd,
+          payload: { scopeId: context.scopeId, turn: context.turn, channel: context.channel, detail: context.detail ?? null },
+        });
+        for (const h of outcomes) emit({ type: "hook", event, label: h.label, ok: h.ok });
+      },
       scopeId: rootScope.scopeId,
       repo: { cwd },
       channel,
