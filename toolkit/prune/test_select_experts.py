@@ -16,7 +16,7 @@ from pathlib import Path
 
 import numpy as np
 
-from select import (
+from select_experts import (
     CRITERIA,
     FORMULAS,
     SelectionError,

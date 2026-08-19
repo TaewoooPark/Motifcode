@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Choosing which experts to keep.
 
+Named `select_experts` rather than `select` because stdlib `select` is imported
+by `asyncio`, `subprocess` and `selectors`, and this directory goes on
+`sys.path`.
+
 The previous version offered three criteria — `count`, `mass` and `blend` — and
 described them as three independent methods to be compared. They were not. All
 three were a ratio of a target corpus to a reference corpus, so all three shared

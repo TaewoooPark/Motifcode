@@ -24,3 +24,6 @@ HANDOFF*.md
 NOTES*.md
 WORKLOG*.md
 scratch/
+
+# The vendor's modelling code, fetched rather than vendored — see toolkit/README.md.
+toolkit/ref/

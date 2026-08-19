@@ -40,9 +40,24 @@ jobs:
       # decides whether a pruned checkpoint is correct — skipped on every
       # commit, and "24 passed, 1 skipped" read as coverage.
       - run: pip install -r toolkit/requirements-dev.txt
+      # The vendor's modelling code, pinned. It is not vendored into this
+      # repository — it would drift from upstream the moment it was copied —
+      # but without it the equivalence test, which is the one that decides
+      # whether the profiler's forward pass is the model's, silently skips.
+      - name: fetch the reference architecture
+        run: |
+          pip install "huggingface_hub>=1.0"
+          hf download Motif-Technologies/Motif-3 modeling_motif.py configuration_motif.py \
+            --revision "$MOTIF_3_REVISION" --local-dir toolkit/ref
+        env:
+          # Pinned, like every other revision here. `main` would let an
+          # upstream architecture change alter what the equivalence test
+          # compares against, without a commit in this repository.
+          MOTIF_3_REVISION: 883d5c441fe3bb994c7b57e60f49e26147f85512
       - name: unit tests, with skipping forbidden
         env:
           MOTIF_REQUIRE_TORCH: "1"
+          MOTIF_REQUIRE_REFERENCE: "1"
         run: python -m unittest discover -s toolkit/prune -p 'test_*.py' -v
 
   # The goldens are committed so the TypeScript job can run without Python.
