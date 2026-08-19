@@ -26,6 +26,8 @@ export interface ParsedToolCall {
   arguments: Record<string, unknown>;
   /** True when the block needed repair to parse. */
   repaired: boolean;
+  /** How it was recovered — see `RepairInfo`. Absent means it parsed as written. */
+  repair?: RepairInfo;
 }
 
 export interface ParseResult {
@@ -46,19 +48,90 @@ export interface ParseResult {
 /* rungs                                                               */
 /* ------------------------------------------------------------------ */
 
-const ESCAPE_OR_LONE_BACKSLASH = /(\\["\\/bfnrtu])|\\/g;
+/** One rewritten byte range, so a repair can be audited instead of trusted. */
+export interface EscapeEdit {
+  at: number;
+  from: string;
+  to: string;
+}
+
+export interface EscapeRepair {
+  text: string;
+  /**
+   * A backslash whose intent could not be read off the text. Such a block is
+   * never executed: guessing here changes what the command does.
+   */
+  ambiguous: boolean;
+  edits: EscapeEdit[];
+}
+
+const SIMPLE_ESCAPES = new Set(['"', "\\", "/", "b", "f", "n", "r", "t"]);
+const HEX4 = /^[0-9a-fA-F]{4}$/;
 
 /**
- * Drop backslashes that do not form a valid JSON escape.
+ * Make invalid JSON escapes parseable **without changing what they mean**.
  *
- * This is the rung that matters most for a coding agent. The invalid escapes
- * Motif produces are shell (`\$`, `\&`) and regex (`\s`, `\[`) — exactly the
- * characters this workload types all day. The alternation consumes escapes left
- * to right so the trailing backslash of a valid `\\` pair is never re-read as
- * the start of the next escape.
+ * This is the rung that matters most for a coding agent, because the invalid
+ * escapes Motif produces are shell (`\$`, `\&`) and regex (`\s`, `\[`) — the
+ * characters this workload types all day.
+ *
+ * The obvious repair is to delete the offending backslash, and it is wrong. A
+ * model that wrote `\$HOME` was suppressing shell expansion; delete the
+ * backslash and the recovered command expands the variable instead. `\s+`
+ * becomes `s+`, a different regex that still matches things. Parse success goes
+ * up and the harness quietly runs a command nobody asked for.
+ *
+ * So an invalid escape is doubled rather than dropped: `\$` becomes `\\$`,
+ * which decodes to a literal backslash followed by `$` — exactly the bytes the
+ * model emitted. Valid escapes are left alone, and a backslash whose reading is
+ * genuinely undecidable (outside a string, or trailing with nothing after it)
+ * marks the block ambiguous instead of being repaired into something plausible.
  */
-export function normalizeInvalidEscapes(text: string): string {
-  return text.replace(ESCAPE_OR_LONE_BACKSLASH, (_m, valid?: string) => valid ?? "");
+export function repairInvalidEscapes(block: string): EscapeRepair {
+  let out = "";
+  let inStr = false;
+  let ambiguous = false;
+  const edits: EscapeEdit[] = [];
+
+  for (let i = 0; i < block.length; i++) {
+    const ch = block[i]!;
+    if (!inStr) {
+      // JSON has no backslash outside a string. Something is wrong in a way
+      // this rung cannot name, so do not pretend to fix it.
+      if (ch === "\\") ambiguous = true;
+      out += ch;
+      if (ch === '"') inStr = true;
+      continue;
+    }
+    if (ch !== "\\") {
+      out += ch;
+      if (ch === '"') inStr = false;
+      continue;
+    }
+    const next = block[i + 1];
+    if (next === undefined) {
+      // A string that ends mid-escape. The next character was lost, so no
+      // reading of it is better than another.
+      ambiguous = true;
+      out += ch;
+      continue;
+    }
+    if (SIMPLE_ESCAPES.has(next)) {
+      out += ch + next;
+      i++;
+      continue;
+    }
+    if (next === "u" && HEX4.test(block.slice(i + 2, i + 6))) {
+      out += block.slice(i, i + 6);
+      i += 5;
+      continue;
+    }
+    // Invalid escape: keep the backslash as content.
+    edits.push({ at: i, from: ch + next, to: "\\\\" + next });
+    out += "\\\\" + next;
+    i++;
+  }
+  return { text: out, ambiguous, edits };
 }
 
 const STRUCTURAL = new Set([",", "]", "}", ":"]);
@@ -131,11 +204,27 @@ export function openStringArray(block: string, arrayKeys: ReadonlySet<string>): 
  * bracket *at the point the mismatch is discovered* is what actually recovers
  * these, and it drops stray extra closers at the same time.
  */
+export interface BracketRepair {
+  text: string;
+  /**
+   * True when a closer was invented or a stray one dropped — the payload was
+   * not structurally complete as written. Callers that execute the result need
+   * this: a command string cut off mid-word balances just as cleanly as a whole
+   * one, and the difference is the part of the command that is missing.
+   */
+  invented: boolean;
+}
+
 export function balanceBrackets(block: string): string {
+  return balanceBracketsDetailed(block).text;
+}
+
+export function balanceBracketsDetailed(block: string): BracketRepair {
   const CLOSER: Record<string, string> = { "{": "}", "[": "]" };
   const stack: string[] = [];
   let out = "";
   let inStr = false;
+  let invented = false;
 
   for (let i = 0; i < block.length; i++) {
     const ch = block[i]!;
@@ -173,17 +262,25 @@ export function balanceBrackets(block: string): string {
         }
         stack.pop();
         out += CLOSER[open];
+        invented = true;
       }
       if (!matched) {
         // Unbalanced extra closer: drop it.
+        invented = true;
       }
       continue;
     }
     out += ch;
   }
-  if (inStr) out += '"';
-  while (stack.length > 0) out += CLOSER[stack.pop()!];
-  return out;
+  if (inStr) {
+    out += '"';
+    invented = true;
+  }
+  while (stack.length > 0) {
+    out += CLOSER[stack.pop()!];
+    invented = true;
+  }
+  return { text: out, invented };
 }
 
 const CONTROL_ESCAPES: Record<string, string> = {
@@ -256,12 +353,7 @@ function strictLoad(block: string): Record<string, unknown> | null {
 }
 
 function tryLoad(block: string): Record<string, unknown> | null {
-  const attempts = [block, normalizeInvalidEscapes(block), block.replace(/\}\s*$/, "")];
-  for (const a of attempts) {
-    const v = strictLoad(a);
-    if (v !== null) return v;
-  }
-  return null;
+  return strictLoad(block);
 }
 
 /* ------------------------------------------------------------------ */
@@ -399,48 +491,143 @@ export function repairContext(tools: Tool[] | undefined): RepairContext {
   return { specs: buildToolSpecs(tools), arrayKeys: arrayKeysFrom(tools) };
 }
 
-/** Return the block as a parsed object, or null if no rung recovers it. */
-export function repairBlock(block: string, ctx: RepairContext): Record<string, unknown> | null {
-  const esc = normalizeInvalidEscapes;
+/**
+ * How a block was recovered, and therefore how far it can be trusted.
+ *
+ * Parse success and execution safety are different questions. A bracket
+ * balancer will happily close a command string that was cut off mid-word, and
+ * the result is valid JSON holding half a command. The loop needs to be able to
+ * tell that apart from a block that parsed as written, so the provenance
+ * travels with the value.
+ */
+export interface RepairInfo {
+  kind: "none" | "envelope" | "escape" | "quote" | "bracket" | "truncation";
+  /** A reading was guessed where more than one was possible. */
+  lossy: boolean;
+  /** The payload was structurally whole; nothing was invented to close it. */
+  complete: boolean;
+}
+
+export interface RepairOutcome {
+  value: Record<string, unknown> | null;
+  info: RepairInfo;
+}
+
+const CLEAN: RepairInfo = { kind: "none", lossy: false, complete: true };
+
+interface Rung {
+  kind: RepairInfo["kind"];
+  lossy: boolean;
+  apply: (b: string) => { text: string; complete: boolean };
+}
+
+/**
+ * Recover a block, reporting what it took.
+ *
+ * Cheapest and least destructive first: each rung is a superset of the repairs
+ * before it, so the first success is also the most conservative reading
+ * available.
+ */
+export function repairBlockDetailed(block: string, ctx: RepairContext): RepairOutcome {
   const ctl = escapeControlChars;
   const arr = (b: string) => openStringArray(b, ctx.arrayKeys);
   const q = escapeQuotesInStrings;
-  const bal = balanceBrackets;
 
-  // Cheapest and least destructive first. Each rung is a superset of the
-  // repairs of the ones before it, so the first success is also the most
-  // conservative reading available.
-  const ladder: ((b: string) => string)[] = [
-    (b) => b,
-    ctl,
-    esc,
-    (b) => ctl(esc(b)),
-    (b) => bal(ctl(esc(b))),
-    (b) => arr(ctl(esc(b))),
-    (b) => bal(arr(ctl(esc(b)))),
-    (b) => q(ctl(esc(b))),
-    (b) => bal(q(ctl(esc(b)))),
-    (b) => bal(arr(q(ctl(esc(b))))),
-    bal,
+  // Ambiguity is fatal at this rung rather than repaired: a backslash outside a
+  // string, or one trailing at the end of the block, has no reading that is
+  // better than another, and picking one silently changes the command.
+  const esc = repairInvalidEscapes(block);
+  const escaped = esc.text;
+
+  const whole = (text: string) => ({ text, complete: true });
+  const ladder: Rung[] = [
+    { kind: "none", lossy: false, apply: whole },
+    { kind: "escape", lossy: false, apply: (b) => whole(ctl(b)) },
+    { kind: "escape", lossy: false, apply: () => whole(escaped) },
+    { kind: "escape", lossy: false, apply: () => whole(ctl(escaped)) },
+    {
+      kind: "bracket",
+      lossy: false,
+      apply: () => {
+        const r = balanceBracketsDetailed(ctl(escaped));
+        return { text: r.text, complete: !r.invented };
+      },
+    },
+    { kind: "bracket", lossy: true, apply: () => whole(arr(ctl(escaped))) },
+    {
+      kind: "bracket",
+      lossy: true,
+      apply: () => {
+        const r = balanceBracketsDetailed(arr(ctl(escaped)));
+        return { text: r.text, complete: !r.invented };
+      },
+    },
+    { kind: "quote", lossy: true, apply: () => whole(q(ctl(escaped))) },
+    {
+      kind: "quote",
+      lossy: true,
+      apply: () => {
+        const r = balanceBracketsDetailed(q(ctl(escaped)));
+        return { text: r.text, complete: !r.invented };
+      },
+    },
+    {
+      kind: "quote",
+      lossy: true,
+      apply: () => {
+        const r = balanceBracketsDetailed(arr(q(ctl(escaped))));
+        return { text: r.text, complete: !r.invented };
+      },
+    },
   ];
+
   for (const rung of ladder) {
-    const obj = tryLoad(rung(block));
-    if (obj !== null) return coerceArgumentsWrapper(obj);
+    if (esc.ambiguous && rung.kind !== "none") break;
+    const { text, complete } = rung.apply(block);
+    const obj = tryLoad(text);
+    if (obj === null) continue;
+    const coerced = coerceArgumentsWrapper(obj);
+    const envelope = coerced !== obj;
+    return {
+      value: coerced,
+      info: {
+        kind: rung.kind === "none" && envelope ? "envelope" : rung.kind,
+        lossy: rung.lossy,
+        complete,
+      },
+    };
+  }
+
+  if (esc.ambiguous) {
+    return { value: null, info: { kind: "escape", lossy: true, complete: false } };
   }
 
   const accept = makeOracle(ctx.specs);
   const seen = new Set<string>();
-  for (const cand of quoteRepairCandidates(normalizeInvalidEscapes(block))) {
-    for (const variant of [cand, balanceBrackets(cand)]) {
-      if (seen.has(variant)) continue;
-      seen.add(variant);
-      const obj = tryLoad(variant);
+  for (const cand of quoteRepairCandidates(escaped)) {
+    const balanced = balanceBracketsDetailed(cand);
+    for (const variant of [
+      { text: cand, complete: true },
+      { text: balanced.text, complete: !balanced.invented },
+    ]) {
+      if (seen.has(variant.text)) continue;
+      seen.add(variant.text);
+      const obj = tryLoad(variant.text);
       if (obj === null) continue;
       const coerced = coerceArgumentsWrapper(obj);
-      if (accept(coerced)) return coerced;
+      if (!accept(coerced)) continue;
+      return {
+        value: coerced,
+        info: { kind: "quote", lossy: true, complete: variant.complete },
+      };
     }
   }
-  return null;
+  return { value: null, info: { kind: "none", lossy: false, complete: false } };
+}
+
+/** Return the block as a parsed object, or null if no rung recovers it. */
+export function repairBlock(block: string, ctx: RepairContext): Record<string, unknown> | null {
+  return repairBlockDetailed(block, ctx).value;
 }
 
 function asArguments(v: unknown): Record<string, unknown> {
@@ -477,36 +664,55 @@ export function parseToolCalls(text: string, ctx: RepairContext): ParseResult {
     cursor = m.index + m[0].length;
     const raw = (m[1] ?? "").trim();
     const strict = strictLoad(raw);
-    const obj = strict !== null ? coerceArgumentsWrapper(strict) : repairBlock(raw, ctx);
-    if (obj === null) {
+    const outcome: RepairOutcome =
+      strict !== null
+        ? { value: coerceArgumentsWrapper(strict), info: CLEAN }
+        : repairBlockDetailed(raw, ctx);
+    if (outcome.value === null) {
       unrecoverable.push(raw);
       continue;
     }
-    const name = typeof obj["name"] === "string" ? (obj["name"] as string) : "";
+    const name = typeof outcome.value["name"] === "string" ? (outcome.value["name"] as string) : "";
     if (name === "") {
       unrecoverable.push(raw);
       continue;
     }
-    calls.push({ name, arguments: asArguments(obj["arguments"]), repaired: strict === null });
+    calls.push({
+      name,
+      arguments: asArguments(outcome.value["arguments"]),
+      repaired: strict === null,
+      repair: outcome.info,
+    });
   }
   content += text.slice(cursor);
 
-  // A trailing opener with no closer: recoverable here, but not on the
-  // streaming path, which is one reason the tool path runs non-streaming.
+  // A trailing opener with no closer. Usually a length cap, and the reason the
+  // tool path runs non-streaming: with the whole body in hand we can ask
+  // whether only the closing *tag* is missing, or whether the JSON itself was
+  // cut off. The first is recoverable. The second is a partial command that a
+  // bracket balancer will happily turn into a syntactically valid whole one,
+  // and running it means running something the model never finished writing.
   let truncated = false;
   const lastOpen = content.lastIndexOf("<tool_call>");
   if (lastOpen !== -1) {
     truncated = true;
     const raw = content.slice(lastOpen + "<tool_call>".length).trim();
-    const obj = repairBlock(raw, ctx);
     content = content.slice(0, lastOpen);
-    if (obj !== null && typeof obj["name"] === "string") {
-      calls.push({
-        name: obj["name"] as string,
-        arguments: asArguments(obj["arguments"]),
-        repaired: true,
-      });
-      truncated = false;
+    const strict = strictLoad(raw);
+    if (strict !== null) {
+      const obj = coerceArgumentsWrapper(strict);
+      const name = typeof obj["name"] === "string" ? (obj["name"] as string) : "";
+      if (name !== "") {
+        calls.push({
+          name,
+          arguments: asArguments(obj["arguments"]),
+          repaired: true,
+          repair: { kind: "truncation", lossy: false, complete: true },
+        });
+        truncated = false;
+      } else {
+        unrecoverable.push(raw);
+      }
     } else {
       unrecoverable.push(raw);
     }

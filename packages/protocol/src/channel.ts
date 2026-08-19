@@ -21,14 +21,33 @@
  * The core loop is channel-agnostic: every channel yields the same `Action[]`.
  */
 
-import { parseToolCalls, type RepairContext } from "./toolcall.js";
+import { parseToolCalls, type RepairContext, type RepairInfo } from "./toolcall.js";
 import { toolCallParts, unwrapTool, type Tool, type ToolCall } from "./types.js";
 
 export type ChannelId = "toolcall" | "object" | "raw";
 
 export type Action =
-  | { kind: "tool"; name: string; arguments: Record<string, unknown>; repaired: boolean }
-  | { kind: "done"; summary: string };
+  | {
+      kind: "tool";
+      name: string;
+      arguments: Record<string, unknown>;
+      repaired: boolean;
+      /** How the block was recovered; absent means it parsed as written. */
+      repair?: RepairInfo;
+    }
+  | {
+      kind: "done";
+      summary: string;
+      /**
+       * The model's answer to the harness's confirmation challenge.
+       *
+       * Kept rather than discarded. Every parser used to drop it, so the second
+       * `done` ended the session whatever it said — including `confirm: false`,
+       * which is the model explicitly declining to finish.
+       */
+      confirm?: boolean;
+      repair?: RepairInfo;
+    };
 
 export interface ChannelParse {
   actions: Action[];
@@ -39,6 +58,13 @@ export interface ChannelParse {
   plan?: string;
   unrecoverable: string[];
   truncated: boolean;
+  /**
+   * Blocks that parsed but whose arguments were not usable — a server-extracted
+   * call whose JSON did not decode, an object channel `commands` that was not
+   * an array. Distinct from `unrecoverable`, which never parsed at all, because
+   * the two want different repair prompts.
+   */
+  invalidArguments?: string[];
 }
 
 export interface Channel {
@@ -60,25 +86,61 @@ export interface Channel {
   parse(text: string, ctx: RepairContext, structured?: ToolCall[]): ChannelParse;
 }
 
-/** Turn a server-extracted tool call into an action. */
-function actionFromToolCall(tc: ToolCall): Action {
+/**
+ * Turn a server-extracted tool call into an action.
+ *
+ * Returns null when the server named a tool but its arguments did not decode.
+ * The tempting reading — "we still know which tool was meant, run it with no
+ * arguments" — turns a `bash` call whose JSON broke into `bash` with an empty
+ * command, and a `done` whose JSON broke into a completion claim. Neither is
+ * what the model asked for, and both look like ordinary turns afterwards.
+ */
+function actionFromToolCall(tc: ToolCall): Action | null {
   const { name, args } = toolCallParts(tc);
-  let decoded: Record<string, unknown> = {};
-  if (typeof args === "string") {
-    try {
-      const v = JSON.parse(args) as unknown;
-      if (v && typeof v === "object" && !Array.isArray(v)) decoded = v as Record<string, unknown>;
-    } catch {
-      // A server that extracted the call but left unparseable arguments is
-      // still telling us which tool was meant; surface it as an empty-argument
-      // call rather than discarding the turn.
+  if (name === "") return null;
+  let decoded: Record<string, unknown> | null = null;
+  if (args === undefined || args === null) {
+    decoded = {};
+  } else if (typeof args === "string") {
+    if (args.trim() === "") {
+      decoded = {};
+    } else {
+      try {
+        const v = JSON.parse(args) as unknown;
+        if (v && typeof v === "object" && !Array.isArray(v)) decoded = v as Record<string, unknown>;
+      } catch {
+        decoded = null;
+      }
     }
-  } else if (args && typeof args === "object") {
+  } else if (typeof args === "object" && !Array.isArray(args)) {
     decoded = args as Record<string, unknown>;
   }
+  if (decoded === null) return null;
   return name === "done"
-    ? { kind: "done", summary: String(decoded["summary"] ?? "") }
+    ? {
+        kind: "done",
+        summary: String(decoded["summary"] ?? ""),
+        ...(typeof decoded["confirm"] === "boolean" ? { confirm: decoded["confirm"] } : {}),
+      }
     : { kind: "tool", name, arguments: decoded, repaired: false };
+}
+
+/** Map server-extracted calls, reporting any whose arguments did not decode. */
+function actionsFromToolCalls(structured: ToolCall[], text: string): ChannelParse {
+  const actions: Action[] = [];
+  const invalidArguments: string[] = [];
+  for (const tc of structured) {
+    const action = actionFromToolCall(tc);
+    if (action === null) invalidArguments.push(JSON.stringify(tc).slice(0, 400));
+    else actions.push(action);
+  }
+  return {
+    actions,
+    content: text.trim(),
+    unrecoverable: [],
+    truncated: false,
+    ...(invalidArguments.length > 0 ? { invalidArguments } : {}),
+  };
 }
 
 /**
@@ -112,18 +174,26 @@ class ToolCallChannel implements Channel {
     // repair ladder, which sees the raw token stream; ours only sees what is
     // left in the body afterwards.
     if (structured && structured.length > 0) {
-      return {
-        actions: structured.map(actionFromToolCall),
-        content: text.trim(),
-        unrecoverable: [],
-        truncated: false,
-      };
+      return actionsFromToolCalls(structured, text);
     }
     const r = parseToolCalls(text, ctx);
     const actions: Action[] = r.calls.map((c) =>
       c.name === "done"
-        ? { kind: "done" as const, summary: String(c.arguments["summary"] ?? "") }
-        : { kind: "tool" as const, name: c.name, arguments: c.arguments, repaired: c.repaired },
+        ? {
+            kind: "done" as const,
+            summary: String(c.arguments["summary"] ?? ""),
+            ...(typeof c.arguments["confirm"] === "boolean"
+              ? { confirm: c.arguments["confirm"] as boolean }
+              : {}),
+            ...(c.repair ? { repair: c.repair } : {}),
+          }
+        : {
+            kind: "tool" as const,
+            name: c.name,
+            arguments: c.arguments,
+            repaired: c.repaired,
+            ...(c.repair ? { repair: c.repair } : {}),
+          },
     );
     return {
       actions,
@@ -141,6 +211,8 @@ interface ObjectResponse {
   plan?: string;
   commands?: { keystrokes?: string; duration?: number }[];
   task_complete?: boolean;
+  /** Answer to the harness's confirmation challenge; see the `done` contract. */
+  confirm?: boolean;
   summary?: string;
 }
 
@@ -165,8 +237,9 @@ class ObjectChannel implements Channel {
       'To simply wait, send { "keystrokes": "", "duration": 10 }. Never wait',
       "more than 60 seconds at a time; poll instead.",
       "",
-      'Set "task_complete": true only when finished. You will be asked to',
-      "confirm before it counts.",
+      'Set "task_complete": true only when finished. The harness will challenge',
+      'it once; answer by repeating the same "summary" with "confirm": true.',
+      'Only that second, confirmed object ends the session.',
     ].join("\n");
   }
 
@@ -175,7 +248,7 @@ class ObjectChannel implements Channel {
     // A model may answer with native tool calls even when asked for an object;
     // honour them rather than calling the turn empty.
     if (structured && structured.length > 0) {
-      return { actions: structured.map(actionFromToolCall), content: text.trim(), unrecoverable: [], truncated: false };
+      return actionsFromToolCalls(structured, text);
     }
     const obj = extractJsonObject(text);
     if (!obj) {
@@ -183,16 +256,42 @@ class ObjectChannel implements Channel {
     }
     const r = obj as ObjectResponse;
     const actions: Action[] = [];
-    for (const c of r.commands ?? []) {
-      actions.push({
-        kind: "tool",
-        name: "term",
-        arguments: { keystrokes: c.keystrokes ?? "", duration_s: c.duration ?? 1.0 },
-        repaired: false,
-      });
+    const invalidArguments: string[] = [];
+
+    // `commands` arriving as an object, a string or null is a shape error, not
+    // a crash. Iterating it directly used to throw a TypeError out of the
+    // parser, which the loop had no way to read as a parse failure.
+    if (r.commands !== undefined && !Array.isArray(r.commands)) {
+      invalidArguments.push(
+        `"commands" must be an array, got ${r.commands === null ? "null" : typeof r.commands}`,
+      );
+    } else {
+      for (const c of r.commands ?? []) {
+        if (c === null || typeof c !== "object" || Array.isArray(c)) {
+          invalidArguments.push(`each command must be an object, got ${JSON.stringify(c).slice(0, 120)}`);
+          continue;
+        }
+        actions.push({
+          kind: "tool",
+          name: "term",
+          // Deliberately not coerced. A `duration` the model sent as a string
+          // is a schema violation the validator should reject, not something
+          // this parser should quietly turn into a number.
+          arguments: {
+            keystrokes: c.keystrokes ?? "",
+            duration_s: c.duration === undefined ? 1.0 : c.duration,
+          },
+          repaired: false,
+        });
+      }
     }
+
     if (r.task_complete === true) {
-      actions.push({ kind: "done", summary: r.summary ?? r.analysis ?? "" });
+      actions.push({
+        kind: "done",
+        summary: r.summary ?? r.analysis ?? "",
+        ...(typeof r.confirm === "boolean" ? { confirm: r.confirm } : {}),
+      });
     }
     return {
       actions,
@@ -201,6 +300,7 @@ class ObjectChannel implements Channel {
       plan: r.plan,
       unrecoverable: [],
       truncated: false,
+      ...(invalidArguments.length > 0 ? { invalidArguments } : {}),
     };
   }
 }
@@ -245,6 +345,10 @@ class RawChannel implements Channel {
       "<task_complete>false</task_complete>",
       "</response>",
       "",
+      "To finish, set <task_complete>true</task_complete> and add a <summary>.",
+      "The harness will challenge it once; answer by repeating the same summary",
+      "with <confirm>true</confirm>. Only that second response ends the session.",
+      "",
       "IMPORTANT: text inside <keystrokes> is used completely verbatim. Do NOT",
       "XML-encode anything — write <, >, &, quotes and backslashes directly.",
       "Nothing inside those tags is escaped or unescaped by the harness.",
@@ -258,7 +362,7 @@ class RawChannel implements Channel {
   parse(text: string, ctx: RepairContext, structured?: ToolCall[]): ChannelParse {
     void ctx;
     if (structured && structured.length > 0) {
-      return { actions: structured.map(actionFromToolCall), content: text.trim(), unrecoverable: [], truncated: false };
+      return actionsFromToolCalls(structured, text);
     }
     const actions: Action[] = [];
     const analysis = tagText(text, "analysis");
@@ -291,7 +395,12 @@ class RawChannel implements Channel {
 
     const complete = tagText(text, "task_complete");
     if (complete !== undefined && complete.trim() === "true") {
-      actions.push({ kind: "done", summary: analysis ?? "" });
+      const confirm = tagText(text, "confirm");
+      actions.push({
+        kind: "done",
+        summary: tagText(text, "summary") ?? analysis ?? "",
+        ...(confirm !== undefined ? { confirm: confirm.trim() === "true" } : {}),
+      });
     }
 
     const unrecoverable =

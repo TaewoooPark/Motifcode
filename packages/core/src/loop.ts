@@ -22,6 +22,8 @@
  */
 
 import {
+  ToolValidator,
+  formatErrors,
   getChannel,
   looksLikeLeakedToolCall,
   parseToolCalls,
@@ -105,6 +107,35 @@ export function clampOutput(text: string, maxBytes = MAX_TOOL_OUTPUT): string {
   return `${head}\n… ${omitted} bytes omitted …\n${tail}`;
 }
 
+/**
+ * Why a turn's actions were refused as a batch.
+ *
+ * All-or-nothing is the point. A turn that asks for three things and gets one
+ * of them wrong has left the repository in a state neither the model nor the
+ * harness can describe: two edits applied, one not, and a repair prompt that
+ * cannot say which. Refusing the whole turn costs one round trip and keeps the
+ * tree in a state the next prompt can talk about.
+ */
+export type RefusalKind =
+  /** An argument did not satisfy the tool's registered schema. */
+  | "invalid_arguments"
+  /** The payload was recovered by inventing structure, so it may be partial. */
+  | "incomplete_payload"
+  /** The server stopped at the token cap; anything after that point is missing. */
+  | "output_truncated"
+  /** `done` arrived alongside other actions, which has no coherent reading. */
+  | "mixed_done";
+
+export interface Refusal {
+  kind: RefusalKind;
+  detail: string;
+}
+
+/** Whitespace-insensitive comparison, so a reflowed summary still matches. */
+function normalizeSummary(s: string): string {
+  return s.trim().replace(/\s+/g, " ");
+}
+
 let idCounter = 0;
 function nextId(): string {
   idCounter += 1;
@@ -142,6 +173,10 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
   const budget = new BreakageBudget();
   const guard = new LoopGuard();
   const ctx = repairContext(tools);
+  // One validator for every path that can produce a call. A second
+  // implementation would be a second set of rules, and the gap between them is
+  // where the bad call gets in.
+  const validator = new ToolValidator(tools);
 
   const toolNames = tools.map((t) => ("function" in t && t.function ? t.function.name : ""));
   emit({
@@ -271,31 +306,134 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
       continue;
     }
 
+    // ---- the action gate -------------------------------------------------
+    //
+    // Everything between parsing and execution happens here, and nothing gets
+    // past it partially. Each check below is a way a turn can parse cleanly and
+    // still not mean what it appears to.
+    const refusals: Refusal[] = [];
+
+    // A response that hit the token cap is missing its tail by definition. The
+    // bracket balancer will still produce valid JSON from what arrived, and a
+    // command cut off mid-word balances exactly as cleanly as a whole one.
+    if (response.finishReason === "length") {
+      refusals.push({
+        kind: "output_truncated",
+        detail: "the response stopped at the output token cap, so the last action is incomplete",
+      });
+    }
+
+    for (const a of parsed.actions) {
+      if (a.repair && !a.repair.complete) {
+        refusals.push({
+          kind: "incomplete_payload",
+          detail: `a ${a.kind === "done" ? "done" : a.name} action was only recoverable by inventing structure`,
+        });
+      }
+    }
+
+    const doneActions = parsed.actions.filter(
+      (a): a is Extract<Action, { kind: "done" }> => a.kind === "done",
+    );
+    const toolActions = parsed.actions.filter(
+      (a): a is Extract<Action, { kind: "tool" }> => a.kind === "tool",
+    );
+    if (doneActions.length > 0 && toolActions.length > 0) {
+      refusals.push({
+        kind: "mixed_done",
+        detail: "`done` arrived in the same turn as other actions; finish or keep working, not both",
+      });
+    }
+
+    for (const a of parsed.actions) {
+      const name = a.kind === "done" ? "done" : a.name;
+      const args =
+        a.kind === "done"
+          ? { summary: a.summary, ...(a.confirm !== undefined ? { confirm: a.confirm } : {}) }
+          : a.arguments;
+      const check = validator.validate(name, args);
+      if (!check.ok) {
+        refusals.push({ kind: "invalid_arguments", detail: `${name}: ${formatErrors(check.errors)}` });
+      }
+    }
+
+    if (refusals.length > 0) {
+      // A turn whose actions cannot be run is a lost turn, exactly like one
+      // that did not parse — so it counts against the same budget. Anything
+      // else would let a model that emits well-formed nonsense run forever.
+      budget.recordFailure();
+      pendingDone = null;
+      for (const r of refusals) {
+        emit({ type: "parse_failure", kind: "rejected", sample: `${r.kind}: ${r.detail}`.slice(0, 200) });
+      }
+      if (budget.exhausted) return finish("breakage_limit");
+      session.appendAssistant({ content: split.content, reasoning: split.reasoning });
+      session.append({
+        role: "user",
+        content: refusalPrompt(refusals, channel),
+      });
+      emit({ type: "repair", reason: refusals[0]!.kind, attempt: 1, max: 1 });
+      continue;
+    }
+
     const repaired = parsed.actions.some((a) => a.kind === "tool" && a.repaired);
     budget.recordSuccess(repaired);
 
-    // Completion, with the two-step confirmation Terminus 2 uses.
-    const doneAction = parsed.actions.find((a): a is Extract<Action, { kind: "done" }> => a.kind === "done");
+    // Completion, in two steps.
+    //
+    // The first `done` is a proposal, never an ending — not even with
+    // `confirm: true`, because a model that emits the confirmation flag on its
+    // own first attempt has not been challenged. The second must carry
+    // `confirm: true` *and* repeat the proposed summary; anything else means
+    // the model answered a different question than the one it was asked.
+    const doneAction = doneActions[0];
     if (doneAction) {
       if (pendingDone === null) {
-        pendingDone = doneAction.summary;
+        pendingDone = normalizeSummary(doneAction.summary);
+        session.appendAssistant({ content: split.content, reasoning: split.reasoning });
+        session.append({ role: "user", content: confirmationChallenge(doneAction.summary, channel) });
+        emit({ type: "notice", level: "info", text: "completion proposed; awaiting confirmation" });
+        continue;
+      }
+      if (doneAction.confirm !== true) {
         session.appendAssistant({ content: split.content, reasoning: split.reasoning });
         session.append({
           role: "user",
           content:
-            "Are you sure the task is complete? This ends the session and no further changes are possible. " +
-            "If so, call `done` again with `confirm: true`. If not, keep working.",
+            "That was not a confirmation. To end the session, repeat the same summary with " +
+            "`confirm: true`. To keep working, take the next action instead.",
         });
-        emit({ type: "notice", level: "info", text: "completion proposed; awaiting confirmation" });
+        emit({ type: "notice", level: "warn", text: "completion not confirmed; session continues" });
         continue;
       }
-      return finish("done", doneAction.summary || pendingDone);
+      if (normalizeSummary(doneAction.summary) !== pendingDone) {
+        // A different summary is a different claim, and confirming a claim the
+        // harness never proposed is not a confirmation of anything.
+        const proposed = pendingDone;
+        pendingDone = null;
+        session.appendAssistant({ content: split.content, reasoning: split.reasoning });
+        session.append({
+          role: "user",
+          content:
+            `The confirmation did not match the summary you proposed:\n\n${proposed}\n\n` +
+            "Repeat that summary verbatim with `confirm: true`, or keep working.",
+        });
+        emit({ type: "notice", level: "warn", text: "confirmation summary did not match" });
+        continue;
+      }
+      return finish("done", doneAction.summary);
     }
+    // Any other action withdraws a pending proposal: the model went back to
+    // work, so the completion it proposed is no longer the state of the world.
     pendingDone = null;
 
-    const calls: ToolInvocation[] = parsed.actions
-      .filter((a): a is Extract<Action, { kind: "tool" }> => a.kind === "tool")
-      .map((a) => ({ id: nextId(), name: a.name, arguments: a.arguments, repaired: a.repaired }));
+    const calls: ToolInvocation[] = toolActions.map((a) => ({
+      id: nextId(),
+      name: a.name,
+      arguments: a.arguments,
+      repaired: a.repaired,
+      validated: true,
+    }));
 
     session.appendAssistant({
       content: parsed.content,
@@ -344,6 +482,45 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
   }
 
   return finish("turn_limit");
+}
+
+function confirmationChallenge(summary: string, channel: ChannelId): string {
+  const how =
+    channel === "toolcall"
+      ? "call `done` again with the same `summary` and `confirm: true`"
+      : channel === "object"
+        ? 'reply with the same "summary" plus "task_complete": true and "confirm": true'
+        : "repeat the same <summary> with <task_complete>true</task_complete> and <confirm>true</confirm>";
+  return [
+    "Before this counts as finished: is the task actually complete? Ending the session",
+    "means no further changes are possible.",
+    "",
+    "You proposed this summary:",
+    "",
+    summary,
+    "",
+    `If that is right, ${how}. If not, keep working — take the next action instead.`,
+  ].join("\n");
+}
+
+function refusalPrompt(refusals: readonly Refusal[], channel: ChannelId): string {
+  const lines = refusals.map((r) => `  - ${r.detail}`);
+  const advice =
+    refusals.some((r) => r.kind === "output_truncated" || r.kind === "incomplete_payload")
+      ? "Emit the whole action again from the start. Keep long arguments — patches especially — short enough to finish in one response."
+      : refusals.some((r) => r.kind === "mixed_done")
+        ? "Send either the remaining actions or `done`, not both in one turn."
+        : "Check each argument against the schema you were given: required fields, types, and no extra keys.";
+  return [
+    "None of the actions in that turn were run. The harness refuses a turn as a whole rather",
+    "than applying part of it, so the repository is exactly as you left it.",
+    "",
+    ...lines,
+    "",
+    advice,
+    "",
+    repairPrompt("", channel).trim(),
+  ].join("\n");
 }
 
 function repairPrompt(problem: string, channel: ChannelId): string {

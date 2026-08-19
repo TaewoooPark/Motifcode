@@ -14,6 +14,7 @@ import {
   parseToolCalls,
   repairBlock,
   repairContext,
+  repairInvalidEscapes,
 } from "../src/toolcall.js";
 import type { Tool } from "../src/types.js";
 
@@ -101,19 +102,22 @@ const CASES: Case[] = [
   {
     id: "invalid-json-escape",
     // Shell expansion inside a command argument: `\$` is not a JSON escape.
+    // The backslash survives into the decoded argument, because deleting it
+    // turns "suppress expansion" into "expand $HOME" — a different command
+    // that still runs.
     block: String.raw`{"name": "run_code", "arguments": {"cmd": "grep -c \$HOME f"}}`,
-    expected: { name: "run_code", arguments: { cmd: "grep -c $HOME f" } },
+    expected: { name: "run_code", arguments: { cmd: String.raw`grep -c \$HOME f` } },
   },
   {
     id: "mixed-invalid-escape-and-escaped-backslash",
     // Regex-heavy command mixing an invalid escape (\s) with a valid escaped
-    // backslash (\\[). Dropping lone backslashes must consume left to right so
-    // the valid pair survives.
+    // backslash (\\[). Both survive: `\s` is a character class the model meant
+    // to write, and `s` is not.
     block:
       String.raw`{"name": "run_code", "arguments": {"cmd": "m=re.search(r'\"x\"\s*:\s*(\\[.*?\\])', h)"}}`,
     expected: {
       name: "run_code",
-      arguments: { cmd: String.raw`m=re.search(r'"x"s*:s*(\[.*?\])', h)` },
+      arguments: { cmd: String.raw`m=re.search(r'"x"\s*:\s*(\[.*?\])', h)` },
     },
   },
   {
@@ -185,7 +189,7 @@ describe("parseToolCalls", () => {
     expect(r.calls).toHaveLength(2);
     expect(r.calls[0]!.repaired).toBe(false);
     expect(r.calls[1]!.repaired).toBe(true);
-    expect(r.calls[1]!.arguments["cmd"]).toBe("grep $X f");
+    expect(r.calls[1]!.arguments["cmd"]).toBe(String.raw`grep \$X f`);
   });
 
   it("recovers a trailing block whose closer never arrived", () => {
@@ -207,5 +211,115 @@ describe("parseToolCalls", () => {
   it("does not flag ordinary prose", () => {
     const r = parseToolCalls("All done, the tests pass.", ctx);
     expect(looksLikeLeakedToolCall(r)).toBe(false);
+  });
+});
+
+describe("escape repair preserves meaning", () => {
+  /** Decode a repaired block the way the loop does, and read one argument. */
+  function cmd(block: string): string | null {
+    const obj = repairBlock(block, ctx);
+    if (!obj) return null;
+    return (obj["arguments"] as Record<string, unknown>)["cmd"] as string;
+  }
+
+  it("keeps the backslash that suppresses shell expansion", () => {
+    // `echo \$HOME` prints the literal text. Delete the backslash to make the
+    // JSON parse and the recovered command prints the user's home directory
+    // instead — a different command that still runs, which is worse than one
+    // that fails.
+    const out = cmd(String.raw`{"name": "run_code", "arguments": {"cmd": "echo \$HOME"}}`);
+    expect(out).toBe(String.raw`echo \$HOME`);
+  });
+
+  it("keeps regex character classes", () => {
+    expect(cmd(String.raw`{"name": "run_code", "arguments": {"cmd": "rg '\s+\d\w'"}}`)).toBe(
+      String.raw`rg '\s+\d\w'`,
+    );
+  });
+
+  it("keeps Windows-style paths", () => {
+    expect(cmd(String.raw`{"name": "run_code", "arguments": {"cmd": "type C:\Users\me\a.txt"}}`)).toBe(
+      String.raw`type C:\Users\me\a.txt`,
+    );
+  });
+
+  it("leaves valid escapes exactly as they were", () => {
+    const r = repairInvalidEscapes(String.raw`{"a": "tab\there\nline \"q\" \\ \u00e9"}`);
+    expect(r.edits).toEqual([]);
+    expect(r.ambiguous).toBe(false);
+    expect(JSON.parse(r.text)).toEqual({ a: 'tab\there\nline "q" \\ é' });
+  });
+
+  it("treats a lone trailing backslash as undecidable", () => {
+    // The character after it was lost, so no reading is better than another.
+    const r = repairInvalidEscapes('{"a": "ends with \\');
+    expect(r.ambiguous).toBe(true);
+  });
+
+  it("treats a backslash outside a string as undecidable", () => {
+    expect(repairInvalidEscapes('{"a": \\ 1}').ambiguous).toBe(true);
+  });
+
+  it("refuses to recover an ambiguous block at all", () => {
+    expect(repairBlock('{"name": "run_code", "arguments": {"cmd": "x"} \\ }', ctx)).toBeNull();
+  });
+
+  it("records what it rewrote, so a repair can be audited", () => {
+    const r = repairInvalidEscapes(String.raw`{"cmd": "\$HOME"}`);
+    expect(r.edits).toHaveLength(1);
+    expect(r.edits[0]).toMatchObject({ from: String.raw`\$`, to: String.raw`\\$` });
+  });
+
+  it("round-trips: repaired text decodes to the bytes the model wrote", () => {
+    // Property-ish check over the escapes this workload actually produces.
+    for (const literal of [
+      String.raw`grep -c \$HOME f`,
+      String.raw`sed -i 's/\s\+$//' x`,
+      String.raw`awk '{print \$1}'`,
+      String.raw`C:\Users\me\a.txt`,
+      String.raw`\p{L}+`,
+    ]) {
+      const block = `{"name": "run_code", "arguments": {"cmd": "${literal}"}}`;
+      expect(cmd(block), literal).toBe(literal);
+    }
+  });
+
+  it("cannot recover a backslash that collides with a valid escape", () => {
+    // `C:\tmp\new` is not malformed JSON — `\t` and `\n` are real escapes, so
+    // the block parses on the first rung and decodes to a tab and a newline.
+    // Nothing downstream can tell that apart from a model that meant them, and
+    // inventing a rule here would corrupt every genuine `\n` in a patch. The
+    // limit is real and belongs in a test rather than in a comment nobody
+    // reads.
+    const out = cmd(String.raw`{"name": "run_code", "arguments": {"cmd": "C:\tmp\new"}}`);
+    expect(out).toBe("C:\tmp\new");
+    expect(out).not.toBe(String.raw`C:\tmp\new`);
+  });
+});
+
+describe("truncation is not the same as a missing tag", () => {
+  it("recovers a complete object whose closing tag never arrived", () => {
+    const r = parseToolCalls('<tool_call>{"name": "run_code", "arguments": {"cmd": "ls"}}', ctx);
+    expect(r.calls).toHaveLength(1);
+    expect(r.calls[0]!.repair).toMatchObject({ complete: true });
+  });
+
+  it("refuses a call whose command string was cut off mid-word", () => {
+    // The bracket balancer would close the quote and the braces and hand back
+    // `rm -rf /tmp/build-ca`, which is a real command and not the one intended.
+    const r = parseToolCalls('<tool_call>{"name": "run_code", "arguments": {"cmd": "rm -rf /tmp/build-ca', ctx);
+    expect(r.calls).toHaveLength(0);
+    expect(r.truncated).toBe(true);
+  });
+
+  it("refuses a call missing only its final brace", () => {
+    const r = parseToolCalls('<tool_call>{"name": "run_code", "arguments": {"cmd": "ls"}', ctx);
+    expect(r.calls).toHaveLength(0);
+  });
+
+  it("marks a bracket-balanced block inside proper tags as incomplete", () => {
+    const r = parseToolCalls('<tool_call>{"name": "run_code", "arguments": {"cmd": "ls"}</tool_call>', ctx);
+    expect(r.calls).toHaveLength(1);
+    expect(r.calls[0]!.repair).toMatchObject({ complete: false });
   });
 });

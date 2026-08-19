@@ -107,7 +107,7 @@ describe("executor", () => {
 
   it("runs a command and captures output", async () => {
     const ex = new ToolExecutor({ cwd });
-    const r = await ex.run({ id: "1", name: "bash", arguments: { command: "echo hi" }, repaired: false });
+    const r = await ex.run({ id: "1", name: "bash", arguments: { command: "echo hi" }, repaired: false, validated: true });
     ex.close();
     expect(r.ok).toBe(true);
     expect(r.output).toBe("hi");
@@ -115,7 +115,7 @@ describe("executor", () => {
 
   it("reports a non-zero exit as a failure the loop can repair", async () => {
     const ex = new ToolExecutor({ cwd });
-    const r = await ex.run({ id: "1", name: "bash", arguments: { command: "exit 7" }, repaired: false });
+    const r = await ex.run({ id: "1", name: "bash", arguments: { command: "exit 7" }, repaired: false, validated: true });
     ex.close();
     expect(r.ok).toBe(false);
   });
@@ -123,7 +123,7 @@ describe("executor", () => {
   it("reads a file with line numbers and a range", async () => {
     writeFileSync(join(cwd, "f.txt"), "a\nb\nc\nd\n", "utf8");
     const ex = new ToolExecutor({ cwd });
-    const r = await ex.run({ id: "1", name: "read", arguments: { path: "f.txt", offset: 2, limit: 2 }, repaired: false });
+    const r = await ex.run({ id: "1", name: "read", arguments: { path: "f.txt", offset: 2, limit: 2 }, repaired: false, validated: true });
     ex.close();
     expect(r.output).toContain("2\tb");
     expect(r.output).toContain("3\tc");
@@ -135,22 +135,22 @@ describe("executor", () => {
     // bash cannot do this, and Terminal-Bench 74.9 was scored on a session
     // that could.
     const ex = new ToolExecutor({ cwd });
-    await ex.run({ id: "1", name: "term", arguments: { keystrokes: "MOTIF_X=42\n", duration_s: 0.3 }, repaired: false });
-    const r = await ex.run({ id: "2", name: "term", arguments: { keystrokes: "echo $MOTIF_X\n", duration_s: 0.4 }, repaired: false });
+    await ex.run({ id: "1", name: "term", arguments: { keystrokes: "MOTIF_X=42\n", duration_s: 0.3 }, repaired: false, validated: true });
+    const r = await ex.run({ id: "2", name: "term", arguments: { keystrokes: "echo $MOTIF_X\n", duration_s: 0.4 }, repaired: false, validated: true });
     ex.close();
     expect(r.output).toContain("42");
   });
 
   it("loads a skill body through the skill tool", async () => {
     const ex = new ToolExecutor({ cwd, skills });
-    const r = await ex.run({ id: "1", name: "skill", arguments: { name: "commit" }, repaired: false });
+    const r = await ex.run({ id: "1", name: "skill", arguments: { name: "commit" }, repaired: false, validated: true });
     ex.close();
     expect(r.output).toContain('<skill name="commit">');
   });
 
   it("rejects MCP args that are not a JSON object string", async () => {
     const ex = new ToolExecutor({ cwd, callMcp: async () => "ok" });
-    const r = await ex.run({ id: "1", name: "mcp", arguments: { server: "s", method: "m", args: "not json" }, repaired: false });
+    const r = await ex.run({ id: "1", name: "mcp", arguments: { server: "s", method: "m", args: "not json" }, repaired: false, validated: true });
     ex.close();
     expect(r.ok).toBe(false);
     expect(r.output).toContain("JSON object string");
@@ -158,7 +158,7 @@ describe("executor", () => {
 
   it("says so when a tool is unavailable rather than failing silently", async () => {
     const ex = new ToolExecutor({ cwd });
-    const r = await ex.run({ id: "1", name: "task", arguments: { agent: "x", prompt: "y" }, repaired: false });
+    const r = await ex.run({ id: "1", name: "task", arguments: { agent: "x", prompt: "y" }, repaired: false, validated: true });
     ex.close();
     expect(r.output).toContain("not available");
   });
@@ -174,7 +174,7 @@ describe("executor", () => {
         return { ok: true, reason: "done", runId: "r1", summary: "s" };
       },
     });
-    const r = await ex.run({ id: "1", name: "task", arguments: { agent: "explorer", prompt: "  " }, repaired: false });
+    const r = await ex.run({ id: "1", name: "task", arguments: { agent: "explorer", prompt: "  " }, repaired: false, validated: true });
     ex.close();
     expect(r.ok).toBe(false);
     expect(spawned).toBe(0);
@@ -188,7 +188,7 @@ describe("executor", () => {
       cwd,
       runAgent: async () => ({ ok: false, reason: "turn_limit", runId: "r7", summary: "got partway" }),
     });
-    const r = await ex.run({ id: "1", name: "task", arguments: { agent: "explorer", prompt: "look" }, repaired: false });
+    const r = await ex.run({ id: "1", name: "task", arguments: { agent: "explorer", prompt: "look" }, repaired: false, validated: true });
     ex.close();
     expect(r.ok).toBe(false);
     expect(r.output).toContain("turn_limit");
@@ -200,7 +200,7 @@ describe("executor", () => {
       cwd,
       runAgent: async () => ({ ok: true, reason: "done", runId: "r8", summary: "found it in parse.ts" }),
     });
-    const r = await ex.run({ id: "1", name: "task", arguments: { agent: "explorer", prompt: "look" }, repaired: false });
+    const r = await ex.run({ id: "1", name: "task", arguments: { agent: "explorer", prompt: "look" }, repaired: false, validated: true });
     ex.close();
     expect(r.ok).toBe(true);
     expect(r.output).toContain("found it in parse.ts");
@@ -212,7 +212,7 @@ describe("executor", () => {
       cwd,
       hooks: { PreToolUse: [{ matcher: "bash", command: "exit 1", blocking: true }] },
     });
-    const r = await ex.run({ id: "1", name: "bash", arguments: { command: "echo nope" }, repaired: false });
+    const r = await ex.run({ id: "1", name: "bash", arguments: { command: "echo nope" }, repaired: false, validated: true });
     ex.close();
     expect(r.ok).toBe(false);
     expect(r.output).toContain("blocked by a PreToolUse hook");
@@ -223,7 +223,7 @@ describe("executor", () => {
       cwd,
       hooks: { PostToolUse: [{ command: "echo lint-failed >&2; exit 1" }] },
     });
-    const r = await ex.run({ id: "1", name: "bash", arguments: { command: "echo ok" }, repaired: false });
+    const r = await ex.run({ id: "1", name: "bash", arguments: { command: "echo ok" }, repaired: false, validated: true });
     ex.close();
     expect(r.ok).toBe(true);
     expect(r.output).toContain("[hooks]");

@@ -5,3 +5,4 @@ export * from "./template.js";
 export * from "./toolcall.js";
 export * from "./scrubber.js";
 export * from "./channel.js";
+export * from "./validate.js";

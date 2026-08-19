@@ -48,15 +48,24 @@ export interface ExecutorOptions {
   timeoutMs?: number;
 }
 
+/**
+ * Read an argument that the validator has already checked.
+ *
+ * No coercion. `String(v)` used to turn a number into a plausible command and
+ * `Number(v)` used to turn `"abc"` into a NaN timeout, both of which produced a
+ * call the model never made. Every invocation reaching this module carries the
+ * `validated` marker, so a missing or wrong-typed value here is a harness bug
+ * rather than model output, and the empty-string fallback is a last resort that
+ * should be unreachable.
+ */
 function str(args: Record<string, unknown>, key: string): string {
   const v = args[key];
-  return typeof v === "string" ? v : v === undefined || v === null ? "" : String(v);
+  return typeof v === "string" ? v : "";
 }
 
 function num(args: Record<string, unknown>, key: string): number | undefined {
   const v = args[key];
-  const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : NaN;
-  return Number.isFinite(n) ? n : undefined;
+  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
 }
 
 /* ------------------------------------------------------------------ */

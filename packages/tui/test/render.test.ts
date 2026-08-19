@@ -58,7 +58,7 @@ const SESSION: LoopEvent[] = [
   { type: "usage", contextTokens: 4700, kvBytes: 287_000_000, tokensPerSecond: 27.4 },
   {
     type: "tool_start",
-    call: { id: "c1", name: "bash", arguments: { command: "rg -n 'ohe_subtract' hallbar/backend/" }, repaired: false },
+    call: { id: "c1", name: "bash", arguments: { command: "rg -n 'ohe_subtract' hallbar/backend/" }, repaired: false, validated: true },
   },
   {
     type: "tool_end",
@@ -72,7 +72,7 @@ const SESSION: LoopEvent[] = [
   {
     type: "tool_start",
     // Repaired: the model wrote a shell variable inside a JSON string.
-    call: { id: "c2", name: "apply_patch", arguments: { patch: "--- a/ohe_subtraction.py\n+++ b/ohe_subtraction.py" }, repaired: true },
+    call: { id: "c2", name: "apply_patch", arguments: { patch: "--- a/ohe_subtraction.py\n+++ b/ohe_subtraction.py" }, repaired: true, validated: true },
   },
   { type: "tool_end", id: "c2", ok: false, output: "test_ohe.py: 2 failed", ms: 1900 },
   { type: "hook", event: "PostToolUse", label: "fmt", ok: true },
@@ -127,7 +127,7 @@ describe("transcript", () => {
   it("clips long tool output rather than flooding the screen", () => {
     const long = Array.from({ length: 200 }, (_, i) => `line ${i}`).join("\n");
     const state = fold([
-      { type: "tool_start", call: { id: "x", name: "bash", arguments: { command: "ls" }, repaired: false } },
+      { type: "tool_start", call: { id: "x", name: "bash", arguments: { command: "ls" }, repaired: false, validated: true } },
       { type: "tool_end", id: "x", ok: true, output: long, ms: 5 },
     ]);
     const out = renderTranscript(state, OPTS).join("\n");
@@ -280,7 +280,7 @@ describe("display width — Hangul and CJK", () => {
 
   it("keeps rules inside the terminal even with a wide label", () => {
     const state = fold([
-      { type: "tool_start", call: { id: "k", name: "한글도구", arguments: { command: "ls" }, repaired: false } },
+      { type: "tool_start", call: { id: "k", name: "한글도구", arguments: { command: "ls" }, repaired: false, validated: true } },
     ]);
     for (const line of renderTranscript(state, { width: 60 })) {
       expect(displayWidth(line), line).toBeLessThanOrEqual(60);
@@ -304,7 +304,7 @@ describe("scrollback safety", () => {
     // appears to have produced nothing — the two-region rule applied to cells
     // rather than to text. Caught by the first real end-to-end run.
     const started = fold([
-      { type: "tool_start", call: { id: "t", name: "bash", arguments: { command: "ls" }, repaired: false } },
+      { type: "tool_start", call: { id: "t", name: "bash", arguments: { command: "ls" }, repaired: false, validated: true } },
     ]);
     expect(settledCount(started)).toBe(0);
     expect(renderSettled(started, OPTS)).toHaveLength(0);
@@ -319,7 +319,7 @@ describe("scrollback safety", () => {
   it("holds everything after an unsettled cell", () => {
     // Committing later cells around a pending one would reorder the transcript.
     const state = fold([
-      { type: "tool_start", call: { id: "t", name: "bash", arguments: { command: "ls" }, repaired: false } },
+      { type: "tool_start", call: { id: "t", name: "bash", arguments: { command: "ls" }, repaired: false, validated: true } },
       { type: "notice", level: "info", text: "after" },
     ]);
     expect(settledCount(state)).toBe(0);

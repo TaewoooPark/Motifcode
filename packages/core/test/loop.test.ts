@@ -185,6 +185,226 @@ describe("malformed output", () => {
   });
 });
 
+describe("the action gate", () => {
+  /** An executor that records every call it is asked to run. */
+  function spy(): { calls: string[]; executor: Executor } {
+    const calls: string[] = [];
+    return {
+      calls,
+      executor: {
+        run: async (c) => {
+          calls.push(c.name);
+          return { ok: true, output: "ok" };
+        },
+      },
+    };
+  }
+
+  const raw = (body: string) => ({ content: body, rawText: body, ms: 1 });
+  const block = (obj: unknown) => `</think><tool_call>${JSON.stringify(obj)}</tool_call>`;
+
+  it("runs nothing when one call in a batch is schema-invalid", async () => {
+    // All-or-nothing. A turn that asks for three things and gets one wrong
+    // leaves the tree in a state neither side can describe: two edits applied,
+    // one not, and a repair prompt that cannot say which.
+    const { calls, executor } = spy();
+    const { emit } = collect();
+    const transport = new ScriptedTransport([
+      raw(
+        block({ name: "bash", arguments: { command: "echo one" } }) +
+          block({ name: "bash", arguments: { command: 42 } }),
+      ),
+      doneBody("d"),
+      doneBody("d", { confirm: true }),
+    ]);
+    await runLoop({ ...base, transport, executor, emit });
+    expect(calls).toEqual([]);
+  });
+
+  it("refuses a call with a missing required argument", async () => {
+    const { calls, executor } = spy();
+    const { events, emit } = collect();
+    const transport = new ScriptedTransport([
+      raw(block({ name: "bash", arguments: {} })),
+      doneBody("d"),
+      doneBody("d", { confirm: true }),
+    ]);
+    await runLoop({ ...base, transport, executor, emit });
+    expect(calls).toEqual([]);
+    const failures = kinds(events, "parse_failure") as Extract<LoopEvent, { type: "parse_failure" }>[];
+    expect(failures.some((f) => f.kind === "rejected")).toBe(true);
+  });
+
+  it("refuses an unregistered tool before it reaches the executor", async () => {
+    const { calls, executor } = spy();
+    const { emit } = collect();
+    const transport = new ScriptedTransport([
+      raw(block({ name: "curl", arguments: { url: "http://x" } })),
+      doneBody("d"),
+      doneBody("d", { confirm: true }),
+    ]);
+    await runLoop({ ...base, transport, executor, emit });
+    expect(calls).toEqual([]);
+  });
+
+  it("refuses a batch whose payload was only closed by the bracket balancer", async () => {
+    // A command cut off mid-word balances as cleanly as a whole one, and the
+    // difference is the part of the command that is missing.
+    const { calls, executor } = spy();
+    const { emit } = collect();
+    const transport = new ScriptedTransport([
+      raw('</think><tool_call>{"name": "bash", "arguments": {"command": "rm -rf /tmp/build-ca</tool_call>'),
+      doneBody("d"),
+      doneBody("d", { confirm: true }),
+    ]);
+    await runLoop({ ...base, transport, executor, emit });
+    expect(calls).toEqual([]);
+  });
+
+  it("refuses everything when the response hit the output token cap", async () => {
+    const { calls, executor } = spy();
+    const { emit } = collect();
+    const transport = new ScriptedTransport([
+      { ...raw(block({ name: "bash", arguments: { command: "ls" } })), finishReason: "length" },
+      doneBody("d"),
+      doneBody("d", { confirm: true }),
+    ]);
+    await runLoop({ ...base, transport, executor, emit });
+    expect(calls).toEqual([]);
+  });
+
+  it("runs a re-emitted call exactly once after a refusal", async () => {
+    const { calls, executor } = spy();
+    const { emit } = collect();
+    const transport = new ScriptedTransport([
+      raw(
+        block({ name: "bash", arguments: { command: "echo good" } }) +
+          block({ name: "bash", arguments: { command: null } }),
+      ),
+      raw(block({ name: "bash", arguments: { command: "echo good" } })),
+      doneBody("d"),
+      doneBody("d", { confirm: true }),
+    ]);
+    await runLoop({ ...base, transport, executor, emit });
+    expect(calls).toEqual(["bash"]);
+  });
+
+  it("refuses done mixed with other actions", async () => {
+    const { calls, executor } = spy();
+    const { emit } = collect();
+    const transport = new ScriptedTransport([
+      raw(
+        block({ name: "bash", arguments: { command: "ls" } }) +
+          block({ name: "done", arguments: { summary: "and finished" } }),
+      ),
+      doneBody("d"),
+      doneBody("d", { confirm: true }),
+    ]);
+    const r = await runLoop({ ...base, transport, executor, emit });
+    expect(calls).toEqual([]);
+    expect(r.turns).toBeGreaterThan(1);
+  });
+
+  it("does not execute a server-extracted call whose arguments did not decode", async () => {
+    // "We still know which tool was meant" turns a broken bash call into bash
+    // with an empty command.
+    const { calls, executor } = spy();
+    const { emit } = collect();
+    const transport = new ScriptedTransport([
+      {
+        content: "",
+        rawText: "",
+        ms: 1,
+        toolCalls: [{ id: "s1", type: "function" as const, function: { name: "bash", arguments: "{not json" } }],
+      },
+      doneBody("d"),
+      doneBody("d", { confirm: true }),
+    ]);
+    await runLoop({ ...base, transport, executor, emit });
+    expect(calls).toEqual([]);
+  });
+});
+
+describe("the done contract", () => {
+  const okExec: Executor = { run: async () => ({ ok: true, output: "ok" }) };
+
+  it("does not end on a second done with no confirm flag", async () => {
+    const { emit } = collect();
+    const transport = new ScriptedTransport(
+      [doneBody("all set"), doneBody("all set"), doneBody("all set"), doneBody("all set", { confirm: true })],
+    );
+    const r = await runLoop({ ...base, transport, executor: okExec, emit, maxTurns: 6 });
+    expect(r.reason).toBe("done");
+    // Three unconfirmed proposals had to pass before the confirmed one.
+    expect(r.turns).toBe(4);
+  });
+
+  it("does not end on confirm: false", async () => {
+    const { emit } = collect();
+    const transport = new ScriptedTransport([
+      doneBody("all set"),
+      toolCallBody("done", { summary: "all set", confirm: false }),
+      doneBody("all set", { confirm: true }),
+    ]);
+    const r = await runLoop({ ...base, transport, executor: okExec, emit, maxTurns: 6 });
+    expect(r.reason).toBe("done");
+    expect(r.turns).toBe(3);
+  });
+
+  it("does not end when the confirmed summary is a different claim", async () => {
+    const { emit } = collect();
+    const transport = new ScriptedTransport([
+      doneBody("fixed the parser"),
+      toolCallBody("done", { summary: "fixed everything, shipped it", confirm: true }),
+      doneBody("fixed the parser"),
+      doneBody("fixed the parser", { confirm: true }),
+    ]);
+    const r = await runLoop({ ...base, transport, executor: okExec, emit, maxTurns: 8 });
+    expect(r.reason).toBe("done");
+    expect(r.summary).toBe("fixed the parser");
+    expect(r.turns).toBe(4);
+  });
+
+  it("tolerates reflowed whitespace in the confirmed summary", async () => {
+    const { emit } = collect();
+    const transport = new ScriptedTransport([
+      doneBody("fixed   the\nparser"),
+      toolCallBody("done", { summary: "fixed the parser", confirm: true }),
+    ]);
+    const r = await runLoop({ ...base, transport, executor: okExec, emit, maxTurns: 4 });
+    expect(r.reason).toBe("done");
+  });
+
+  it("still challenges a first done that already says confirm: true", async () => {
+    // The flag answers a question the harness has not asked yet. Accepting it
+    // makes the confirmation step decorative.
+    const { emit } = collect();
+    const transport = new ScriptedTransport([
+      doneBody("done immediately", { confirm: true }),
+      doneBody("done immediately", { confirm: true }),
+    ]);
+    const r = await runLoop({ ...base, transport, executor: okExec, emit, maxTurns: 4 });
+    expect(r.reason).toBe("done");
+    expect(r.turns).toBe(2);
+  });
+
+  it("withdraws a pending proposal when the model goes back to work", async () => {
+    const { emit } = collect();
+    const transport = new ScriptedTransport([
+      doneBody("nearly"),
+      toolCallBody("bash", { command: "ls" }),
+      doneBody("nearly", { confirm: true }),
+      doneBody("nearly"),
+      doneBody("nearly", { confirm: true }),
+    ]);
+    const r = await runLoop({ ...base, transport, executor: okExec, emit, maxTurns: 8 });
+    expect(r.reason).toBe("done");
+    // Turn 3's confirmation had nothing to confirm, so it became a fresh
+    // proposal and needed its own confirmation.
+    expect(r.turns).toBe(5);
+  });
+});
+
 describe("channel downgrade", () => {
   it("moves off toolcall after repeated parse failures", async () => {
     // Two consecutive failures is the trigger. The point is not to keep trying

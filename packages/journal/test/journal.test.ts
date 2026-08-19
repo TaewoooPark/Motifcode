@@ -35,7 +35,7 @@ const RUN: LoopEvent[] = [
     toolsHash: HEADER.toolsHash,
   },
   { type: "turn_start", turn: 1 },
-  { type: "tool_start", call: { id: "c1", name: "bash", arguments: { command: "ls" }, repaired: true } },
+  { type: "tool_start", call: { id: "c1", name: "bash", arguments: { command: "ls" }, repaired: true, validated: true } },
   { type: "tool_end", id: "c1", ok: true, output: "a.ts", ms: 12 },
   { type: "parse_failure", kind: "unrecoverable", sample: "" },
   { type: "session_end", reason: "done", summary: "finished" },

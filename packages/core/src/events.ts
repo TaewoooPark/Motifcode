@@ -20,6 +20,14 @@ export interface ToolInvocation {
   arguments: Record<string, unknown>;
   /** True when the call only parsed after repair. Feeds the breakage budget. */
   repaired: boolean;
+  /**
+   * Proof that this call passed the registered schema.
+   *
+   * A marker rather than a comment: an executor should be able to state that
+   * every call it ever sees has been checked, and the only way to say that is
+   * to make the unchecked case unrepresentable at the boundary.
+   */
+  validated: true;
 }
 
 export type ParseFailureKind =
@@ -28,7 +36,14 @@ export type ParseFailureKind =
   /** Zero calls, but the text still carries tool syntax — not a final answer. */
   | "leaked"
   /** An opener with no closer, usually a length cap. */
-  | "truncated";
+  | "truncated"
+  /**
+   * Parsed, but refused before execution: schema-invalid arguments, an
+   * incomplete payload, or `done` mixed with other actions. Counted separately
+   * from parse failures because the fix the model needs is different — the
+   * syntax was fine and the meaning was not.
+   */
+  | "rejected";
 
 export type LoopEvent =
   | {
