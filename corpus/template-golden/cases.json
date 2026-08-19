@@ -1,0 +1,618 @@
+{
+  "bare_user": {
+    "input": {
+      "messages": [
+        {
+          "role": "user",
+          "content": "hi"
+        }
+      ],
+      "add_generation_prompt": true
+    },
+    "expected": "<|beginoftext|><|startofturn|><|user|>hi<|endofturn|><|startofturn|><|assistant|><think>"
+  },
+  "system_no_tools": {
+    "input": {
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are motif-code."
+        },
+        {
+          "role": "user",
+          "content": "hi"
+        }
+      ],
+      "add_generation_prompt": true
+    },
+    "expected": "<|beginoftext|><|startofturn|><|system|>You are motif-code.<|endofturn|><|startofturn|><|user|>hi<|endofturn|><|startofturn|><|assistant|><think>"
+  },
+  "system_with_tools": {
+    "input": {
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are motif-code."
+        },
+        {
+          "role": "user",
+          "content": "hi"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "bash",
+            "description": "Run a shell command",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "command": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "command"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "read",
+            "description": "Read a file",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "done",
+            "description": "Finish the task",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "summary": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "summary"
+              ],
+              "additionalProperties": false
+            }
+          }
+        }
+      ],
+      "add_generation_prompt": true
+    },
+    "expected": "<|beginoftext|><|startofturn|><|system|># Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n\n<tools>\n{\"name\": \"bash\", \"description\": \"Run a shell command\", \"parameters\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\"}}, \"required\": [\"command\"], \"additionalProperties\": false}}\n{\"name\": \"read\", \"description\": \"Read a file\", \"parameters\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}, \"required\": [\"path\"], \"additionalProperties\": false}}\n{\"name\": \"done\", \"description\": \"Finish the task\", \"parameters\": {\"type\": \"object\", \"properties\": {\"summary\": {\"type\": \"string\"}}, \"required\": [\"summary\"], \"additionalProperties\": false}}\n</tools>\n\nFor each function call, output in JSON within <tool_call> tags:\n\n<tool_call>{\"name\": \"bash\", \"arguments\": {\"command\": <command>}}</tool_call>\n<tool_call>{\"name\": \"read\", \"arguments\": {\"path\": <path>}}</tool_call>\n<tool_call>{\"name\": \"done\", \"arguments\": {\"summary\": <summary>}}</tool_call>\n\nYou are motif-code.<|endofturn|><|startofturn|><|user|>hi<|endofturn|><|startofturn|><|assistant|><think>"
+  },
+  "tools_no_system": {
+    "input": {
+      "messages": [
+        {
+          "role": "user",
+          "content": "hi"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "bash",
+            "description": "Run a shell command",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "command": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "command"
+              ],
+              "additionalProperties": false
+            }
+          }
+        }
+      ],
+      "add_generation_prompt": true
+    },
+    "expected": "<|beginoftext|><|startofturn|><|system|># Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n\n<tools>\n{\"name\": \"bash\", \"description\": \"Run a shell command\", \"parameters\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\"}}, \"required\": [\"command\"], \"additionalProperties\": false}}\n</tools>\n\nFor each function call, output in JSON within <tool_call> tags:\n\n<tool_call>{\"name\": \"bash\", \"arguments\": {\"command\": <command>}}</tool_call><|endofturn|><|startofturn|><|user|>hi<|endofturn|><|startofturn|><|assistant|><think>"
+  },
+  "korean_system_and_content": {
+    "input": {
+      "messages": [
+        {
+          "role": "system",
+          "content": "너는 motif-code다. 한국어로 답한다."
+        },
+        {
+          "role": "user",
+          "content": "OHE 배경 제거가 안 먹어"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "bash",
+            "description": "Run a shell command",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "command": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "command"
+              ],
+              "additionalProperties": false
+            }
+          }
+        }
+      ],
+      "add_generation_prompt": true
+    },
+    "expected": "<|beginoftext|><|startofturn|><|system|># Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n\n<tools>\n{\"name\": \"bash\", \"description\": \"Run a shell command\", \"parameters\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\"}}, \"required\": [\"command\"], \"additionalProperties\": false}}\n</tools>\n\nFor each function call, output in JSON within <tool_call> tags:\n\n<tool_call>{\"name\": \"bash\", \"arguments\": {\"command\": <command>}}</tool_call>\n\n너는 motif-code다. 한국어로 답한다.<|endofturn|><|startofturn|><|user|>OHE 배경 제거가 안 먹어<|endofturn|><|startofturn|><|assistant|><think>"
+  },
+  "reasoning_intermediate_with_tools": {
+    "input": {
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are motif-code."
+        },
+        {
+          "role": "user",
+          "content": "q1"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "AAA intermediate",
+          "tool_calls": [
+            {
+              "id": "c1",
+              "type": "function",
+              "function": {
+                "name": "bash",
+                "arguments": {
+                  "command": "ls"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "c1",
+          "content": "a.py"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "BBB last",
+          "tool_calls": [
+            {
+              "id": "c2",
+              "type": "function",
+              "function": {
+                "name": "bash",
+                "arguments": {
+                  "command": "cat a.py"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "c2",
+          "content": "print(1)"
+        },
+        {
+          "role": "user",
+          "content": "q2"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "bash",
+            "description": "Run a shell command",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "command": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "command"
+              ],
+              "additionalProperties": false
+            }
+          }
+        }
+      ],
+      "add_generation_prompt": true
+    },
+    "expected": "<|beginoftext|><|startofturn|><|system|># Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n\n<tools>\n{\"name\": \"bash\", \"description\": \"Run a shell command\", \"parameters\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\"}}, \"required\": [\"command\"], \"additionalProperties\": false}}\n</tools>\n\nFor each function call, output in JSON within <tool_call> tags:\n\n<tool_call>{\"name\": \"bash\", \"arguments\": {\"command\": <command>}}</tool_call>\n\nYou are motif-code.<|endofturn|><|startofturn|><|user|>q1<|endofturn|><|startofturn|><|assistant|><think>AAA intermediate</think>\n<tool_call>{\"name\": \"bash\", \"arguments\": {\"command\": \"ls\"}, \"id\": \"c1\"}</tool_call><|endofturn|><|startofturn|><|tool|><tool_response>{\"tool_call_id\": \"c1\", \"content\": \"a.py\"}</tool_response><|endofturn|><|startofturn|><|assistant|><think>BBB last</think>\n<tool_call>{\"name\": \"bash\", \"arguments\": {\"command\": \"cat a.py\"}, \"id\": \"c2\"}</tool_call><|endofturn|><|startofturn|><|tool|><tool_response>{\"tool_call_id\": \"c2\", \"content\": \"print(1)\"}</tool_response><|endofturn|><|startofturn|><|user|>q2<|endofturn|><|startofturn|><|assistant|><think>"
+  },
+  "reasoning_intermediate_without_tools": {
+    "input": {
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are motif-code."
+        },
+        {
+          "role": "user",
+          "content": "q1"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "AAA intermediate"
+        },
+        {
+          "role": "user",
+          "content": "q2"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "reasoning_content": "BBB last"
+        },
+        {
+          "role": "user",
+          "content": "q3"
+        }
+      ],
+      "add_generation_prompt": true
+    },
+    "expected": "<|beginoftext|><|startofturn|><|system|>You are motif-code.<|endofturn|><|startofturn|><|user|>q1<|endofturn|><|startofturn|><|assistant|><|endofturn|><|startofturn|><|user|>q2<|endofturn|><|startofturn|><|assistant|><think>BBB last</think><|endofturn|><|startofturn|><|user|>q3<|endofturn|><|startofturn|><|assistant|><think>"
+  },
+  "reasoning_inline_think_tags": {
+    "input": {
+      "messages": [
+        {
+          "role": "user",
+          "content": "q"
+        },
+        {
+          "role": "assistant",
+          "content": "<think>inline reasoning</think>\nthe answer"
+        },
+        {
+          "role": "user",
+          "content": "q2"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "bash",
+            "description": "Run a shell command",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "command": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "command"
+              ],
+              "additionalProperties": false
+            }
+          }
+        }
+      ],
+      "add_generation_prompt": true
+    },
+    "expected": "<|beginoftext|><|startofturn|><|system|># Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n\n<tools>\n{\"name\": \"bash\", \"description\": \"Run a shell command\", \"parameters\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\"}}, \"required\": [\"command\"], \"additionalProperties\": false}}\n</tools>\n\nFor each function call, output in JSON within <tool_call> tags:\n\n<tool_call>{\"name\": \"bash\", \"arguments\": {\"command\": <command>}}</tool_call><|endofturn|><|startofturn|><|user|>q<|endofturn|><|startofturn|><|assistant|><think>inline reasoning</think>the answer<|endofturn|><|startofturn|><|user|>q2<|endofturn|><|startofturn|><|assistant|><think>"
+  },
+  "parallel_tool_calls": {
+    "input": {
+      "messages": [
+        {
+          "role": "user",
+          "content": "q"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "p1",
+              "type": "function",
+              "function": {
+                "name": "bash",
+                "arguments": {
+                  "command": "a"
+                }
+              }
+            },
+            {
+              "id": "p2",
+              "type": "function",
+              "function": {
+                "name": "bash",
+                "arguments": {
+                  "command": "b"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "p1",
+          "content": "ra"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "p2",
+          "content": "rb"
+        },
+        {
+          "role": "user",
+          "content": "q2"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "bash",
+            "description": "Run a shell command",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "command": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "command"
+              ],
+              "additionalProperties": false
+            }
+          }
+        }
+      ],
+      "add_generation_prompt": true
+    },
+    "expected": "<|beginoftext|><|startofturn|><|system|># Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n\n<tools>\n{\"name\": \"bash\", \"description\": \"Run a shell command\", \"parameters\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\"}}, \"required\": [\"command\"], \"additionalProperties\": false}}\n</tools>\n\nFor each function call, output in JSON within <tool_call> tags:\n\n<tool_call>{\"name\": \"bash\", \"arguments\": {\"command\": <command>}}</tool_call><|endofturn|><|startofturn|><|user|>q<|endofturn|><|startofturn|><|assistant|>\n<tool_call>{\"name\": \"bash\", \"arguments\": {\"command\": \"a\"}, \"id\": \"p1\"}</tool_call>\n<tool_call>{\"name\": \"bash\", \"arguments\": {\"command\": \"b\"}, \"id\": \"p2\"}</tool_call><|endofturn|><|startofturn|><|tool|><tool_response>{\"tool_call_id\": \"p1\", \"content\": \"ra\"}</tool_response><tool_response>{\"tool_call_id\": \"p2\", \"content\": \"rb\"}</tool_response><|endofturn|><|startofturn|><|user|>q2<|endofturn|><|startofturn|><|assistant|><think>"
+  },
+  "tool_call_arguments_as_string": {
+    "input": {
+      "messages": [
+        {
+          "role": "user",
+          "content": "q"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "s1",
+              "type": "function",
+              "function": {
+                "name": "bash",
+                "arguments": "{\"command\": \"echo \\\"hi\\\"\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "s1",
+          "content": "hi"
+        },
+        {
+          "role": "user",
+          "content": "q2"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "bash",
+            "description": "Run a shell command",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "command": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "command"
+              ],
+              "additionalProperties": false
+            }
+          }
+        }
+      ],
+      "add_generation_prompt": true
+    },
+    "expected": "<|beginoftext|><|startofturn|><|system|># Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n\n<tools>\n{\"name\": \"bash\", \"description\": \"Run a shell command\", \"parameters\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\"}}, \"required\": [\"command\"], \"additionalProperties\": false}}\n</tools>\n\nFor each function call, output in JSON within <tool_call> tags:\n\n<tool_call>{\"name\": \"bash\", \"arguments\": {\"command\": <command>}}</tool_call><|endofturn|><|startofturn|><|user|>q<|endofturn|><|startofturn|><|assistant|>\n<tool_call>{\"name\": \"bash\", \"arguments\": {\"command\": \"echo \\\"hi\\\"\"}, \"id\": \"s1\"}</tool_call><|endofturn|><|startofturn|><|tool|><tool_response>{\"tool_call_id\": \"s1\", \"content\": \"hi\"}</tool_response><|endofturn|><|startofturn|><|user|>q2<|endofturn|><|startofturn|><|assistant|><think>"
+  },
+  "no_generation_prompt": {
+    "input": {
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are motif-code."
+        },
+        {
+          "role": "user",
+          "content": "hi"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "bash",
+            "description": "Run a shell command",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "command": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "command"
+              ],
+              "additionalProperties": false
+            }
+          }
+        }
+      ],
+      "add_generation_prompt": false
+    },
+    "expected": "<|beginoftext|><|startofturn|><|system|># Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n\n<tools>\n{\"name\": \"bash\", \"description\": \"Run a shell command\", \"parameters\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\"}}, \"required\": [\"command\"], \"additionalProperties\": false}}\n</tools>\n\nFor each function call, output in JSON within <tool_call> tags:\n\n<tool_call>{\"name\": \"bash\", \"arguments\": {\"command\": <command>}}</tool_call>\n\nYou are motif-code.<|endofturn|><|startofturn|><|user|>hi<|endofturn|><|endoftext|>"
+  },
+  "thinking_disabled": {
+    "input": {
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are motif-code."
+        },
+        {
+          "role": "user",
+          "content": "hi"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "bash",
+            "description": "Run a shell command",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "command": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "command"
+              ],
+              "additionalProperties": false
+            }
+          }
+        }
+      ],
+      "add_generation_prompt": true,
+      "enable_thinking": false
+    },
+    "expected": "<|beginoftext|><|startofturn|><|system|># Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n\n<tools>\n{\"name\": \"bash\", \"description\": \"Run a shell command\", \"parameters\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\"}}, \"required\": [\"command\"], \"additionalProperties\": false}}\n</tools>\n\nFor each function call, output in JSON within <tool_call> tags:\n\n<tool_call>{\"name\": \"bash\", \"arguments\": {\"command\": <command>}}</tool_call>\n\nYou are motif-code.<|endofturn|><|startofturn|><|user|>hi<|endofturn|><|startofturn|><|assistant|><think></think>"
+  },
+  "midstream_system": {
+    "input": {
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are motif-code."
+        },
+        {
+          "role": "user",
+          "content": "a"
+        },
+        {
+          "role": "system",
+          "content": "new rule"
+        },
+        {
+          "role": "user",
+          "content": "b"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "bash",
+            "description": "Run a shell command",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "command": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "command"
+              ],
+              "additionalProperties": false
+            }
+          }
+        }
+      ],
+      "add_generation_prompt": true
+    },
+    "expected": "<|beginoftext|><|startofturn|><|system|># Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n\n<tools>\n{\"name\": \"bash\", \"description\": \"Run a shell command\", \"parameters\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\"}}, \"required\": [\"command\"], \"additionalProperties\": false}}\n</tools>\n\nFor each function call, output in JSON within <tool_call> tags:\n\n<tool_call>{\"name\": \"bash\", \"arguments\": {\"command\": <command>}}</tool_call>\n\nYou are motif-code.<|endofturn|><|startofturn|><|user|>a<|endofturn|><|startofturn|><|system|>new rule<|endofturn|><|startofturn|><|user|>b<|endofturn|><|startofturn|><|assistant|><think>"
+  },
+  "user_references": {
+    "input": {
+      "messages": [
+        {
+          "role": "user",
+          "content": "q",
+          "references": "doc-1"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "bash",
+            "description": "Run a shell command",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "command": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "command"
+              ],
+              "additionalProperties": false
+            }
+          }
+        }
+      ],
+      "add_generation_prompt": true
+    },
+    "expected": "<|beginoftext|><|startofturn|><|system|># Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n\n<tools>\n{\"name\": \"bash\", \"description\": \"Run a shell command\", \"parameters\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\"}}, \"required\": [\"command\"], \"additionalProperties\": false}}\n</tools>\n\nFor each function call, output in JSON within <tool_call> tags:\n\n<tool_call>{\"name\": \"bash\", \"arguments\": {\"command\": <command>}}</tool_call><|endofturn|><|startofturn|><|user|><|reference|>doc-1\nq<|endofturn|><|startofturn|><|assistant|><think>"
+  }
+}

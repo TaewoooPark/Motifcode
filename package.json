@@ -1,0 +1,25 @@
+{
+  "name": "motifcode",
+  "version": "0.0.1",
+  "private": true,
+  "description": "A coding agent harness built specifically for Motif-3",
+  "type": "module",
+  "packageManager": "pnpm@10.33.2",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "echo 'no build step yet'",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "lint:tools": "tsx packages/tools/src/lint.ts",
+    "fixtures": "python3 toolkit/fixtures/gen_template_golden.py"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "tsx": "^4.23.12",
+    "typescript": "^5.9.3",
+    "vitest": "^2.1.9"
+  }
+}

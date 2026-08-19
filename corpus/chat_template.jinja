@@ -1,0 +1,157 @@
+{%- macro visible_text(content) -%}
+    {%- if content is string -%}
+        {{- content -}}
+    {%- elif content is iterable and content is not mapping -%}
+        {%- for item in content -%}
+            {%- if item is mapping and item.type == 'text' -%}
+                {{- item.text -}}
+            {%- elif item is string -%}
+                {{- item -}}
+            {%- endif -%}
+        {%- endfor -%}
+    {%- else -%}
+        {{- content -}}
+    {%- endif -%}
+{%- endmacro -%}
+
+{{- '<|beginoftext|>' -}}
+
+{%- set ns = namespace(has_system=false, last_user_index=-1, last_assistant_index=-1) -%}
+{%- if messages | length > 0 and messages[0].role == 'system' -%}
+    {%- set ns.has_system = true -%}
+{%- endif -%}
+{%- for m in messages -%}
+    {%- if m.role == 'user' -%}
+        {%- set ns.last_user_index = loop.index0 -%}
+    {%- elif m.role == 'assistant' -%}
+        {%- set ns.last_assistant_index = loop.index0 -%}
+    {%- endif -%}
+{%- endfor -%}
+
+{#- ── System / Tools block ── -#}
+{%- if tools is iterable and tools | length > 0 -%}
+    {{- '<|startofturn|><|system|>' -}}
+    {{- '# Tools\n\nYou may call one or more functions to assist with the user query.\n\n' -}}
+    {{- 'You are provided with function signatures within <tools></tools> XML tags:\n\n<tools>' -}}
+    {%- for tool in tools -%}
+        {%- if tool.function is defined -%}
+            {%- set tool = tool.function -%}
+        {%- endif -%}
+        {{- '\n' ~ (tool | tojson) -}}
+    {%- endfor -%}
+    {{- '\n</tools>' -}}
+    {{- '\n\nFor each function call, output in JSON within <tool_call> tags:\n' -}}
+    {%- for tool in tools -%}
+        {%- if tool.function is defined -%}
+            {%- set tool = tool.function -%}
+        {%- endif -%}
+        {%- set _props = tool.parameters.properties if (tool.parameters is defined and tool.parameters.properties is defined) else {} -%}
+        {{- '\n<tool_call>{"name": "' ~ tool.name ~ '", "arguments": {' -}}
+        {%- set _keys = _props | list -%}
+        {%- for k in _keys -%}
+            {{- '"' ~ k ~ '": <' ~ k ~ '>' -}}
+            {%- if not loop.last -%}{{- ', ' -}}{%- endif -%}
+        {%- endfor -%}
+        {{- '}}</tool_call>' -}}
+    {%- endfor -%}
+    {%- if ns.has_system -%}
+        {{- '\n\n' ~ visible_text(messages[0].content) -}}
+    {%- endif -%}
+    {{- '<|endofturn|>' -}}
+{%- elif ns.has_system -%}
+    {{- '<|startofturn|><|system|>' ~ visible_text(messages[0].content) ~ '<|endofturn|>' -}}
+{%- endif -%}
+
+{#- ── Conversation turns ── -#}
+{%- for m in messages -%}
+
+    {#- [Fix 1] continue 대신 if/elif 체인으로 첫 system 스킵 -#}
+    {%- if loop.index0 == 0 and m.role == 'system' -%}
+        {#- already rendered above, skip -#}
+
+    {#- [Fix 2] 중간에 나오는 system 메시지도 처리 -#}
+    {%- elif m.role == 'system' -%}
+        {{- '<|startofturn|><|system|>' ~ visible_text(m.content) ~ '<|endofturn|>' -}}
+
+    {%- elif m.role == 'user' -%}
+        {{- '<|startofturn|><|user|>' -}}
+        {%- if m.references is defined and m.references -%}
+            {{- '<|reference|>' ~ m.references ~ '\n' -}}
+        {%- endif -%}
+        {{- visible_text(m.content) -}}
+        {{- '<|endofturn|>' -}}
+
+    {%- elif m.role == 'assistant' -%}
+        {{- '<|startofturn|><|assistant|>' -}}
+
+        {#- [순서 정책] think → plan → content → tool_calls -#}
+
+        {#- Reasoning block -#}
+        {%- set _content = visible_text(m.content) -%}
+        {%- set _reasoning = '' -%}
+        {%- if m.reasoning_content is string -%}
+            {%- set _reasoning = m.reasoning_content -%}
+        {%- elif '</think>' in _content -%}
+            {%- set _reasoning = _content.split('</think>')[0].split('<think>')[-1].strip() -%}
+            {%- set _content = _content.split('</think>', 1)[-1].lstrip('\n') -%}
+        {%- endif -%}
+        {%- set _has_tools = (tools is defined and tools is iterable and tools | length > 0) -%}
+        {%- set _emit_think = _reasoning and (_has_tools or loop.index0 == ns.last_assistant_index) -%}
+        {%- if _emit_think -%}
+            {{- '<think>' ~ _reasoning.strip() ~ '</think>' -}}
+        {%- endif -%}
+
+        {#- Text content -#}
+        {%- if _content.strip() -%}
+            {{- _content.strip() -}}
+        {%- endif -%}
+
+        {#- Tool calls — IDs are rendered for intermediate assistant turns
+             (context for call↔response correlation) but omitted for the last
+             assistant turn (prediction target — model should not learn to
+             generate IDs). After multi-turn data expansion, intermediate turns
+             become GRAY context and the last turn is GREEN. -#}
+        {%- if m.tool_calls is defined and m.tool_calls -%}
+            {%- set _is_last_assistant = (loop.index0 == ns.last_assistant_index) and not add_generation_prompt -%}
+            {%- for tc in m.tool_calls -%}
+                {%- set _tc_id = tc.id if (tc.id is defined and not _is_last_assistant) else none -%}
+                {%- if tc.function is defined -%}
+                    {%- set tc = tc.function -%}
+                {%- endif -%}
+                {%- set _id_suffix = ', "id": ' ~ (_tc_id | tojson) if _tc_id is not none else '' -%}
+                {%- if tc.arguments is not defined or not tc.arguments or tc.arguments == "" -%}
+                    {{- '\n<tool_call>' ~ '{"name": "' ~ tc.name ~ '", "arguments": ' ~ null ~ _id_suffix ~ '}' ~ '</tool_call>' -}}
+                {%- elif tc.arguments is string -%}
+                    {{- '\n<tool_call>' ~ '{"name": "' ~ tc.name ~ '", "arguments": ' ~ tc.arguments ~ _id_suffix ~ '}' ~ '</tool_call>' -}}
+                {%- else -%}
+                    {{- '\n<tool_call>' ~ '{"name": "' ~ tc.name ~ '", "arguments": ' ~ (tc.arguments | tojson) ~ _id_suffix ~ '}' ~ '</tool_call>' -}}
+                {%- endif -%}
+            {%- endfor -%}
+        {%- endif -%}
+
+        {{- '<|endofturn|>' -}}
+
+    {%- elif m.role == 'tool' -%}
+        {#- [Fix 3] loop.previtem/nextitem으로 인덱스 오버플로 제거 -#}
+        {%- if loop.first or loop.previtem.role != 'tool' -%}
+            {{- '<|startofturn|><|tool|>' -}}
+        {%- endif -%}
+        {{- '<tool_response>' ~ ({"tool_call_id": m.tool_call_id, "content": m.content} | tojson) ~ '</tool_response>' -}}
+        {%- if loop.last or loop.nextitem.role != 'tool' -%}
+            {{- '<|endofturn|>' -}}
+        {%- endif -%}
+
+    {%- endif -%}
+{%- endfor -%}
+
+{#- ── Generation prompt ── -#}
+{%- if add_generation_prompt -%}
+    {{- '<|startofturn|><|assistant|>' -}}
+    {%- if enable_thinking is defined and not enable_thinking -%}
+        {{- '<think></think>' -}}
+    {%- else -%}
+        {{- '<think>' -}}
+    {%- endif -%}
+{%- else -%}
+    {{- '<|endoftext|>' -}}
+{%- endif -%}

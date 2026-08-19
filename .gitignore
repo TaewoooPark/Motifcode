@@ -1,0 +1,14 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+.motif/
+*.log
+
+# Large model artifacts never belong in the repo.
+*.safetensors
+*.gguf
+# goldens are committed on purpose: CI must run without Python

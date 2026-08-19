@@ -1,0 +1,14 @@
+{
+  "name": "@motifcode/protocol",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Motif-3 wire protocol: chat template, tool-call repair, reasoning scrubber, action channels",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc -b"
+  }
+}
