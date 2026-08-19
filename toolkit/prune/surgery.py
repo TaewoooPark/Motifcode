@@ -173,26 +173,133 @@ def rewrite_config(config: dict, keep: int) -> dict:
     return out
 
 
+def apply_surgery(
+    src: Path,
+    dst: Path,
+    keep_per_layer: dict[str, list[int]],
+    original_experts: int,
+) -> Plan:
+    """Write a pruned checkpoint.
+
+    Reads each safetensors shard, slices the expert dimension of the ten tensors
+    that carry it, and writes new shards plus an index and a config. Everything
+    else is copied through untouched.
+
+    The keep-list is per layer. A single global list is a special case of that
+    and the caller should expand it rather than this function guessing.
+
+    Memory: shards are processed one at a time and released, so peak usage is
+    one shard plus its sliced copy — a few GB, not the whole model. It still
+    needs enough disk for a second copy of the checkpoint.
+    """
+    import torch  # noqa: PLC0415
+    from safetensors.torch import load_file, save_file  # noqa: PLC0415
+
+    index_path = src / "model.safetensors.index.json"
+    index = json.loads(index_path.read_text())
+    weight_map: dict[str, str] = index["weight_map"]
+
+    for layer, keep in keep_per_layer.items():
+        validate_keep(keep, original_experts)
+        del layer
+
+    dst.mkdir(parents=True, exist_ok=True)
+    shards = sorted(set(weight_map.values()))
+    new_map: dict[str, str] = {}
+    total_bytes = 0
+    sliced = 0
+
+    for shard in shards:
+        tensors = load_file(str(src / shard))
+        out: dict = {}
+        for name, tensor in tensors.items():
+            if is_expert_tensor(name):
+                layer = layer_of(name)
+                keep = keep_per_layer.get(str(layer))
+                if keep is None:
+                    raise ValueError(f"no keep-list for layer {layer} (tensor {name})")
+                if tensor.shape[0] != original_experts:
+                    raise ValueError(
+                        f"{name}: axis 0 is {tensor.shape[0]}, expected {original_experts}. "
+                        "The checkpoint layout is not what the surgery assumes; stop and re-read it."
+                    )
+                idx = torch.tensor(keep, dtype=torch.long)
+                out[name] = tensor.index_select(0, idx).contiguous()
+                sliced += 1
+            else:
+                out[name] = tensor
+            new_map[name] = shard
+            total_bytes += out[name].numel() * out[name].element_size()
+        save_file(out, str(dst / shard), metadata={"format": "pt"})
+        del tensors, out
+
+    (dst / "model.safetensors.index.json").write_text(
+        json.dumps({"metadata": {"total_size": total_bytes}, "weight_map": new_map}, indent=2)
+    )
+
+    config = json.loads((src / "config.json").read_text())
+    keep_sizes = {len(v) for v in keep_per_layer.values()}
+    if len(keep_sizes) != 1:
+        raise ValueError(
+            f"layers keep different expert counts {sorted(keep_sizes)}; `num_experts` is a single "
+            "config value, so a per-layer keep-list must be uniform in size"
+        )
+    (dst / "config.json").write_text(
+        json.dumps(rewrite_config(config, keep_sizes.pop()), indent=2)
+    )
+
+    for aux in ("tokenizer.json", "tokenizer_config.json", "chat_template.jinja",
+                "generation_config.json", "configuration_motif.py", "modeling_motif.py",
+                "special_tokens_map.json", "vocab.json", "added_tokens.json"):
+        srcf = src / aux
+        if srcf.exists():
+            (dst / aux).write_bytes(srcf.read_bytes())
+
+    plan = plan_from_index(index_path, next(iter(keep_per_layer.values())), original_experts)
+    print(f"sliced {sliced} tensors into {dst}")
+    return plan
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--index", type=Path, required=True, help="model.safetensors.index.json")
     ap.add_argument("--keep", type=Path, help="JSON array of expert indices to keep")
     ap.add_argument("--keep-count", type=int, help="dry-run with the first N experts instead of a real list")
     ap.add_argument("--experts", type=int, default=384, help="expert count in the source checkpoint")
-    ap.add_argument("--dry-run", action="store_true", default=True)
+    ap.add_argument("--src", type=Path, help="source checkpoint directory")
+    ap.add_argument("--dst", type=Path, help="write the pruned checkpoint here")
+    ap.add_argument("--apply", action="store_true", help="actually write; default is a dry run")
     args = ap.parse_args()
 
     if args.keep:
-        keep = json.loads(args.keep.read_text())
+        loaded = json.loads(args.keep.read_text())
+        # Accept both a bare list and select.py's {"layers": {...}} output.
+        keep = loaded["layers"] if isinstance(loaded, dict) and "layers" in loaded else loaded
     elif args.keep_count:
         keep = list(range(args.keep_count))
     else:
         ap.error("one of --keep or --keep-count is required")
 
-    validate_keep(keep, args.experts)
-    plan = plan_from_index(args.index, keep, args.experts)
+    if isinstance(keep, dict):
+        keep_per_layer = {str(k): v for k, v in keep.items()}
+        flat = next(iter(keep_per_layer.values()))
+    else:
+        flat = keep
+        keep_per_layer = None
+
+    validate_keep(flat, args.experts)
+    plan = plan_from_index(args.index, flat, args.experts)
     print(plan.report())
-    print("\ndry run only — no weights were read or written")
+
+    if not args.apply:
+        print("\ndry run — no weights were read or written. Pass --apply with --src/--dst to write.")
+        return
+
+    if not args.src or not args.dst:
+        raise SystemExit("--apply needs --src and --dst")
+    if keep_per_layer is None:
+        keep_per_layer = {str(l): flat for l in plan.layers}
+    apply_surgery(args.src, args.dst, keep_per_layer, args.experts)
 
 
 if __name__ == "__main__":

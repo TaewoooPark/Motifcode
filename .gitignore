@@ -12,3 +12,9 @@ __pycache__/
 *.safetensors
 *.gguf
 # goldens are committed on purpose: CI must run without Python
+
+# Pruning handoff notes and work products. The guide is personal planning; the
+# work directory holds profiles, keep-lists and checkpoints — none of it belongs
+# in the repository.
+model_guide.md
+prune-work/
