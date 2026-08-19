@@ -14,6 +14,11 @@ export default defineConfig({
       "@motifcode/core": pkg("core"),
       "@motifcode/replay": pkg("replay"),
       "@motifcode/tui": pkg("tui"),
+      "@motifcode/skills": pkg("skills"),
+      "@motifcode/agents": pkg("agents"),
+      "@motifcode/hooks": pkg("hooks"),
+      "@motifcode/journal": pkg("journal"),
+      "@motifcode/cli": pkg("cli"),
     },
   },
   test: {

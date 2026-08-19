@@ -20,6 +20,21 @@
       ],
       "@motifcode/tui": [
         "./packages/tui/src/index.ts"
+      ],
+      "@motifcode/skills": [
+        "./packages/skills/src/index.ts"
+      ],
+      "@motifcode/agents": [
+        "./packages/agents/src/index.ts"
+      ],
+      "@motifcode/hooks": [
+        "./packages/hooks/src/index.ts"
+      ],
+      "@motifcode/journal": [
+        "./packages/journal/src/index.ts"
+      ],
+      "@motifcode/cli": [
+        "./packages/cli/src/index.ts"
       ]
     },
     "baseUrl": "."

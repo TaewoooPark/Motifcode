@@ -13,7 +13,7 @@
 
 import { initialState, reduce, type ViewState } from "./cells.js";
 import { heroLines, heroSubtitle, pickHero, type HeroContext } from "./hero.js";
-import { renderTail, renderTranscript, type RenderOptions } from "./render.js";
+import { renderPending, renderSettled, renderTail, type RenderOptions } from "./render.js";
 import { readings, statusLine } from "./statusline.js";
 import { CommitTracker } from "./stream.js";
 import { NO_COLOR, paint, severityColor, style, term } from "./theme.js";
@@ -25,6 +25,11 @@ export interface ScreenOptions {
   expandThinking?: boolean;
   /** Prefer the shaded small hero over the plain one. */
   shadedHero?: boolean;
+  /**
+   * Repaint a live footer. Off when stdout is not a terminal, because cursor
+   * movement written into a pipe or a log file is noise, not a display.
+   */
+  interactive?: boolean;
 }
 
 export class Screen {
@@ -35,12 +40,14 @@ export class Screen {
   private readonly columns: () => number;
   private expandThinking: boolean;
   private readonly shadedHero: boolean;
+  private readonly interactive: boolean;
 
   constructor(opts: ScreenOptions = {}) {
     this.write = opts.write ?? ((s) => process.stdout.write(s));
     this.columns = opts.columns ?? (() => process.stdout.columns || 80);
     this.expandThinking = opts.expandThinking ?? false;
     this.shadedHero = opts.shadedHero ?? false;
+    this.interactive = opts.interactive ?? Boolean(process.stdout.isTTY);
   }
 
   get view(): ViewState {
@@ -78,22 +85,24 @@ export class Screen {
 
   private paint(): void {
     this.clearFooter();
-    const transcript = renderTranscript(this.state, this.renderOptions);
-    for (const line of this.commits.take(transcript)) this.write(line + "\n");
+    // Only settled cells go to scrollback. A tool cell between `tool_start` and
+    // `tool_end` is still growing, and committing it there would print a tool
+    // that appears to have produced nothing.
+    const settled = renderSettled(this.state, this.renderOptions);
+    for (const line of this.commits.take(settled)) this.write(line + "\n");
     this.paintFooter();
   }
 
   private paintFooter(): void {
+    if (!this.interactive) return;
     const opts = this.renderOptions;
-    const tail = renderTail(this.state, opts);
-    const status = this.paintStatus();
-    const lines = [...tail, status];
+    const lines = [...renderPending(this.state, opts), ...renderTail(this.state, opts), this.paintStatus()];
     for (const line of lines) this.write(line + "\n");
     this.footerHeight = lines.length;
   }
 
   private clearFooter(): void {
-    if (this.footerHeight === 0) return;
+    if (!this.interactive || this.footerHeight === 0) return;
     this.write(term.up(this.footerHeight));
     for (let i = 0; i < this.footerHeight; i++) {
       this.write(term.clearLine + term.lineStart);
@@ -116,6 +125,11 @@ export class Screen {
   /** Release the footer so the shell prompt lands cleanly. */
   finish(): void {
     this.clearFooter();
-    this.write(term.showCursor);
+    // Flush anything still pending — a session that ended mid-tool should still
+    // show what that tool did.
+    const rest = renderPending(this.state, this.renderOptions);
+    const all = renderSettled(this.state, this.renderOptions).concat(rest);
+    for (const line of this.commits.take(all)) this.write(line + "\n");
+    if (this.interactive) this.write(term.showCursor);
   }
 }

@@ -30,6 +30,9 @@ import {
   displayWidth,
   truncateToWidth,
   truncateEndToWidth,
+  settledCount,
+  renderSettled,
+  renderPending,
   type ViewState,
 } from "../src/index.js";
 
@@ -292,5 +295,42 @@ describe("display width — Hangul and CJK", () => {
     for (const line of renderTranscript(state, { width: 60 })) {
       expect(displayWidth(line), line).toBeLessThanOrEqual(60);
     }
+  });
+});
+
+describe("scrollback safety", () => {
+  it("holds a tool cell back until it completes", () => {
+    // Committing a tool cell between tool_start and tool_end prints a tool that
+    // appears to have produced nothing — the two-region rule applied to cells
+    // rather than to text. Caught by the first real end-to-end run.
+    const started = fold([
+      { type: "tool_start", call: { id: "t", name: "bash", arguments: { command: "ls" }, repaired: false } },
+    ]);
+    expect(settledCount(started)).toBe(0);
+    expect(renderSettled(started, OPTS)).toHaveLength(0);
+    expect(renderPending(started, OPTS).join("\n")).toContain("bash");
+
+    const finished = fold([{ type: "tool_end", id: "t", ok: true, output: "a.ts", ms: 4 }], started);
+    expect(settledCount(finished)).toBe(1);
+    expect(renderSettled(finished, OPTS).join("\n")).toContain("a.ts");
+    expect(renderPending(finished, OPTS)).toHaveLength(0);
+  });
+
+  it("holds everything after an unsettled cell", () => {
+    // Committing later cells around a pending one would reorder the transcript.
+    const state = fold([
+      { type: "tool_start", call: { id: "t", name: "bash", arguments: { command: "ls" }, repaired: false } },
+      { type: "notice", level: "info", text: "after" },
+    ]);
+    expect(settledCount(state)).toBe(0);
+    expect(renderSettled(state, OPTS)).toHaveLength(0);
+  });
+
+  it("treats every non-tool cell as settled immediately", () => {
+    const state = fold([
+      { type: "session_start", model: "m", endpoint: "e", channel: "toolcall", tools: [], toolsHash: "h" },
+      { type: "notice", level: "info", text: "hi" },
+    ]);
+    expect(settledCount(state)).toBe(2);
   });
 });

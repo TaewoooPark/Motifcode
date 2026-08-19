@@ -158,9 +158,47 @@ export function renderCell(cell: Cell, opts: RenderOptions): string[] {
   }
 }
 
+/**
+ * A cell is settled once nothing can change it again.
+ *
+ * Only tool cells are ever unsettled: they are created at `tool_start` and
+ * completed at `tool_end`, so between the two their output and status are still
+ * arriving. Committing one to scrollback in that window prints a tool that
+ * looks like it produced nothing — the two-region rule applied to cells rather
+ * than to text.
+ */
+export function isSettled(cell: Cell): boolean {
+  return cell.kind !== "tool" || cell.ok !== undefined;
+}
+
+/** Index of the first cell that may still change. */
+export function settledCount(state: ViewState): number {
+  let i = 0;
+  while (i < state.cells.length && isSettled(state.cells[i]!)) i++;
+  return i;
+}
+
 export function renderTranscript(state: ViewState, opts: RenderOptions): string[] {
   const lines: string[] = [];
   for (const cell of state.cells) lines.push(...renderCell(cell, opts));
+  return lines;
+}
+
+/** Lines safe to commit to scrollback. */
+export function renderSettled(state: ViewState, opts: RenderOptions): string[] {
+  const lines: string[] = [];
+  for (const cell of state.cells.slice(0, settledCount(state))) {
+    lines.push(...renderCell(cell, opts));
+  }
+  return lines;
+}
+
+/** Lines that must be repainted because their cells are still changing. */
+export function renderPending(state: ViewState, opts: RenderOptions): string[] {
+  const lines: string[] = [];
+  for (const cell of state.cells.slice(settledCount(state))) {
+    lines.push(...renderCell(cell, opts));
+  }
   return lines;
 }
 

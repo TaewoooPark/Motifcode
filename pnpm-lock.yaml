@@ -21,11 +21,55 @@ importers:
         specifier: ^2.1.9
         version: 2.1.9(@types/node@22.20.1)
 
+  packages/agents:
+    dependencies:
+      '@motifcode/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@motifcode/tools':
+        specifier: workspace:*
+        version: link:../tools
+
+  packages/cli:
+    dependencies:
+      '@motifcode/agents':
+        specifier: workspace:*
+        version: link:../agents
+      '@motifcode/core':
+        specifier: workspace:*
+        version: link:../core
+      '@motifcode/hooks':
+        specifier: workspace:*
+        version: link:../hooks
+      '@motifcode/journal':
+        specifier: workspace:*
+        version: link:../journal
+      '@motifcode/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@motifcode/skills':
+        specifier: workspace:*
+        version: link:../skills
+      '@motifcode/tools':
+        specifier: workspace:*
+        version: link:../tools
+      '@motifcode/tui':
+        specifier: workspace:*
+        version: link:../tui
+
   packages/core:
     dependencies:
       '@motifcode/protocol':
         specifier: workspace:*
         version: link:../protocol
+
+  packages/hooks: {}
+
+  packages/journal:
+    dependencies:
+      '@motifcode/core':
+        specifier: workspace:*
+        version: link:../core
 
   packages/protocol: {}
 
@@ -34,6 +78,12 @@ importers:
       '@motifcode/core':
         specifier: workspace:*
         version: link:../core
+      '@motifcode/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+
+  packages/skills:
+    dependencies:
       '@motifcode/protocol':
         specifier: workspace:*
         version: link:../protocol

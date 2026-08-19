@@ -1,0 +1,10 @@
+{
+  "name": "@motifcode/agents",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Subagent definitions and the local scheduler",
+  "main": "./src/index.ts",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": { "@motifcode/protocol": "workspace:*", "@motifcode/tools": "workspace:*" }
+}

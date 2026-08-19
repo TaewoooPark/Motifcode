@@ -92,15 +92,21 @@ verified, and that turns out to cover most of the hard parts.
 | `core` — agent loop | passing, driven entirely by injected faults |
 | `replay` — record / replay / fault injection | passing; a recorded session replays identically |
 | `tui` — cells, two-region streaming, instruments | passing, snapshot-tested |
+| `skills` — registry + 9 built-in skills | passing |
+| `agents` — 5 built-in subagents + local scheduler | passing |
+| `hooks` — lifecycle shell hooks | passing |
+| `journal` — append-only log, resume, trajectory export | passing |
+| `cli` — `motif`, `doctor`, `sessions`, `resume`, `distil` | passing; runs end to end against a mock server |
 | `toolkit/prune` — surgery | unit-tested; dry-runs against the real checkpoint index |
-| skills, hooks, subagents, session journal | not started |
 
-Three errors were caught by writing the tests rather than the code: the pruning
-surgery touches **ten** tensors per MoE layer, not six — the NVFP4 scale tensors
-were missed; reordering tools costs more prefix than adding one; and the
-breakage counter was under-reporting because a repair inside the JSON loader was
-being scored as a clean parse, which would have kept the channel downgrade from
-ever firing.
+Six errors were caught by testing rather than by reading: the pruning surgery
+touches **ten** tensors per MoE layer, not six — the NVFP4 scale tensors were
+missed; reordering tools costs more prefix than adding one; the breakage counter
+scored a repair as a clean parse, which would have stopped the channel downgrade
+from ever firing; a hook's output cap let a whole 64 KB chunk through; a circular
+import left the skill parser uninitialised at load; and tool cells were being
+committed to scrollback before their output arrived, so every command appeared
+to produce nothing. The last two only surfaced when the CLI was run for real.
 
 Because there is no model to misbehave, the loop is tested by **injecting the
 misbehaviour**: invalid escapes, truncated tool calls, unparseable bodies, empty
@@ -114,10 +120,21 @@ Needs Node 20+ and pnpm.
 
 ```bash
 pnpm install
-pnpm test          # 107 TypeScript tests
+pnpm test          # 176 TypeScript tests
 pnpm lint:tools    # schema linter — fails the build on loose schemas
 pnpm typecheck
+
+pnpm exec tsx packages/cli/src/main.ts doctor    # check a server
+pnpm exec tsx packages/cli/src/main.ts skills    # what is available
+pnpm exec tsx packages/cli/src/main.ts agents
 ```
+
+Built-in skills: `explore`, `code-review`, `test-fix`, `debug`, `commit`,
+`pr-body`, `skill-creator`, plus `motif-serving` (server misconfiguration is the
+most common cause of bad output here) and `korean`. Built-in subagents:
+`explorer`, `reviewer`, `tester`, `planner`, `patcher` — each taking a
+canonical-order **prefix** of the tool list, which is also why none of them can
+spawn another.
 
 Python side (jinja2 only — no weights, no GPU):
 
@@ -143,6 +160,11 @@ packages/tools/      the frozen tool set and its linter
 packages/core/       agent loop · context ledger · breakage budget · loop guard
 packages/replay/     record, replay and deliberately break the transport
 packages/tui/        typed cells · two-region streaming · local instruments
+packages/skills/     skill registry and the built-in skills
+packages/agents/     subagent definitions and the local scheduler
+packages/hooks/      lifecycle shell hooks
+packages/journal/    append-only session log, resume, trajectory export
+packages/cli/        the `motif` command
 toolkit/fixtures/    golden-prompt generator (jinja2 only)
 toolkit/prune/       expert-pruning surgery and its plan
 corpus/              vendored template + generated goldens

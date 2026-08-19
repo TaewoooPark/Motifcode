@@ -1,0 +1,10 @@
+{
+  "name": "@motifcode/journal",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Append-only session journal, resume and trajectory export",
+  "main": "./src/index.ts",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": { "@motifcode/core": "workspace:*" }
+}

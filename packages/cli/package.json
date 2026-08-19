@@ -1,0 +1,20 @@
+{
+  "name": "@motifcode/cli",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "The motif command line",
+  "bin": { "motif": "./src/main.ts" },
+  "main": "./src/index.ts",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@motifcode/agents": "workspace:*",
+    "@motifcode/core": "workspace:*",
+    "@motifcode/hooks": "workspace:*",
+    "@motifcode/journal": "workspace:*",
+    "@motifcode/protocol": "workspace:*",
+    "@motifcode/skills": "workspace:*",
+    "@motifcode/tools": "workspace:*",
+    "@motifcode/tui": "workspace:*"
+  }
+}

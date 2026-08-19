@@ -1,0 +1,10 @@
+{
+  "name": "@motifcode/hooks",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Lifecycle shell hooks",
+  "main": "./src/index.ts",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {}
+}
