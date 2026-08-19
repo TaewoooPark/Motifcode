@@ -90,11 +90,35 @@ export function initialState(): ViewState {
   };
 }
 
-/** Fold one event into the view. Pure — the whole point. */
+/**
+ * Fold one event into the view.
+ *
+ * Pure, and now actually pure. It used to take `state.cells` by reference and
+ * `push` into it, and to reach into an existing tool cell to attach its output
+ * — so the "previous" state a caller held was silently the current one. Every
+ * snapshot test still passed, because they all compared the returned value
+ * against itself.
+ */
 export function reduce(state: ViewState, event: LoopEvent): ViewState {
-  const cells = state.cells;
+  const cells = [...state.cells];
   const inst = { ...state.instruments };
   let pendingThink = state.pendingThink;
+
+  /** Replace the last cell matching `pick` with a modified copy. */
+  const replaceLast = <K extends Cell["kind"]>(
+    kind: K,
+    pick: (c: Extract<Cell, { kind: K }>) => boolean,
+    update: (c: Extract<Cell, { kind: K }>) => Extract<Cell, { kind: K }>,
+  ): void => {
+    for (let i = cells.length - 1; i >= 0; i--) {
+      const c = cells[i]!;
+      if (c.kind !== kind) continue;
+      const typed = c as Extract<Cell, { kind: K }>;
+      if (!pick(typed)) continue;
+      cells[i] = update(typed);
+      return;
+    }
+  };
 
   switch (event.type) {
     case "session_start":
@@ -143,21 +167,21 @@ export function reduce(state: ViewState, event: LoopEvent): ViewState {
       if (event.call.repaired) inst.repairs += 1;
       break;
 
-    case "tool_end": {
-      const cell = [...cells].reverse().find((c): c is Extract<Cell, { kind: "tool" }> => c.kind === "tool" && c.id === event.id);
-      if (cell) {
-        cell.output = event.output;
-        cell.ok = event.ok;
-        cell.ms = event.ms;
-      }
+    case "tool_end":
+      replaceLast(
+        "tool",
+        (c) => c.id === event.id,
+        (c) => ({ ...c, output: event.output, ok: event.ok, ms: event.ms }),
+      );
       break;
-    }
 
-    case "hook": {
-      const cell = [...cells].reverse().find((c): c is Extract<Cell, { kind: "tool" }> => c.kind === "tool");
-      if (cell) cell.hooks.push({ label: event.label, ok: event.ok });
+    case "hook":
+      replaceLast(
+        "tool",
+        () => true,
+        (c) => ({ ...c, hooks: [...c.hooks, { label: event.label, ok: event.ok }] }),
+      );
       break;
-    }
 
     case "repair":
       cells.push({ kind: "repair", reason: event.reason, attempt: event.attempt, max: event.max });

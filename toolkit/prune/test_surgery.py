@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import json
 import unittest
+
+from _requires import require
 from pathlib import Path
 
 from surgery import (
@@ -124,10 +126,8 @@ class TestConfigRewrite(unittest.TestCase):
 
 class TestSlicing(unittest.TestCase):
     def test_slices_axis_zero_only(self):
-        try:
-            import torch
-        except ImportError:
-            self.skipTest("torch not installed; slicing is exercised on the machine that has it")
+        require("torch", self)
+        import torch
 
         from surgery import slice_state_dict
 

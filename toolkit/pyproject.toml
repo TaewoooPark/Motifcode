@@ -1,0 +1,29 @@
+[project]
+name = "motifcode-toolkit"
+version = "0.1.0"
+description = "Profiling, selection, surgery and verification for pruning Motif-3"
+requires-python = ">=3.12"
+
+# Deliberately empty. Every dependency here is a heavyweight ML package that
+# belongs to the machine holding the weights, and pulling them in as install
+# requirements would make `pip install` on a laptop download two gigabytes to
+# read a JSON index. See `requirements-dev.txt` for what CI installs.
+dependencies = []
+
+[project.optional-dependencies]
+# What the tensor-touching paths need. Pinned, because a silent minor upgrade
+# of safetensors or torch changes byte layout and dtype handling, and this
+# toolkit's whole job is to produce bytes that are identical to a slice of
+# somebody else's.
+surgery = [
+  "torch==2.11.0",
+  "safetensors==0.8.0",
+  "numpy==2.3.4",
+]
+# Rendering the chat template for the golden fixtures.
+fixtures = [
+  "jinja2==3.1.6",
+]
+
+[tool.setuptools]
+packages = []

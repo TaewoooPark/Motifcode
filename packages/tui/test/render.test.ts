@@ -33,6 +33,7 @@ import {
   settledCount,
   renderSettled,
   renderPending,
+  type Cell,
   type ViewState,
 } from "../src/index.js";
 
@@ -100,9 +101,17 @@ describe("transcript", () => {
     const state = fold(SESSION.slice(0, 5));
     const collapsed = renderTranscript(state, OPTS).join("\n");
     const expanded = renderTranscript(state, { ...OPTS, expandThinking: true }).join("\n");
-    expect(collapsed).toContain("[tab]");
     expect(collapsed.split("\n").length).toBeLessThan(expanded.split("\n").length + 1);
     expect(expanded).toContain("forward/reverse");
+  });
+
+  it("only advertises [tab] when something is listening for it", () => {
+    // The hint was printed on every reasoning cell and no handler was ever
+    // attached, so the one interaction the UI offered did nothing. A promise
+    // the program does not keep reads as a broken tool, not as decoration.
+    const state = fold(SESSION.slice(0, 5));
+    expect(renderTranscript(state, OPTS).join("\n")).not.toContain("[tab]");
+    expect(renderTranscript(state, { ...OPTS, showShortcuts: true }).join("\n")).toContain("[tab]");
   });
 
   it("gives the repair turn its own visible cell", () => {
@@ -334,3 +343,49 @@ describe("scrollback safety", () => {
     expect(settledCount(state)).toBe(2);
   });
 });
+
+describe("the reducer is pure", () => {
+  it("does not touch the state it was given", () => {
+    // It used to take `state.cells` by reference and push into it, and reach
+    // into an existing tool cell to attach its output — so the "previous"
+    // state a caller held was silently the current one. Every snapshot test
+    // still passed, because they all compared the returned value with itself.
+    let state = initialState();
+    for (const event of SESSION) state = reduce(state, event);
+
+    const frozen = deepFreeze(structuredClone(state)) as ViewState;
+    const next = reduce(frozen, { type: "turn_start", turn: 99 });
+    expect(next).not.toBe(frozen);
+    expect(frozen.instruments.turn).not.toBe(99);
+  });
+
+  it("copies a tool cell rather than mutating it when its output arrives", () => {
+    let state = reduce(initialState(), {
+      type: "tool_start",
+      call: { id: "c1", name: "bash", arguments: { command: "ls" }, repaired: false, validated: true },
+    });
+    const before = state.cells[0]!;
+    state = reduce(state, { type: "tool_end", id: "c1", ok: true, output: "listing", ms: 5 });
+    expect(state.cells[0]).not.toBe(before);
+    expect(before).not.toHaveProperty("output");
+  });
+
+  it("copies a tool cell rather than mutating it when a hook reports", () => {
+    let state = reduce(initialState(), {
+      type: "tool_start",
+      call: { id: "c1", name: "bash", arguments: { command: "ls" }, repaired: false, validated: true },
+    });
+    const before = state.cells[0] as Extract<Cell, { kind: "tool" }>;
+    state = reduce(state, { type: "hook", event: "PostToolUse", label: "fmt", ok: true });
+    expect(before.hooks).toHaveLength(0);
+    expect((state.cells[0] as Extract<Cell, { kind: "tool" }>).hooks).toHaveLength(1);
+  });
+});
+
+function deepFreeze(value: unknown): unknown {
+  if (value && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const v of Object.values(value)) deepFreeze(v);
+  }
+  return value;
+}

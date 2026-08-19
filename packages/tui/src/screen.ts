@@ -41,6 +41,7 @@ export class Screen {
   private expandThinking: boolean;
   private readonly shadedHero: boolean;
   private readonly interactive: boolean;
+  private detachInput: (() => void) | null = null;
 
   constructor(opts: ScreenOptions = {}) {
     this.write = opts.write ?? ((s) => process.stdout.write(s));
@@ -55,7 +56,12 @@ export class Screen {
   }
 
   private get renderOptions(): RenderOptions {
-    return { width: this.columns(), expandThinking: this.expandThinking };
+    return {
+      width: this.columns(),
+      expandThinking: this.expandThinking,
+      // Only advertise the key when something is listening for it.
+      showShortcuts: this.detachInput !== null,
+    };
   }
 
   splash(ctx: HeroContext): void {
@@ -72,6 +78,64 @@ export class Screen {
   apply(event: LoopEvent): void {
     this.state = reduce(this.state, event);
     this.paint();
+  }
+
+  /**
+   * Listen for the keys the status line says exist.
+   *
+   * The `[tab]` hint was printed on every reasoning cell and no handler was
+   * ever attached, so the one interaction the UI advertised did nothing. Raw
+   * mode is entered here and left in `finish()` and on every fatal signal —
+   * a terminal left in raw mode after a crash needs `reset` to type in again,
+   * which is a worse outcome than never having offered the shortcut.
+   */
+  attachInput(stdin: NodeJS.ReadStream = process.stdin): void {
+    if (!this.interactive || !stdin.isTTY || this.detachInput) return;
+
+    const onKey = (chunk: Buffer): void => {
+      const key = chunk.toString();
+      if (key === "\t") this.toggleThinking();
+      // Ctrl-C in raw mode does not raise SIGINT, so it has to be forwarded by
+      // hand or the session becomes uninterruptible.
+      else if (key === "\u0003") process.kill(process.pid, "SIGINT");
+    };
+    const onResize = (): void => this.paint();
+
+    stdin.setRawMode(true);
+    stdin.resume();
+    stdin.on("data", onKey);
+    process.stdout.on("resize", onResize);
+
+    const restore = (): void => {
+      stdin.off("data", onKey);
+      process.stdout.off("resize", onResize);
+      try {
+        stdin.setRawMode(false);
+      } catch {
+        /* already closed */
+      }
+      stdin.pause();
+    };
+    const onFatal = (signal: NodeJS.Signals) => (): void => {
+      this.finish();
+      process.kill(process.pid, signal);
+    };
+    const handlers: [NodeJS.Signals, () => void][] = [
+      ["SIGINT", onFatal("SIGINT")],
+      ["SIGTERM", onFatal("SIGTERM")],
+      ["SIGHUP", onFatal("SIGHUP")],
+    ];
+    for (const [signal, handler] of handlers) process.once(signal, handler);
+
+    this.detachInput = () => {
+      restore();
+      for (const [signal, handler] of handlers) process.off(signal, handler);
+    };
+  }
+
+  /** True when a key handler is attached, so the UI may advertise shortcuts. */
+  get interactiveInput(): boolean {
+    return this.detachInput !== null;
   }
 
   toggleThinking(): void {
@@ -124,6 +188,8 @@ export class Screen {
 
   /** Release the footer so the shell prompt lands cleanly. */
   finish(): void {
+    this.detachInput?.();
+    this.detachInput = null;
     this.clearFooter();
     // Flush anything still pending — a session that ended mid-tool should still
     // show what that tool did.

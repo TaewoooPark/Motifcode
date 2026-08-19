@@ -554,6 +554,9 @@ async function main(): Promise<number> {
   if (args.flags["no-hero"] !== true) {
     screen.splash({ model, endpoint, channel, maxTokens: 262_144 });
   }
+  // Attach the key handler before the loop starts, so the shortcut the status
+  // line offers exists for the whole session.
+  screen.attachInput();
 
   const rootSink = journal.sinkFor(rootScope);
   const emit = (e: LoopEvent) => {

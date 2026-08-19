@@ -139,11 +139,3 @@ export function formatFindings(findings: readonly Finding[]): string {
   const lines = findings.map((f) => `  ${f.tool}  [${f.rule}]  ${f.message}`);
   return `tool schemas: ${findings.length} problem(s)\n${lines.join("\n")}`;
 }
-
-/* CLI entry: `pnpm lint:tools` */
-if (import.meta.url === `file://${process.argv[1]}`) {
-  const { CORE_TOOLS } = await import("./schemas.js");
-  const findings = lintTools(CORE_TOOLS);
-  console.log(formatFindings(findings));
-  if (findings.length > 0) process.exit(1);
-}

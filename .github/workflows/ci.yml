@@ -6,16 +6,27 @@ on:
   pull_request:
 
 jobs:
+  # The TypeScript gate, in the order a failure is cheapest to read: types,
+  # then the artifact, then behaviour.
   typescript:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # The supported range, both ends. A harness that only works on the
+        # version its author happens to run is not a supported range.
+        node: [20, 22]
     steps:
       - uses: actions/checkout@v4
       # No `version:` here on purpose — package.json's `packageManager` field
       # is the single source of truth, and specifying both is a hard error.
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
-        with: { node-version: 22, cache: pnpm }
+        with: { node-version: "${{ matrix.node }}", cache: pnpm }
       - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      # `build` used to print "no build step yet" and exit 0, so nothing ever
+      # established that the installable artifact starts.
+      - run: pnpm build
       - run: pnpm test
       - run: pnpm lint:tools
 
@@ -24,18 +35,38 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
-      - run: python -m unittest discover -s toolkit/prune -p 'test_*.py' -v
+        with: { python-version: "3.12", cache: pip }
+      # A real tensor backend. Without it the slicing test — the one path that
+      # decides whether a pruned checkpoint is correct — skipped on every
+      # commit, and "24 passed, 1 skipped" read as coverage.
+      - run: pip install -r toolkit/requirements-dev.txt
+      - name: unit tests, with skipping forbidden
+        env:
+          MOTIF_REQUIRE_TORCH: "1"
+        run: python -m unittest discover -s toolkit/prune -p 'test_*.py' -v
 
-  # The golden prompts are committed, so CI proves the TypeScript renderer still
-  # matches them without needing Python. This job proves the goldens themselves
-  # are still what the real template produces.
+  # The goldens are committed so the TypeScript job can run without Python.
+  # This job proves the goldens themselves are still what the real template
+  # produces.
   goldens-are-current:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
-      - run: pip install jinja2
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -r toolkit/requirements-dev.txt
       - run: python toolkit/fixtures/gen_template_golden.py
       - run: git diff --exit-code corpus/template-golden/
+
+  # ARM64 is where this actually deploys — a GB10 is aarch64. The bug that
+  # motivated `killGroup` only appeared on Linux, and only in CI.
+  linux-arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm test

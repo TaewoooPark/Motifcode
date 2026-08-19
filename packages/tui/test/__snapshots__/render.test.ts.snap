@@ -21,7 +21,7 @@ exports[`transcript > renders a full session 1`] = `
   Motif-3-Coder-A13B  ·  http://zgx-1c3b:8080
   ch toolcall  ·  tools[8] done bash read apply_patch term skill task mcp  ·  #9f3c1a20
 
-──  think  ────────────────────────────────────  12.4s · 42 chars  [tab]
+──  think  ───────────────────────────────────────────  12.4s · 42 chars
   │ forward/reverse를 나눠 피팅해야 하는데 지금은 합쳐서 돌고 있다
 
 ──  bash  ────────────────────────────────────────────────────────  84ms

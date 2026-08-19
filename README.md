@@ -132,13 +132,21 @@ Needs Node 20+ and pnpm.
 
 ```bash
 pnpm install
-pnpm test          # TypeScript unit, integration and CLI end-to-end tests
-pnpm lint:tools    # schema linter — fails the build on loose schemas
 pnpm typecheck
+pnpm build         # bundles the CLI to packages/cli/dist/motif.js
+pnpm test          # unit, integration, CLI end-to-end, and an install smoke
+pnpm lint:tools    # schema linter — fails the build on loose schemas
 
-pnpm exec tsx packages/cli/src/main.ts doctor    # check a server
-pnpm exec tsx packages/cli/src/main.ts skills    # what is available
-pnpm exec tsx packages/cli/src/main.ts agents
+./packages/cli/dist/motif.js doctor    # check a server
+./packages/cli/dist/motif.js skills    # what is available
+./packages/cli/dist/motif.js agents
+```
+
+The Python toolkit needs a real tensor backend for its slicing tests:
+
+```bash
+pip install -r toolkit/requirements-dev.txt
+MOTIF_REQUIRE_TORCH=1 python -m unittest discover -s toolkit/prune -p 'test_*.py'
 ```
 
 Built-in skills: `explore`, `code-review`, `test-fix`, `debug`, `commit`,

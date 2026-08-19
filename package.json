@@ -9,15 +9,17 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "echo 'no build step yet'",
+    "build": "node scripts/build.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "lint:tools": "tsx packages/tools/src/lint.ts",
-    "fixtures": "python3 toolkit/fixtures/gen_template_golden.py"
+    "lint:tools": "tsx packages/tools/src/lint-cli.ts",
+    "fixtures": "python3 toolkit/fixtures/gen_template_golden.py",
+    "pack:cli": "pnpm build && pnpm --filter @motifcode/cli pack --pack-destination ../../dist"
   },
   "devDependencies": {
     "@types/node": "^22.20.1",
+    "esbuild": "^0.28.2",
     "tsx": "^4.23.12",
     "typescript": "^5.9.3",
     "vitest": "^2.1.9"

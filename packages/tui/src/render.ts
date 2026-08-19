@@ -16,6 +16,15 @@ export interface RenderOptions {
   expandThinking?: boolean;
   /** Cap on tool output lines shown inline. */
   outputLines?: number;
+  /**
+   * Show keyboard hints.
+   *
+   * False unless a key handler is actually attached. Printing `[tab]` when
+   * nothing listens for tab is a promise the program does not keep, and the
+   * user's conclusion is that the tool is broken rather than that the hint was
+   * decorative.
+   */
+  showShortcuts?: boolean;
 }
 
 const DEFAULTS = { outputLines: 8 };
@@ -87,7 +96,8 @@ function renderCellRaw(cell: Cell, opts: RenderOptions): string[] {
         const firstLine = cell.text.split("\n").find((l) => l.trim() !== "") ?? "";
         const room = Math.max(10, width - 6);
         const preview = truncateToWidth(firstLine, room);
-        return [rule("think", width, `${meta}  [tab]`), `  │ ${preview}`, ""];
+        const hint = opts.showShortcuts === true ? `${meta}  [tab]` : meta;
+        return [rule("think", width, hint), `  │ ${preview}`, ""];
       }
       return [rule("think", width, meta), ...indent(cell.text.split("\n"), "  │ "), ""];
     }
