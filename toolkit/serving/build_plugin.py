@@ -70,8 +70,13 @@ LOCAL = {
 # models package produces `vllm.model_executor.models.flash_attn`, which does
 # not exist — and the failure surfaces four frames inside vLLM's registry as
 # "architectures failed to be inspected", saying nothing about the cause.
+# Written by extraction rather than copied whole, so it is not in FILES — but
+# it is still a module the plugin's relative imports may name, and still has a
+# package its own relative imports resolve against.
+GENERATED = {"quant_config.py": "vllm.model_executor.layers.quantization"}
+
 PACKAGE_OF = {dst: src.rsplit("/", 1)[0].replace("/", ".") for src, dst in FILES.items()}
-PACKAGE_OF["quant_config.py"] = "vllm.model_executor.layers.quantization"
+PACKAGE_OF.update(GENERATED)
 
 # The fork's quantization module is a different vintage of upstream's, and
 # porting all 2442 lines would be porting a fork. Only two classes are actually
@@ -81,6 +86,7 @@ PACKAGE_OF["quant_config.py"] = "vllm.model_executor.layers.quantization"
 # So they are extracted by name rather than copied wholesale.
 QUANT_CLASSES = ("ModelOptBlockFp8Config", "ModelOptNvFp4DynamicConfig")
 QUANT_SOURCE = "vllm/model_executor/layers/quantization/modelopt.py"
+
 
 ABSOLUTE_REWRITES = {
     "from vllm.transformers_utils.configs.motif import": "from .motif_config import",

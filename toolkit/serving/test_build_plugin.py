@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from build_plugin import FILES, LOCAL, PACKAGE_OF, rewrite
+from build_plugin import FILES, GENERATED, LOCAL, PACKAGE_OF, rewrite
 
 
 class TestRewrite(unittest.TestCase):
@@ -59,15 +59,18 @@ class TestRewrite(unittest.TestCase):
             "from vllm.model_executor.models.flash_attn import FlashAttentionMetadata",
         )
 
-    def test_every_copied_file_knows_where_it_came_from(self):
-        self.assertEqual(set(PACKAGE_OF), set(FILES.values()))
+    def test_every_module_knows_where_it_came_from(self):
+        # Copied and generated alike: `quant_config.py` is extracted rather
+        # than copied, and its relative imports still have to resolve against
+        # the package the extracted classes lived in.
+        self.assertEqual(set(PACKAGE_OF), set(FILES.values()) | set(GENERATED))
         self.assertEqual(PACKAGE_OF["motif_model.py"], "vllm.model_executor.models")
         self.assertEqual(PACKAGE_OF["flash_attn_diffkv.py"], "vllm.v1.attention.backends")
 
-    def test_every_local_name_matches_a_file_the_script_copies(self):
-        # A name in LOCAL that no file produces means some relative import is
+    def test_every_local_name_matches_a_module_the_script_produces(self):
+        # A name in LOCAL that nothing produces means some relative import is
         # left pointing at a module that will not exist.
-        produced = {Path(dst).stem for dst in FILES.values()}
+        produced = {Path(dst).stem for dst in (*FILES.values(), *GENERATED)}
         self.assertEqual(LOCAL, produced)
 
 
