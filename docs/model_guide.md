@@ -1,818 +1,646 @@
-# model_guide.md — Motif-3 가지치기 작업 인수인계
+# Pruning Motif-3 for GB10
 
-이 문서는 **새 에이전트 세션에게 이 작업을 통째로 넘기기 위해** 쓰였다. 앞선
-대화 맥락을 모른다고 가정하고 읽어도 되게 만들었다. 사실에는 전부 출처를 붙였고,
-확인되지 않은 것은 확인되지 않았다고 적었다.
+| | |
+|---|---|
+| document schema | `motifcode.guide/v2` |
+| last verified | 2026-08-20 |
+| source checkpoint | `Motif-Technologies/Motif-3-NVFP4` @ `3a4416f7b555720d36e41f93207b826003ffe327` |
+| reference architecture | `Motif-Technologies/Motif-3` @ `883d5c441fe3bb994c7b57e60f49e26147f85512` |
+| serving runtime | Motif vLLM fork @ `4cd9eb4129883565e69d508038d783d59ee01867` (not yet built here) |
+| implementation | `toolkit/prune/`, tested by `toolkit/prune/test_*.py` |
 
-> **작업 전 세 가지 원칙**
->
-> 1. **여기 적힌 수치를 다시 유도하지 마라.** 전부 1차 출처에서 확인한 값이고
->    출처를 병기했다. 의심스러우면 출처를 열어 확인하되, 새로 추정하지 마라.
-> 2. **퍼플렉시티로 판정하지 마라.** 선행 연구에서 망가진 모델이 멀쩡한 모델보다
->    높은 점수를 받은 사례가 보고됐다. 게이트는 코드 벤치마크와 에이전틱 평가다.
-> 3. **임대 GPU를 켜기 전에 오프라인으로 끝낼 수 있는 것을 전부 끝내라.** 준비가
->    덜 된 채 켜면 시간당 요금이 디버깅 비용이 된다.
+This is the normative plan. It is tracked in git so that a change to the code
+and a change to the plan land in the same review; a guide that lives outside
+version control drifts from the thing it describes and nobody finds out until a
+command fails.
 
----
+## How to read a claim here
 
-## 0. 한 문단 요약
+Every load-bearing statement carries a label. Without them a reader cannot tell
+a measurement from an intention, and this document contains both.
 
-Motif-3는 314B 파라미터 MoE 모델이고 NVFP4 체크포인트가 **186.9 GB**다. 목표
-하드웨어인 GB10(HP ZGX Nano)은 통합 메모리가 **121.6 GiB**라 들어가지 않는다.
-전체 파라미터의 **약 98%가 라우팅 전문가**이므로, 용량 문제는 통째로 전문가 뱅크
-문제다. 이 작업은 **코딩에 쓰이지 않는 전문가를 골라 잘라내어** 단일 GB10에서
-돌아가는 코딩 특화 체크포인트를 만들고, 그것을 이 저장소의 CLI(`motif`)에 붙이는
-것이다.
-
-### 첫 한 시간에 할 것
-
-새 세션이라면 여기서 시작하라. 아무것도 망가뜨리지 않고 환경이 살아 있는지 확인하는
-순서다.
-
-```bash
-# 1. 저장소 테스트가 도는가
-cd <저장소>
-pnpm install && pnpm test                                   # TypeScript 쪽
-cd toolkit/prune && python3 -m unittest test_surgery test_select   # 25개
-
-# 2. 수술 계획이 실제 체크포인트 인덱스와 맞는가
-python3 surgery.py --index testdata/motif3-nvfp4.index.json --keep-count 192
-#   -> 510 sliced / 51 layers / per layer 10  이 나와야 한다
-
-# 3. 파이프라인이 맞물리는지 합성 데이터로 확인 (모델 불필요)
-#    select.py 출력이 surgery.py 입력으로 그대로 들어가는지만 보면 된다
-```
-
-그 다음 이 문서에서 **§2를 통째로 읽어라.** 나머지는 필요할 때 돌아와도 되지만 §2는
-전제다. §2를 안 읽고 시작하면 이미 답이 나온 것을 다시 유도하게 된다.
-
-**작업 상태를 어디에 적을지 먼저 정하라.** 이 문서는 계획이지 로그가 아니다.
-`prune-work/LOG.md` 같은 파일을 만들어 각 단계의 실제 수치·실패·결정을 남겨라.
-다음 세션이 그것을 읽는다.
-
----
-
-## 1. 왜 이 작업을 하는가
-
-### 1.1 산술
-
-| 항목 | 값 | 출처 |
+| label | means | needs |
 |---|---|---|
-| 전체 파라미터 | 314B (토큰당 13.2B 활성) | 모델 카드 |
-| 라우팅 전문가 | 384개, top-8, 공유 전문가 1 | `config.json` |
-| MoE 레이어 | 51 (dense 2 + MoE 51, 총 53) | `config.json`, 모델 카드 |
-| BF16 체크포인트 | 629.7 GB | HF 파일 트리 합계 |
-| NVFP4 체크포인트 | **186.9 GB** | HF 파일 트리 합계 |
-| GB10 통합 메모리 | **121.6 GiB** | 실측 (2026-08-06) |
+| `FACT` | verified against a pinned primary source | URL, revision, file, hash |
+| `MEASURED` | observed on this hardware, by this code | environment and a raw log |
+| `INFERENCE` | computed from a fact or a measurement | the formula and its inputs |
+| `HYPOTHESIS` | expected before the experiment | what would falsify it |
+| `BLOCKED` | a prerequisite is not met | the blocker and the unblock condition |
 
-전문가 파라미터를 직접 계산하면:
-
-```
-레이어당 전문가 하나 = 3 × 4096 × 1280        = 15.73M
-레이어당 전문가 전체 = 384 × 15.73M           =  6.04B
-51개 MoE 레이어      = 51 × 6.04B             =  308B      ← 전체 314B의 98%
-```
-
-나머지(어텐션·dense FFN·공유 전문가·mHC·임베딩·MTP 헤드)를 전부 합쳐도 6B 안팎이다.
-**어텐션을 아무리 줄여도 용량 문제는 안 풀린다.** 전문가 말고는 건드릴 곳이 없다.
-
-### 1.2 186.9 GB의 내역
-
-314B를 순수 4비트로 담으면 157 GB인데 실제는 186.9 GB다. 차액 30 GB는:
-
-```
-전문가 4비트 가중치                      154.0 GB
-전문가 FP8 블록 스케일 (16값당 1)         19.3 GB
-비전문가 레이어 bf16 잔류                 13.6 GB
-                                        ─────────
-                                        186.9 GB
-```
-
-즉 줄일 수 있는 곳이 셋이다. 이 작업이 건드리는 것은 첫 두 개(전문가를 통째로
-제거하므로 가중치와 스케일이 함께 줄어든다)이고, 세 번째(비전문가 FP8화)는
-**속도에 크게 영향을 주므로** P6(§5)에서 선택 항목으로 다룬다.
-
-### 1.3 왜 다른 방법은 안 되는가
-
-이미 검토했고 전부 막혔다. 다시 검토하지 마라.
-
-- **더 낮은 비트 양자화** — Motif-3는 `MotifForCausalLM` 커스텀 아키텍처(GDLA
-  어텐션, mHC 잔차, Expert-Specific PolyNorm)라 **llama.cpp/GGUF가 지원하지 않는다.**
-  ollama로 애초에 못 띄운다. AWQ·GPTQ·exllama도 마찬가지. 존재하는 양자화 산출물은
-  Motif가 자기 vLLM 포크의 자체 스크립트로 만든 NVFP4 하나뿐이다.
-- **CPU 오프로드** — GB10은 통합 메모리라 CPU RAM과 VRAM이 **같은 121.6 GiB 풀**이다.
-  같은 주머니에서 바이트를 옮길 뿐 용량이 생기지 않는다.
-- **NVMe 스트리밍** — 디코드 토큰 하나당 3.2 GB의 전문가를 읽어야 하고 어느 전문가인지는
-  토큰마다 바뀐다. 천장이 4~6 tok/s다. 에이전트로 못 쓴다. (단, **프로파일링에는
-  쓸 수 있다** — §5 P1 참조.)
+An unlabelled sentence is background, not evidence.
 
 ---
 
-## 2. 다시 유도하지 말아야 할 사실들
+## 1. What this is for
 
-### 2.1 체크포인트 구조 — 실측 확인됨
+Motif-3 is 314B parameters total, 13B activated. `FACT` — `config.json`:
+`num_experts: 384`, `experts_top_k: 8`, `num_hidden_layers: 53`,
+`n_dense_first_layers: 2`, `quant_method: modelopt_nvfp4`.
 
-safetensors 헤더를 range request로 직접 읽어 확인한 실제 shape이다. **레이어당
-10개 텐서가 전문가 차원을 갖는다.** (초안에서 6개로 잘못 적었다가 정정한 부분이니
-6이라는 숫자를 어디서 보면 무시하라.)
+The NVFP4 checkpoint is 186,891,034,892 bytes across 155 shards. `MEASURED` —
+`model.safetensors.index.json` `metadata.total_size`, and the shard files on
+disk, 2026-08-20.
 
-```
-moe.experts.gate_up_proj                  U8       [384, 4096, 1280]
-moe.experts.gate_up_proj_weight_scale     F8_E4M3  [384, 4096,  160]   블록 스케일
-moe.experts.gate_up_proj_weight_scale_2   F32      [384]               전문가별 전역 스케일
-moe.experts.down_proj                     U8       [384, 4096,  640]
-moe.experts.down_proj_weight_scale        F8_E4M3  [384, 4096,   80]
-moe.experts.down_proj_weight_scale_2      F32      [384]
-moe.experts.act_fn.weight                          [384, 3]            Expert-Specific PolyNorm
-moe.experts.act_fn.bias                            [384, 1]
-moe.router.gate.weight                             [384, 4096]
-moe.expert_bias                                    [384]               aux-loss-free 선택 편향
-```
+A GB10 has 128 GB of coherent unified memory at 273 GB/s. `FACT` —
+[NVIDIA DGX Spark hardware](https://docs.nvidia.com/dgx/dgx-spark/hardware.html).
+On this particular machine the OS reports 121 GiB total and about 118 GiB
+available at rest. `MEASURED` — `free -g` on `zgx-1c3b`, 2026-08-20. The 121.6
+GiB figure that appeared in earlier drafts of this guide is that
+machine-specific observation, not a general specification, and the two should
+not be interchanged.
 
-**열 개 전부 dim 0이 384다.** 전역 스케일 `_2`까지 per-expert라서 keep-list 하나로
-전부 슬라이싱된다. 51개 레이어 × 10 = **510회 슬라이스**.
+So the checkpoint does not fit, and the gap is not marginal. About 98% of the
+parameters are routed experts, which makes the size problem an expert-bank
+problem and dropping experts the only lever that moves it without inventing a
+new numeric format.
 
-건드리지 않는 것: `shared_experts`(모든 토큰에 대해 항상 실행되므로 라우팅 뱅크가
-아니다), 어텐션, mHC, layernorm, MTP 헤드.
+### What is not the point
 
-이 계획은 저장소에 드라이런으로 검증돼 있다:
-
-```bash
-cd toolkit/prune
-python3 surgery.py --index testdata/motif3-nvfp4.index.json --keep-count 192
-# experts 384 -> 192 (50.0% kept) / MoE layers 51 / tensors 510 sliced of 2440 / per layer 10
-```
-
-### 2.2 라우터 내부 — 프로파일링 훅 지점
-
-`modeling_motif.py`에서 확인:
-
-- `MoE.forward` (약 997행)이 `self.router(x, self.expert_bias)`를 호출하고
-  `(top_scores, selected_experts_indices, num_tokens_per_expert)`를 받는다.
-- `TokenChoiceTopKRouter.forward` (약 825행):
-  - `scores = sigmoid(F.linear(x, gate.weight))`
-  - **선택은** `topk(scores + expert_bias)` — 부하균형 편향이 들어간다
-  - **반환되는 top_scores는** `scores.gather(...)` — 편향이 **안** 들어간 원 시그모이드
-  - 이후 `route_norm`으로 선택된 k개에 대해 정규화하고 `route_scale`(2.0)을 곱한다
-
-**이 비대칭이 프로파일링 설계를 정한다.** 선택 빈도(count)는 부하균형 편향을 반영하고,
-게이트 질량(mass)은 반영하지 않는다. 둘 다 수집해야 한다. §5 P1.
-
-### 2.3 부하 균형 — 빈도로 고르면 안 되는 이유
-
-기술 보고서 §5.1.2에 따르면 SFT 단계에서 aux-loss-free 전문가 선택 편향(계수 1×10⁻⁴)과
-시퀀스 단위 부하균형 손실을 걸었다. **의도적으로 전문가 사용률을 균등하게 만들었다는
-뜻이고, 따라서 "거의 안 쓰이는 전문가"는 존재하지 않는다.**
-
-순진하게 사용 빈도로 순위를 매기면 노이즈를 얻는다. 반드시 **도메인 대조**로 가야
-한다 — 목표 코퍼스(에이전틱 코딩)와 참조 코퍼스(일반 대화·추론·한국어)의 비율.
-
-### 2.4 선행 연구 — 알고 시작해야 할 네 가지
-
-**"Half the Experts, All the Code: One-Shot Domain Pruning of Mixture-of-Experts
-LLMs for Coding"** ([arXiv:2607.16721](https://arxiv.org/abs/2607.16721), 2026-07)
-
-1. **전문가 절반을 제거해도 주 코드 벤치마크에 통계적으로 유의한 손실이 없었다.**
-   손상은 거의 전부 코딩 **외** 능력에 떨어졌다 — 우리가 원하는 거래 그대로다.
-2. **승리 전략이 모델 계열 간에 뒤집혔다.** 한 계열에서 검증된 레시피가 다른
-   계열에서 통한다고 가정할 수 없다. → 기준을 여러 개 만들어 전부 재라. §5 P2.
-3. **3비트 교차점.** 같은 메모리 예산이면 양자화가 먼저다. 가지치기가 이기는 구간은
-   양자화가 3비트 아래로 내려가야 하는 경우뿐이다.
-4. **에이전틱 평가에서 수리 턴 하나가 2비트 양자화 페널티를 통째로 지웠고, 압축된
-   모델일수록 회복 폭이 컸다.** 단발 벤치마크는 압축 손해를 과대평가한다.
-   → 우리 하네스에 수리 루프가 코어로 들어가 있는 이유이자, 평가 시 반드시 수리 턴을
-   준 조건을 병행해야 하는 이유. §6.3.
-
-**주의:** 그 논문의 대상은 35B·26B 모델이었다. **314B·384전문가 규모에서 같은
-비율이 성립하는지는 아무도 확인한 적이 없다.** 이 작업이 그걸 확인하는 일이다.
-
-### 2.5 GB10 서빙 환경 — 미해결 이슈
-
-vLLM은 aarch64 휠을 배포하지만 **GB10(sm_121) 지원은 미병합 PR 상태**였다
-(2026-08 확인). 그리고 열린 버그가 하필 이 조합을 정면으로 때린다:
-
-| 이슈 | 영향 |
-|---|---|
-| NVFP4 crash on ARM64 GB10 (CUDA illegal instruction) | **직격** — 우리 체크포인트가 NVFP4다 |
-| EngineCore fatal errors on sm_121 | 런타임 안정성 미확보 |
-| Sleep mode crash (unified memory) | 통합메모리 경로 미성숙 |
-| SM121 build targets 미병합 | 직접 빌드 필요, Motif 포크에 별도 이식 |
-
-**작업 착수 전 이 상태를 다시 확인하라.** 몇 달 지났으면 해결됐을 수 있다.
-해결됐다면 §7이 훨씬 쉬워진다.
-
-### 2.6 통합 메모리의 위험
-
-GB10은 과할당이 `CUDA out of memory`로 깔끔하게 실패하지 **않는다.** 호스트 RAM을
-계속 먹다가 커널 OOM 킬러가 뜬다. 이미 겪은 사례: 114 GiB 점유, 로드애버리지 43.6,
-박스 거의 접속 불가. **KV 캐시를 반드시 명시적으로 캡하라.**
+Pruning does not make decode faster. `experts_top_k` stays at 8, so the same
+number of experts is consulted per token and activated parameters are unchanged.
+`INFERENCE` — from `experts_top_k` being unmodified by the surgery, which
+`toolkit/prune/test_surgery.py::test_top_k_does_not` pins. What changes is
+whether the model fits at all, and how much memory is left for KV cache.
 
 ---
 
-## 3. 목표 사양과 유지 비율
+## 2. The checkpoint, as it actually is
 
-### 3.1 무엇을 만드는가
+All `MEASURED` against the pinned revision on 2026-08-20, by reading the
+safetensors headers — no weights loaded.
 
-- 이름: `Motif-3-Coder-A13B-NVFP4` (가칭)
-- 전문가: 384 → **192** (50%)
-- 가중치: **약 100.2 GB = 93.3 GiB**
-- 컨텍스트: **256K 유지** (아래 계산 참조)
-- 활성 파라미터: **변화 없음** (여전히 top-8) → 연산량과 디코드 속도 불변
-- 라이선스: MIT 상속
+```text
+source revision       3a4416f7b555720d36e41f93207b826003ffe327
+indexed tensors       2440
+shards                155
+total_size            186891034892
+MoE layers            51  (2..52 inclusive)
+num_experts           384
+experts_top_k         8
 
-### 3.2 왜 하필 50%인가 — GB10이 사실상 강제한다
-
-유지 비율별로 계산하면:
-
-| 유지 | 전문가 4bit | 스케일 | 비전문가 bf16 | 합계 | GiB | GB10 적재 |
-|---:|---:|---:|---:|---:|---:|:--|
-| 100% | 154.0 | 19.3 | 13.6 | 186.9 GB | 174.1 | ✗ 1.59× 초과 |
-| 75% | 115.5 | 14.4 | 13.6 | 143.5 GB | 133.7 | ✗ 초과 |
-| 62.5% | 96.3 | 12.0 | 13.6 | 121.9 GB | 113.5 | △ 들어가나 KV 여유 8 GiB |
-| **50%** | **77.0** | **9.6** | **13.6** | **100.2 GB** | **93.3** | **✓ 여유 28 GiB** |
-| 37.5% | 57.8 | 7.2 | 13.6 | 78.6 GB | 73.2 | ✓ 여유 큼 |
-
-50% 기준 KV 여유 계산:
-
-```
-121.6 GiB (총) − 93.3 (가중치) = 28.3 GiB
-  − headless OS       ~3 GiB
-  − 엔진/CUDA/워크스페이스 ~8 GiB
-  ────────────────────────────
-  KV + 마진            ~17 GiB
-  = 18.6 GB ÷ 61 KB/token ≈ 305K 토큰 → 256K 전체 컨텍스트 수용
+expert-axis tensors inside the index      510   (10 per layer)
+expert-axis tensors in the sidecar        102   ( 2 per layer)
+tensors a surgery must slice              612
 ```
 
-KV가 토큰당 61 KB인 근거: MLA 압축이라 `kv_lora_rank` 512 + `qk_rope_head_dim` 64
-= 576 값/레이어, × 53 레이어 × 2 바이트. 인터리브드 sliding-window 레이어는 이보다
-적게 쓰므로 **상한**으로 봐야 한다.
+### The sidecar is the part that gets missed
 
-**결론: 75%는 GB10에 안 들어가고 62.5%는 위험하다. GB10을 목표로 하는 한 실질적으로
-50%가 상한이다.** 그리고 그 지점이 마침 선행 연구가 "절반은 제거 가능"이라고 보고한
-지점이다. 운이 좋은 것이지 보장은 아니다.
+`nvfp4_act_scales.safetensors` is 166,872 bytes, SHA-256
+`c7cbea201c128079fdbe6b106a11c49499e65d07b963619900544d14b670c24b`. `MEASURED`.
+It holds 102 F32 `[384]` tensors — `a13_gscale` and `a2_gscale` for each of
+layers 2 through 52 — and **the safetensors index does not mention it**.
 
-**50%가 실패하면 GB10은 탈락이다.** §8의 대체 경로로 간다.
+Slicing only the 510 indexed tensors leaves this file untouched, and that does
+not crash. Motif's loader falls back to a gscale of 1 when the sidecar is
+absent; worse, if the original `[384]` file is copied through, a single-rank
+loader takes the first `K` entries, so survivor `j` receives the activation
+scale belonging to original expert `j` rather than to `keep[j]`. The model
+loads, runs, and is quietly miscalibrated. `FACT` —
+[the loader's sidecar handling](https://github.com/MotifTechnologies/vllm/blob/4cd9eb4129883565e69d508038d783d59ee01867/vllm/model_executor/layers/fused_moe/motif_nvfp4_experts.py#L112-L143)
+and [its single-rank scale selection](https://github.com/MotifTechnologies/vllm/blob/4cd9eb4129883565e69d508038d783d59ee01867/vllm/model_executor/layers/fused_moe/motif_nvfp4_experts.py#L275-L302).
 
-### 3.3 속도는 가지치기로 안 변한다
+`toolkit/prune/test_surgery.py` slices the sidecar with a deliberately
+non-contiguous keep-list, so first-K and `keep[j]` cannot coincide by accident.
 
-활성 파라미터가 그대로이므로 디코드 속도도 그대로다. 가지치기는 **용량을 사는 것이지
-속도를 사는 것이 아니다.**
+### Only the routed experts are quantised
 
-GB10 실효 대역폭 약 210 GB/s(qwen3:8b 43.6 tok/s 실측에서 역산) 기준:
+`MEASURED` — from the shard headers. Attention, the mHC blocks, layer norms,
+router gates and shared experts are all plain BF16. The packed tensors are only:
 
+```text
+moe.experts.gate_up_proj              U8       [384, 2560, 2048]
+moe.experts.gate_up_proj_weight_scale F8_E4M3  [384, 2560,  256]
+moe.experts.down_proj                 U8       [384, 4096,  640]
+moe.experts.down_proj_weight_scale    F8_E4M3  [384, 4096,   80]
 ```
-비전문가 bf16 그대로   16.1 GB/token → ~13 tok/s
-비전문가 FP8          10.1 GB/token → ~21 tok/s
-전 계층 4비트          7.4 GB/token → ~28 tok/s
-참고: Codex 실사용 디코드 중앙값 33 tok/s
-```
 
-**비전문가 레이어를 FP8로 내리는 것이 속도에 가장 크게 기여한다.** 가지치기 후에는
-매 토큰 읽는 16.1 GB 중 12 GB가 어텐션이다. 이 작업은 P6(§5)에서 다룬다.
+with a per-expert F32 `weight_scale_2`. Group size is 16 along the input
+dimension: 4096/256 and 1280/80. `INFERENCE` from those shapes.
+
+This split is what makes the profiler possible: 173 GB of experts to stream, 14
+GB of everything else to hold.
+
+### Routing, precisely
+
+`FACT` — `TokenChoiceTopKRouter.forward` in the reference `modeling_motif.py`.
+Selection is `topk(sigmoid(logits) + expert_bias)`; the returned weights are
+gathered from the raw sigmoid *without* the bias, then normalised over the
+selected k and multiplied by `route_scale = 2.0`.
+
+So the bias decides *which* experts are chosen but does not enter the weight.
+Any statistic called "gate mass" has to say which of those it includes, and the
+profile manifest records it (`gate_sum_includes_route_scale`,
+`selection_bias_applied`).
+
+Motif-3 was trained with explicit load balancing — an auxiliary-loss-free
+selection bias plus a sequence-wise balancing loss. `FACT` — `load_balance_coeff`
+in `config.json` and §5 of the [technical report](https://arxiv.org/html/2608.09119v1).
+Usage is therefore close to uniform by construction, which is why ranking
+experts by raw frequency finds nothing.
 
 ---
 
-## 4. 저장소에 이미 있는 것
+## 3. Choosing what to keep
 
-전부 `toolkit/prune/`에 있다. 실행 가능하고 단위 테스트가 붙어 있다.
+### Why the earlier plan was one method wearing three names
 
-| 파일 | 상태 |
-|---|---|
-| `surgery.py` | 계획 수립 + 실제 체크포인트 쓰기. 합성 데이터로 테스트됨. **실제 가중치에 돌린 적 없음** |
-| `profile.py` | 라우팅 통계 수집기. 훅 지점은 소스에서 확인했으나 **실행된 적 없음** |
-| `select.py` | keep-list 선택. 합성 프로파일로 11개 테스트 통과 |
-| `verify.py` | **정합성 검증**(§6.1). 원본 라우터를 keep-list 안으로 가두고 가지친 모델과 대조. **실행된 적 없음** |
-| `test_surgery.py` | 14개 테스트. 실제 인덱스에 대한 레이아웃 검증 포함 |
-| `test_select.py` | 11개 테스트 |
-| `testdata/motif3-nvfp4.index.json` | 실제 NVFP4 체크포인트 인덱스 (커밋됨) |
+The first version of this pipeline offered `count`, `mass` and `blend` and
+called them three criteria to compare. All three were a ratio of a target corpus
+to a reference corpus, so all three shared one failure: an expert that both
+corpora lean on heavily scores near 1.0 and is cut, even though every token
+depends on it.
 
-```bash
-cd toolkit/prune
-python3 -m unittest test_surgery test_select   # 25 tests
-```
+The pruning literature found exactly that collapse pushing pure contrast to 50%
+on Qwen. `FACT` — [Half the Experts, All the Code](https://arxiv.org/html/2607.16721v1).
+Three criteria agreeing is not corroboration when they are the same criterion.
 
-**중요:** `surgery.py`의 `apply_surgery()`와 `profile.py` 전체는 **실제 가중치에
-한 번도 돌지 않았다.** 첫 실행 때 반드시 §6.1의 정합성 검증을 먼저 하라.
+### The family that replaces them
 
----
+Implemented in `toolkit/prune/select_experts.py`; each writes its exact formula
+into the keep-list document, because "REAP" means several things in the wild.
 
-## 5. 작업 순서
+| criterion | what it ranks by | role |
+|---|---|---|
+| `reap` | `Σ g_e(x)·‖f_e(x)‖₂` over routed tokens | production default |
+| `gate_mass` | `Σ g_e(x)` | REAP's first half |
+| `man` | mean output norm | REAP's second half |
+| `guard_reap` | protect the reference corpus's top-N, then target REAP | preserves off-domain capability by construction |
+| `hybrid_share` | `F_T² / (F_T + F_R + ε)` | target-weighted, cannot ratio away absolute flow |
+| `random` | uniform, multi-seed | control |
+| `contrastive` | the old default | **negative** control |
 
-각 단계에 **산출물**, **게이트**, **실패 시 대응**이 붙어 있다. 게이트를 통과하지
-못하면 다음 단계로 가지 마라.
+`HYPOTHESIS` — REAP or `guard_reap` will beat the others on Motif-3 at 50%.
+Falsified if the random control is statistically indistinguishable from them on
+the dev split, which would mean the profile carries no usable signal rather
+than that pruning is impossible.
 
-### 대략의 시간 감각
+### Keep ratio
 
-정확한 견적이 아니라 계획을 세우기 위한 자릿수다. 실제 값은 `prune-work/LOG.md`에
-남겨 다음 세션이 쓰게 하라.
+`HYPOTHESIS` — 50% is achievable. It is not a target handed down from anywhere;
+it is the ratio that makes the checkpoint fit with room for KV cache.
+`INFERENCE` — 50% of the expert bytes plus the unchanged remainder is about 95
+GB, against 121 GiB of unified memory.
 
-| 단계 | 규모 |
-|---|---|
-| P0 체크포인트 다운로드 | 회선 나름, 수 시간 |
-| P1 프로파일링 (GB10 오프로드) | 5만 토큰 기준 수 시간~하룻밤 |
-| P1 프로파일링 (임대) | 로딩 포함 1~2시간 |
-| P2 keep-list 생성 | 분 단위, 노트북 |
-| P3 수술 | 디스크 I/O 바운드, 수십 분 |
-| P3 정합성 검증 | 두 모델 로딩이 지배, 수십 분 |
-| P4 SWE-bench | 과제당 최대 4시간 타임아웃 × 세트 크기 |
-| P5 GB10 브링업 | **가장 불확실.** 며칠을 각오하라 |
+Treat 75%, 66% and 50% as points on a memory-versus-quality curve rather than
+one goal. If 50% fails a quality gate, the response is to re-examine ratio,
+context length, KV budget and quantisation together — not to conclude the
+project failed.
 
-**임대를 쓸 거라면 P1과 P4의 기준선 측정을 한 세션에 몰아라.** 187 GB 로딩이 매번
-든다.
+The literature's 50% result is more specific than "no loss on code". On Qwen,
+HumanEval+ held but MBPP+ lost about 4.5 percentage points. `FACT` — the pruning
+paper. That is a different model family; it is a reason to measure, not a
+prediction.
 
+### Perplexity
 
-### P0 — 오프라인 준비 (기계 불필요)
-
-1. §2.5의 vLLM GB10 이슈 현황을 다시 확인한다. 해결됐는지가 §7의 난이도를 좌우한다.
-2. **체크포인트를 받는다.** `Motif-Technologies/Motif-3-NVFP4`, 186.9 GB, 165개 파일.
-   회선에 따라 몇 시간 걸린다. **먼저 걸어두고 나머지를 하라.** 수술 결과를 쓸 공간까지
-   같은 볼륨에 원본 크기만큼 더 필요하다(총 ~375 GB). ZGX는 3.4 TB 여유가 있다.
-
-   ```bash
-   huggingface-cli download Motif-Technologies/Motif-3-NVFP4 \
-     --local-dir /mnt/nvme/Motif-3-NVFP4
-   ```
-
-3. 코퍼스 두 벌을 만든다.
-
-**목표 코퍼스 T (에이전틱 코딩).** 가장 좋은 것은 **이 하네스가 실제로 만든 궤적**이다.
-`motif` 세션이 `.motif/sessions/*.jsonl`에 저장하고 `motif distil`이 성공 궤적만
-뽑아준다. 아직 세션이 없다면 SWE 계열 공개 과제의 문제·패치·테스트 출력으로 시작하되,
-궤적이 쌓이면 다시 프로파일링하는 것을 계획에 넣어라.
-
-**참조 코퍼스 R (일반).** 일반 대화, 수학·과학 추론, 한국어 산문. 목표 코퍼스와
-**겹치지 않아야** 대조가 의미를 갖는다.
-
-각각 5만 토큰 정도면 충분하다. 형식은 `.jsonl`(`text` 필드) 또는 빈 줄로 나눈 `.txt`.
-
-> **작업 산출물은 전부 `prune-work/` 아래에 둔다.** 저장소 루트의 `corpus/`는 이미
-> 채팅 템플릿 골든 픽스처가 쓰고 있으니 거기에 코퍼스를 넣지 마라. `prune-work/`도
-> gitignore에 넣어라 — 프로파일은 수십 MB, 체크포인트는 수백 GB다.
-
-- **산출물**: `prune-work/corpus/target.jsonl`, `prune-work/corpus/reference.jsonl`
-- **게이트**: 두 코퍼스가 주제상 확실히 다른가. 같으면 대조가 0을 낸다.
-
-### P1 — 라우팅 프로파일링
-
-이 단계만이 **전체 187 GB 모델의 순전파**를 요구한다.
-
-**어디서 돌릴 것인가 — 두 가지 선택지**
-
-**(a) GB10 + 디스크 오프로드 — 먼저 시도할 것.**
-`modeling_motif.py`에 `_no_split_modules = ["MotifDecoderLayer"]`가 선언돼 있어
-accelerate가 레이어를 NVMe에서 스트리밍할 수 있다. 프로파일링은 **오프라인이고 지연에
-민감하지 않다** — 수만 토큰을 몇 시간에 걸쳐 처리하면 되고 아무도 기다리지 않는다.
-초당 몇 토큰이면 충분하다. 성공하면 임대 비용이 0이 된다.
-
-```bash
-python3 toolkit/prune/profile.py \
-  --model /path/to/Motif-3-NVFP4 \
-  --corpus prune-work/corpus/target.jsonl --name target \
-  --offload-folder /mnt/nvme/motif-offload \
-  --max-tokens 50000 --out prune-work/profiles/target.json
-```
-
-ZGX는 디스크 3.4 TB 여유가 있으므로 오프로드 폴더 공간은 문제없다. **메모리 캡을
-반드시 걸어라**(§2.6).
-
-**(b) 임대 GPU.** (a)가 실패하거나 너무 느리면. 이때 SWE-bench 기준선 측정(§6.2)과 **같은 세션에서 연속으로** 돌려 187 GB 로딩
-비용을 한 번만 내라. 임대를 두 번 켜면 로딩만 두 번 낸다.
-
-**수집하는 것**
-
-레이어별 × 전문가별로 두 가지:
-- `count` — 선택 횟수 (부하균형 편향 포함)
-- `mass` — 게이트 가중치 합 (편향 미포함)
-
-§2.2의 비대칭 때문에 둘 다 필요하다.
-
-- **산출물**: `prune-work/profiles/target.json`, `prune-work/profiles/reference.json`
-- **게이트**: 각 파일의 `tokens`가 목표치에 도달했는가. 레이어 51개가 전부
-  기록됐는가. 어느 레이어에서 count 합이 `tokens × 8`과 크게 다르면 훅이 일부
-  호출을 놓친 것이다 — 고치고 다시 돌려라.
-- **실패 시**: (a)가 안 되면 (b). (b)도 예산이 안 되면 목표 토큰 수를 1만으로 줄여
-  본다. 대조 신호는 생각보다 적은 토큰에서도 나온다.
-
-### P2 — keep-list 생성 (오프라인)
-
-순수 데이터 처리라 노트북에서 끝난다.
-
-```bash
-for crit in count mass blend; do
-  for ratio in 0.75 0.5 0.375; do
-    python3 toolkit/prune/select.py \
-      --target prune-work/profiles/target.json --reference prune-work/profiles/reference.json \
-      --criterion $crit --keep-ratio $ratio \
-      --out prune-work/keeps/${crit}-${ratio}.json
-  done
-done
-```
-
-**기준을 하나만 만들지 마라.** §2.4-2의 이유로 3기준 × 3비율 = 9개를 만들어 곡선을
-본다. `--global-alloc`도 한 번 돌려 레이어별 할당과 비교하라.
-
-- **산출물**: `prune-work/keeps/*.json` 9개 이상
-- **게이트**: `select.py`가 출력하는 요약에서 `shared across every layer` 값을 보라.
-  이 값이 유지 개수와 거의 같으면(= 모든 레이어가 같은 전문가를 남겼으면) 대조가
-  레이어 구분을 못 하고 있다는 뜻이다. 코퍼스를 의심하라.
-- **실패 시**: 세 기준이 전부 균등 무작위와 구별되지 않으면 **가지치기 자체를 포기할
-  근거**다. 무작위 keep-list를 대조군으로 만들어 P3에서 함께 평가하라.
-
-### P3 — 수술
-
-```bash
-python3 toolkit/prune/surgery.py \
-  --index /path/to/Motif-3-NVFP4/model.safetensors.index.json \
-  --keep prune-work/keeps/blend-0.5.json \
-  --src /path/to/Motif-3-NVFP4 \
-  --dst /path/to/Motif-3-Coder-A13B-NVFP4 \
-  --apply
-```
-
-디스크는 원본 크기만큼 더 필요하다(187 GB). 메모리는 샤드 하나씩 처리하므로 몇 GB면
-된다.
-
-- **산출물**: 새 체크포인트 디렉터리 (config·토크나이저·템플릿 포함)
-- **게이트**: **정합성 검증을 반드시 통과할 것.** 품질을 재기 전에 "수술이 모델을
-  망가뜨리지 않았는가"부터 확인해야 한다.
-
-```bash
-python3 toolkit/prune/verify.py \
-  --original /path/to/Motif-3-NVFP4 \
-  --pruned   /path/to/Motif-3-Coder-A13B-NVFP4 \
-  --keep     prune-work/keeps/blend-0.5.json
-```
-
-  `PASS`가 아니면 §6.1을 읽고 원인을 잡아라. 품질 평가는 그 다음이다.
-
-### P4 — 검증
-
-§6 전체가 이 단계다. 게이트: **50% 유지에서 코드 성능에 통계적으로 유의한 손실이
-없을 것.**
-
-- **실패 시**: 75%로 후퇴한다. 단 75%는 GB10에 안 들어가므로(§3.2) 그 시점에 목표
-  하드웨어가 바뀐다. §8로.
-
-### P5 — 회복 튜닝 (선택)
-
-손실이 남으면 가벼운 파인튜닝으로 절반쯤 회복한다는 보고가 있다(§2.4-1 논문).
-`motif3-training-example`(torchtitan 기반)이 공개돼 있다. **라우터는 동결한 채**
-진행한다 — Motif 자신의 SWE 교사 레시피와 같은 방식이다(기술 보고서 §5.2.3).
-
-P4를 통과하면 건너뛴다.
-
-### P6 — 비전문가 레이어 FP8화 (선택, 속도용)
-
-**용량이 아니라 속도를 위한 작업이다.** 가지치기 후에도 매 토큰 읽는 16.1 GB 중
-12 GB가 bf16 어텐션이므로, 여기가 병목이 된다(§3.3).
-
-Motif 모델 카드가 **온라인 block-fp8 양자화**를 지원한다고 밝히고 있다:
-
-```
---quantization modelopt_blockfp8
-```
-
-체크포인트를 바꾸지 않고 서버 플래그만으로 되는 길이므로 **가장 먼저 시도할 것.**
-다만 그 안내는 BF16 체크포인트를 전제로 쓰였고, **NVFP4 체크포인트에서 전문가는 이미
-NVFP4인 상태로 비전문가만 fp8로 내려가는 조합이 성립하는지는 확인된 바 없다.**
-충돌하거나 무시될 수 있다.
-
-- **시도 순서**: ① 플래그만 붙여 기동 → ② `motif doctor`와 짧은 세션으로 정상
-  동작 확인 → ③ tok/s 측정해 §3.3의 예상(13 → 21 tok/s)과 대조
-- **게이트**: 출력 품질이 §6.2 기준선 대비 유의하게 나빠지지 않을 것. 속도만 보고
-  품질을 안 재면 조용히 나빠진 모델을 쓰게 된다.
-- **실패 시**: 플래그가 안 먹으면 그냥 포기하라. 13 tok/s도 못 쓸 속도는 아니고,
-  체크포인트를 직접 재양자화하는 것은 이 작업의 범위를 크게 벗어난다.
+Useful as a diagnostic and not usable as an acceptance gate. It catches
+structural corruption early, helps rank candidates cheaply, and shows whether
+recovery training is converging or overfitting. It does not substitute for a
+coding benchmark, and a pruned model can hold perplexity while losing the
+ability to finish a task.
 
 ---
 
-## 6. 무엇을 어떻게 테스트하는가
+## 4. Profiling
 
-### 6.1 정합성 먼저 — 품질은 그 다음
+### Why the obvious approach does not work
 
-**이것을 건너뛰지 마라.** 수술 버그와 품질 손실은 증상이 비슷하지만 원인이 완전히
-다르고, 순서를 지키면 구분할 수 있다.
+`BLOCKED` — permanently, for the path this guide used to recommend.
+`AutoModelForCausalLM.from_pretrained(..., trust_remote_code=True,
+device_map="auto", offload_folder=...)` fails three separate ways:
 
-**정합성 테스트.** `toolkit/prune/verify.py`가 구현하고 있다. 원본 모델의 라우터를
-바꿔 **제거된 전문가의 점수에 -inf를 더한 뒤** top-8을 뽑게 한다. 그러면 원본은
-keep-list 안에서만 라우팅한다. 같은 입력에 대해 가지친 모델과 로짓을 비교한다.
+1. The NVFP4 repository's `auto_map` names `modeling_motif.MotifForCausalLM`,
+   and that file is **not in that repository**. `MEASURED` — its file listing.
+   `trust_remote_code` has nothing to find.
+2. Packed `modelopt_nvfp4` expert tensors are not something stock Transformers
+   executes.
+3. `device_map="auto"` with an offload folder stages the checkpoint rather than
+   streaming it, which does not help when it is 187 GB.
 
-두 모델이 일치해야 하는 이유는 근사가 아니라 정확하다:
+### What is implemented instead
 
-- **선택** — 가지친 라우터의 gate 행은 원본 gate의 유지된 행이고 `expert_bias`도
-  같은 인덱스로 잘린 것이다. 따라서 `topk(scores + bias)`가 훑는 값이 동일하고 같은
-  전문가를 고른다.
-- **게이트 가중치** — `top_scores`는 원 시그모이드에서 gather되고 `route_norm`이
-  선택된 k개에 대해 정규화한다. 같은 k, 같은 값, 같은 분모.
-- **전문가 가중치** — 가지친 전문가 j는 원본 전문가 keep[j] **그 자체**다.
+`toolkit/prune/profile_routing.py`, a layer-major streaming profiler.
 
-**판정 기준:**
-- 다음 토큰 argmax가 **모든 위치에서 일치**해야 한다. 타협 불가.
-- 로짓 최대 절대 오차는 작아야 하지만 **비트 단위 동일을 요구하지 마라.**
-  `num_experts`가 달라지면 fused MoE 커널이 다른 경로를 탈 수 있다. 1e-2 수준이면
-  정상, 1e+0 수준이면 버그다. `verify.py`의 기본 허용치는 5e-2다.
+The architecture is Motif's own `modeling_motif.py`, fetched from the BF16
+repository. Imported rather than reimplemented: GDLA attention, the mHC residual
+path and the per-expert PolyNorm are all non-standard, and a reimplementation
+that is subtly wrong changes the hidden states, which changes the routing, which
+makes every statistic a confident measurement of a different model.
 
-**argmax가 하나라도 어긋나면 수술 버그다.** keep-list 정렬, 텐서 10개 전부 슬라이싱
-됐는지, `expert_bias`와 `act_fn.weight/bias`를 빠뜨리지 않았는지 확인하라.
+The loop runs layer-major — hold a shard's hidden states, apply one layer to all
+of them, move on — so each layer's 3.4 GB of packed weights is read once rather
+than once per chunk. `test_streaming.py` builds a tiny Motif with every
+architectural switch the real one sets and requires the layer-major path and
+`MotifModel.forward` to agree.
 
-### 6.2 코드 성능 — 1차 게이트
+`MEASURED`, 2026-08-20 on `zgx-1c3b`: 2,114 resident tensors, 11.3 GB; 22.6 GB
+device allocated; model built in 93 s.
 
-**퍼플렉시티 금지.** §2.4-3.
+Three things had to be established rather than assumed.
 
-측정할 것:
-- SWE-bench Verified (mini-SWE-agent 하네스, 16K 토큰/스텝, 250스텝, 4시간 타임아웃 —
-  Motif 공식 평가 설정과 동일하게)
-- 원본 대비 신뢰구간을 붙여 보고하라. "76.2 → 74.8"은 손실인지 노이즈인지 알 수 없다.
+**NVFP4 unpacking.** Every mistake produces output of the right shape and a
+plausible magnitude. `toolkit/prune/nvfp4.py` has a pure-Python reference
+checked against hand-computed values; on real checkpoint weights it agrees with
+vLLM's Triton dequantiser to **zero** absolute difference for both
+`gate_up_proj` and `down_proj`. `MEASURED`.
 
-**비교 대상을 반드시 포함:**
-1. 원본 Motif-3 (기준선)
-2. 가지친 모델 (기준 3종 × 비율 3종)
-3. **무작위 keep-list 대조군** — 대조 선택이 무작위보다 나은지 확인하는 유일한 방법
+**Attention.** The model refuses to build under anything but
+`flash_attention_2`, and explains why: GDLA is grouped-query with a per-layer
+sliding window, eager does not repeat KV heads, and sdpa gets the window wrong.
+`FACT` — the guard in `MotifModel.__init__`. There is no `flash-attn` wheel for
+aarch64 with this CUDA and torch, but vLLM vendors the same compiled kernel, so
+`toolkit/prune/attention.py` calls that — and is checked against a readable
+naive implementation on causal, grouped-query and sliding-window attention.
+`MEASURED`.
 
-### 6.3 에이전틱 평가 — 반드시 병행
+**Precision.** Statistics accumulate in float64 with int64 counts. In float32,
+adding 1e-3 to a running total of 1e7 is a no-op, and the experts contributing
+small amounts are exactly the ones near the cut.
 
-§2.4-4 때문이다. 단발 벤치마크만 보면 **과도하게 보수적인 결정**을 하게 된다.
+### What a profile contains
 
-수리 턴을 준 조건에서 다시 재라. 이 저장소의 하네스가 그 조건을 이미 구현하고 있다 —
-`packages/core/src/loop.ts`의 수리 루프가 도구 실패·테스트 실패 시 실행 출력을
-구조화해 되먹인다.
-
-```bash
-motif "<SWE 과제>" --endpoint <서버> --model <가지친 모델> --max-turns 100
-motif distil .motif/sessions   # 성공률과 파손율 집계
+```text
+counts        I64 [51, 384]   routed token-expert pairs
+gate_sum      F64 [51, 384]   Σ of the final applied routing weight
+prob_mass     F64 [51, 384]   Σ sigmoid(router logit), all tokens, all experts
+norm_sum      F64 [51, 384]   Σ ‖f_e(x)‖₂
+norm_sq_sum   F64 [51, 384]   Σ ‖f_e(x)‖₂²
+reap_sum      F64 [51, 384]   Σ g_e(x)·‖f_e(x)‖₂
 ```
 
-**보고할 지표:**
-- 단발 통과율
-- 수리 턴 1회 허용 시 통과율
-- 그 **차이** — 압축 모델일수록 커야 한다. 안 커지면 논문의 관찰이 이 규모에서
-  성립하지 않는다는 뜻이고, 그 자체가 결과다.
-
-### 6.4 코딩 외 손실 — 측정하되 실패로 치지 않는다
-
-의도한 거래다. 하지만 **모델 카드에 정직하게 기재해야 하므로** 반드시 측정하라.
-GPQA Diamond, IFBench, 한국어 응답 품질 정도면 충분하다.
-
-### 6.5 GB10 실측
-
-§7 이후:
-- 실제 디코드 속도 (tok/s)
-- 최대 컨텍스트에서의 메모리 점유
-- 장시간 세션 안정성 (EngineCore 크래시 빈도)
+Every layer's counts must sum to `tokens × top_k`. That invariant is what
+catches a dropped hook or a double-counted batch before it becomes a plausible
+ranking, and `stats.py` refuses a profile that violates it.
 
 ---
 
-## 7. GB10 서빙 브링업
+## 5. The corpus
 
-가장 불확실한 구간이다. 넉넉히 시간을 잡아라.
+Routing is measured on whatever the model is shown, so a profile is about
+agentic coding only if the text is what the agent actually sends.
 
-### 7.1 순서
+The earlier plan tokenised raw document text and truncated each document at
+2,048 tokens. That deletes the system prompt, the tool schemas, the chat roles,
+the reasoning markers, the tool-result envelope and the repair turns — every
+structural token this harness emits on every request. Whatever it measured, it
+was not this harness.
 
-1. **vLLM aarch64 휠 설치.** PyPI에 `manylinux_2_28_aarch64` 휠이 있다.
-2. **SM121 패치 확인/이식.** §2.5. 미병합이면 해당 PR을 Motif 포크에 체리픽해야 한다.
-3. **Motif 포크의 커스텀 커널 빌드.** `motif_fused_poly_quant_kernel.cu`, DeepGEMM,
-   FlashAttention-MLA 백엔드를 GB10 컴퓨트 케이퍼빌리티로 컴파일.
-4. **NVFP4가 도는지 확인.** 첫 관문이자 미해결 버그가 있는 지점.
-5. **메모리 캡을 걸고 기동.**
+A corpus record is a rendered conversation carrying the SHA-256 of the chat
+template and of the tool schemas it was rendered against. A mismatch is a
+refusal, not a warning.
 
-ZGX에는 torch가 아직 안 깔려 있고 ARM64 + CUDA 13 조합이 만만치 않다고 기록돼 있다.
-여기서 시간이 걸릴 것을 전제하라.
+### Leakage
 
-### 7.2 기동 명령 (출발점)
+Profiling on the instances the model will later be graded on is circular: the
+experts kept are the ones that helped on exactly those problems, and the
+benchmark then reports how well that worked.
 
-Motif 공식 H200 예시를 GB10 단일 장비용으로 줄인 것이다. **그대로 쓰지 말고
-메모리를 재면서 조정하라.**
+`toolkit/prune/corpus.py` audits three ways — exact instance ids, 5-gram
+overlap, and word-set containment — and **fails** rather than reporting, because
+a warning printed during a twelve-hour profiling run is a warning nobody reads.
+Containment matters because the realistic leak is a calibration document that
+*contains* a benchmark problem inside a longer conversation, which has low
+Jaccard and containment near one.
 
-```bash
-vllm serve /path/to/Motif-3-Coder-A13B-NVFP4 \
-  --trust-remote-code \
-  --tool-call-parser motif \
-  --reasoning-parser motif \
-  --enable-auto-tool-choice \
-  --enable-prefix-caching \
-  --speculative-config '{"model": "/path/to/Motif-3-Coder-A13B-NVFP4", "num_speculative_tokens": 1}' \
-  --tensor-parallel-size 1 \
-  --dtype bfloat16 \
-  --max-model-len 262144 \
-  --gpu-memory-utilization 0.80 \
-  --host 0.0.0.0 --port 8080
+This is not a proof of disjointness and does not claim to be. The corpus
+manifest records which methods ran, so a later reader can tell what was not
+checked.
+
+### Size and stability
+
+`HYPOTHESIS` — around 3.15M target-mix tokens, the scale the pruning paper used,
+is a reasonable starting point. It is a starting point and not an answer: the
+size is decided by stability, not by copying a number.
+
+Pre-registered gates, written as constants in `corpus.py` so they cannot be
+chosen after seeing the report:
+
+- median per-layer keep-set Jaccard across independent shards ≥ 0.90
+- 5th-percentile per-layer Jaccard ≥ 0.80
+- doubling the token budget changes the final keep-set by ≤ 5%
+
+50k tokens is a pilot for the loader and the accumulators, not a corpus.
+
+---
+
+## 6. Surgery
+
+`toolkit/prune/surgery.py`. Preflight verifies everything and creates nothing;
+work happens in a temporary directory on the same filesystem; the destination
+appears in one atomic rename or not at all.
+
+`MEASURED` — preflight against the real checkpoint, 2026-08-20:
+
+```text
+experts       384 -> 192  (50.0% kept)
+MoE layers    51  (2..52)
+indexed       510 sliced of 2440
+sidecar       102 sliced
+total sliced  612
+shards        155
+output        ~95.3 GB
 ```
 
-각 플래그가 왜 필요한지는 `motif doctor`가 설명한다. 요약:
+Preflight refuses, before anything is read: an unsorted keep-list (expert order
+carries the router's meaning), duplicates, out-of-range ids, any layer below
+`top_k`, layers with different survivor counts, a missing or wrong-shaped
+sidecar, a non-empty destination, or insufficient disk. It collects every
+problem rather than stopping at the first.
 
-- `--tool-call-parser motif` — **없으면 툴콜 JSON이 깨진 턴이 통째로 버려진다.**
-  이 모델은 그걸 자주 만든다. 하네스가 조용히 실패한다.
-- `--reasoning-parser motif` — 생성 프롬프트가 항상 `<think>`를 열어두므로 서버가
-  추론과 내용을 분리해야 한다.
-- `--enable-prefix-caching` — 하네스가 도구 목록을 얼리고 정규 순서로 고정하는 이유가
-  이 캐시를 살리기 위해서다. 꺼져 있으면 그 설계가 아무것도 사지 못한다.
-- `--speculative-config` — 체크포인트에 MTP 헤드가 있어 자체 추측 디코딩이 공짜다.
-- `--gpu-memory-utilization` — **통합 메모리라 과할당이 OOM 킬러로 간다.** 0.80에서
-  시작해 실측하며 올려라.
+`--global-alloc` is refused outright. It produces a different expert count per
+layer, and `num_experts` is a single value that `config.json`, the tensor
+shapes, the sidecar and the fused MoE kernels all read. Making it work is a
+redesign of four things, not a flag.
 
-### 7.3 알아둘 함정
+### Two artifacts, kept apart
 
-- **어텐션 백엔드.** Motif 공식 H200 예시는 `--attention-backend FLASH_ATTN_MLA`를
-  쓴다. GB10에서 그 커널이 빌드·동작하는지는 확인된 바 없다. 안 되면 백엔드를 빼고
-  기본값으로 먼저 뜨는지 보라 — 느려도 도는 것이 먼저다.
-- **`--tensor-parallel-size 1`.** GB10은 한 장이다. 공식 예시의 `--data-parallel-size 8`
-  이나 `--enable-expert-parallel`을 따라 붙이지 마라.
-- **첫 기동은 짧은 컨텍스트로.** `--max-model-len 262144`로 바로 시작하면 KV 캐시
-  할당에서 OOM 킬러를 만나기 쉽다. 32768로 떠보고 늘려가라.
+1. `pruned-sliced-scales` — the sidecar is an exact slice of the original.
+   This is what masked-equivalence verification compares against.
+2. `pruned-recalibrated-scales` — activation calibration re-run on the pruned
+   runtime. `BLOCKED` until the runtime is up; a production candidate, and not
+   a substitute for the first.
 
-### 7.4 검증
+Separate paths and separate hashes, so a recalibrated artifact cannot
+accidentally be the one that "passed" structural verification.
 
-```bash
-motif doctor --endpoint http://zgx-1c3b:8080
+---
+
+## 7. Verification, in layers
+
+"`verify.py` said PASS" used to mean one prompt-level check. It is six gates.
+
+| gate | question | needs |
+|---|---|---|
+| V1 | is every output byte `source[keep]`, is everything else untouched, is the sidecar sliced | files only |
+| V2 | does a 384→384 keep-all surgery reproduce the source, and what is the noise floor | files, one runtime |
+| V3 | does the original with dropped experts masked agree numerically with the pruned model | both models resident |
+| V4 | does the production runtime load it, take the NVFP4 direct path, and read the calibrated sidecar | serving stack |
+| V5 | MTP, prefix cache, graphs, chunked prefill — one at a time | serving stack |
+| V6 | the context ladder and the soak | GB10 |
+
+V2 before V3 is not optional. If keep-all does not reproduce the source, nothing
+measured afterwards means anything.
+
+### What counts as agreement
+
+Not exact argmax equality: `num_experts` changes the shapes the fused kernels
+see, so a different kernel path gives different rounding. Not a fixed tolerance
+either — the old `5e-2` was a number somebody liked.
+
+V2 measures the noise floor; V3's tolerance is a stated multiple of it. A top-1
+disagreement is a **failure** only where the reference's own top two were
+further apart than that floor. Elsewhere the model was undecided and rounding
+picked one, and counting those makes a correct surgery look broken precisely
+where nothing was at stake.
+
+Drift is reported as p50, p99, max and relative p99, because one outlier turns
+"max error" into the only number anyone reads.
+
+---
+
+## 8. Evaluation
+
+### Keep the four questions apart
+
+`FACT` — the Motif technical report gives SWE-bench Verified 76.2 and
+Terminal-Bench 2.0 74.9 for the unpruned model on a pinned evaluation setup
+described in its appendix (mini-SWE-agent, 16K output per step, 250 steps, 4h
+timeout). Those are **not** results for this harness and have not been
+reproduced here.
+
+Four separate rows, never merged:
+
+1. original + the official setup → reproduction of published numbers
+2. pruned + the official setup → what pruning cost
+3. original + motifcode → what this harness costs
+4. pruned + motifcode → the integrated system
+
+Rows 1→2 isolate pruning; 3→4 isolate it under this harness; 1→3 isolate the
+harness. A difference between any other pair is not attributable to one cause.
+
+"Same setup as official" may be claimed only when the dataset release, evaluator
+commit, mini-SWE-agent version, prompt, tool interface, budgets, sampling,
+seeds, checkpoint revision and sandbox provisioning are all pinned and equal.
+
+### The acceptance rule
+
+Not "no statistically significant loss". Failing to reject a difference proves
+nothing about equivalence, and with a small sample it is the *expected* outcome
+even when the loss is large — so that phrasing passes most readily exactly when
+the evidence is weakest.
+
+Instead, paired non-inferiority against a margin registered in advance:
+
+```text
+d_i = pass(candidate_i) - pass(baseline_i)   per paired instance
+Δ   = mean(d_i)
+pass  iff  the one-sided 95% CI lower bound on Δ  >  -δ
 ```
 
-`endpoint`·`model`·`model family`·`context length`가 ✓여야 한다. 나머지 넷은 API가
-보고하지 않으므로 `?`로 나오는 게 정상이다 — 명령줄과 대조해 직접 확인하라.
+δ is an input, never a default. `packages/eval` reports the difference and its
+interval and explicitly declines to say "quality retained" when no margin was
+registered. Equality at the boundary is a failure.
+
+The denominator is the manifest's planned rows — instance × seed × config —
+materialised before anything runs. Missing, crashed and timed-out rows stay in
+and score zero. Scoring over surviving journals instead means the configuration
+that crashes on its hardest instances outscores the one that struggles through.
+
+### Candidate selection is not the final test
+
+Comparing several criteria and ratios on the sealed set and reporting the best
+is a selection effect with a headline number attached. Criteria, ratios,
+recalibration and recovery are chosen on a dev split; one primary candidate goes
+to the sealed set.
+
+Random controls are reported as a distribution over at least three seeds, not as
+one number. The keep-list seed and the sampling seed are separate and both
+recorded.
 
 ---
 
-## 8. 실패 시 대체 경로
+## 9. GB10 bring-up
 
-### 8.1 50% 가지치기가 품질 게이트를 통과 못 하면
+`BLOCKED` — the Motif vLLM fork has not been built on this machine. Everything
+below is the intended order, not a record.
 
-75%로 후퇴한다. **가중치 143.5 GB = 133.7 GiB라 GB10에는 안 들어간다.** 목표
-하드웨어가 바뀐다:
+The fork is verified by its authors on 2×B200. `FACT` — the model card. GB10 is
+a different architecture and a different memory model, and results there are
+evidence about GB10 only.
 
-- **소비자 데스크톱 + FreeToken.** RTX 5090 32GB + DDR5 256GB. 전문가 풀이 호스트
-  RAM에 들어가고 VRAM이 LRU 캐시가 된다.
-  [FreeToken](https://arxiv.org/abs/2608.16157)이 DeepSeek-V4-Flash(284B-A13B)를
-  RTX 5090에서 22~25 tok/s로 서빙했다. **Motif-3는 314B-A13.2B로 형상이 거의 같다.**
-  단 FreeToken은 `Linux x86_64` 요구라 ZGX에서는 못 쓴다.
-- **단일 H200 임대.** 가지친 100 GB 체크포인트는 H200 한 장(141 GB)에 들어간다.
-  공식 8×H200 구성 대비 1/8 규모다.
+### Host guardrails come first
 
-**어느 쪽이든 가지치기 작업은 낭비되지 않는다.** 더 작은 체크포인트는 모든 경로에서
-유리하다.
+Before any large allocation: a cgroup memory cap, a watchdog that can kill the
+server on `MemAvailable` crossing a pre-registered reserve, and health logging.
+Unified memory means the model weights, CUDA workspaces, KV cache, the engine's
+own RSS, page cache and every other process share one pool —
+`gpu_memory_utilization` is not a host-wide hard cap, and treating it as one is
+how a machine becomes unreachable.
 
-### 8.2 GB10에서 vLLM NVFP4가 안 돌면
+`vllm serve` may support `--kv-cache-memory-bytes` for an explicit KV budget.
+`FACT` for [upstream](https://docs.vllm.ai/en/latest/cli/serve/); parity in the
+Motif fork is unverified and must be checked at startup rather than assumed.
 
-8.1과 같은 대체 경로. 체크포인트는 그대로 쓸 수 있다.
+### The ladder
 
-### 8.3 세 기준이 전부 무작위와 구별되지 않으면
+One variable at a time. Each step has to pass before the next begins.
 
-가지치기를 포기하고 §1.3의 다른 경로를 재검토한다. 다만 그 경로들은 이미 막혀 있으므로,
-실질적으로는 "GB10에서 Motif-3를 돌리는 것을 포기하고 데스크톱/임대로 간다"가 된다.
+| step | configuration | acceptance |
+|---|---|---|
+| 1 | host guardrails only | watchdog kills a synthetic hog; host stays reachable |
+| 2 | tiny dense model | base vLLM works on ARM64 |
+| 3 | tiny synthetic Motif, BF16 | architecture, attention, router, PolyNorm |
+| 4 | tiny synthetic Motif, NVFP4 + sidecar | custom loader, calibrated scales, a known numeric fixture |
+| 5 | real pruned model, 4K, eager, `--max-num-seqs 1`, MTP off, prefix cache off, no graph capture | near-full prefill, fixed output tokens, correctness smoke, memory recorded |
+| 6 | 32K → 64K → 128K → 256K | each: near-full prefill, fixed output, correctness, memory, zero engine errors |
+| 7 | prefix cache, then MTP, then graphs, then chunked prefill | one at a time, each against step 6's baseline |
+| 8 | 1h smoke, then a pre-registered long soak | request success, latency and memory drift recorded, not just crash-free time |
 
----
+A server that starts is not a passed step. "256K works" requires a near-full
+prefill and a fixed number of output tokens actually generated at that length.
 
-## 9. CLI에 붙이기 — 최종 단계
+### The backend gate
 
-가지친 모델이 나왔다고 끝이 아니다. 이 저장소의 `motif`가 그것을 알아보고 잘 쓰게
-만들어야 한다.
+Confirm from the startup and request logs that the Motif NVFP4 direct-load path
+is in use and that the sidecar was read. An unintended Marlin fallback is a
+different model with different numerics, and a memory or latency figure measured
+there says nothing about the intended configuration.
 
-### 9.1 그냥 쓰는 법
+### Known upstream issues
 
-붙이는 데 코드 변경이 필요 없다. 하네스는 OpenAI 호환 엔드포인트를 말하므로 서버만
-떠 있으면 된다.
+To be re-checked immediately before the campaign; a closed issue is not
+necessarily a fixed one.
 
-```bash
-motif "테스트가 깨진 이유를 찾아서 고쳐줘" \
-  --endpoint http://zgx-1c3b:8080 \
-  --model /path/to/Motif-3-Coder-A13B-NVFP4
+| issue | symptom | why it matters here |
+|---|---|---|
+| [vLLM #50925](https://github.com/vllm-project/vllm/issues/50925) | GB10 NVFP4 MoE: published build falls back to Marlin | the backend gate above |
+| [vLLM #46307](https://github.com/vllm-project/vllm/issues/46307) | UMA startup peak; `gpu_memory_utilization` is not a host cap | the watchdog |
+| [vLLM #50011](https://github.com/vllm-project/vllm/issues/50011) | sleep/wake EngineCore failures | keep sleep mode off |
+| [vLLM #49926](https://github.com/vllm-project/vllm/issues/49926) | GB10 NVFP4/Marlin long-run instability | the soak step |
+| [vLLM #50067](https://github.com/vllm-project/vllm/issues/50067) | related EngineCore path | record the disposition; closed ≠ fixed |
 
-# 또는 환경변수로 고정
-export MOTIF_ENDPOINT=http://zgx-1c3b:8080
-export MOTIF_MODEL=/path/to/Motif-3-Coder-A13B-NVFP4
-motif doctor
-motif "..."
-```
+These are upstream vLLM issues. None is evidence about Motif's fork, whose
+custom PolyNorm and NVFP4 paths differ; each needs a local reproducer and a
+backend log.
 
-아래 9.2~9.4는 **그 위에 얹는 마감 작업**이지 동작 전제가 아니다.
+### Performance
 
-### 9.2 채널 A/B를 다시 재라
+`HYPOTHESIS` and nothing more: the "13 → 21 tok/s from dense FP8" figure in
+earlier drafts had no measurement behind it and has been removed. The fork's own
+source keeps dense FP8 off by default and notes roughly +2% observed throughput.
 
-이건 놓치기 쉬우니 명시한다. 하네스에는 액션 채널이 셋 있고
-(`toolcall` / `object` / `raw` — `README.md` 참조), **어느 것이 Motif-3에서 가장 좋은지는
-아직 아무도 측정하지 않았다.** 그리고 가지치기가 그 답을 바꿀 수 있다 — 툴콜 JSON을
-만드는 능력이 코딩 외 능력에 얹혀 있었다면 잘려나갔을 수 있기 때문이다.
-
-```bash
-for ch in toolcall object raw; do
-  motif "<동일 과제>" --channel $ch --model <가지친 모델> --endpoint <서버>
-done
-motif distil .motif/sessions    # 채널별 파손율·성공률 비교
-```
-
-**원본과 가지친 모델 양쪽에서 재라.** 채널 순위가 뒤바뀌면 그 자체가 가지치기가
-무엇을 잘라냈는지에 대한 증거다.
-
-### 9.3 체크포인트 쪽
-
-`surgery.py`가 `config.json`에 이미 표식을 남긴다:
-
-```json
-{
-  "num_experts": 192,
-  "experts_top_k": 8,
-  "motifcode": { "pruned_from": 384, "pruned_to": 192 }
-}
-```
-
-`experts_top_k`는 **건드리지 않는다.** 가지치기는 전문가가 몇 개 존재하는지를 바꾸지,
-토큰당 몇 개를 참조하는지를 바꾸지 않는다.
-
-### 9.4 `motif doctor` 확장
-
-`packages/cli/src/doctor.ts`에 추가할 것:
-
-1. **가지친 체크포인트 인식.** `/v1/models`로는 `config.json`을 못 읽으므로, 모델
-   이름에 `Coder`가 들어가는지 또는 사용자가 `--checkpoint <path>`로 알려주는지로
-   판단하고, 그 경우 `pruned_from`/`pruned_to`를 보고한다.
-2. **GB10 감지 시 안내.** 이미 `deviceMemoryBytes` 인자를 받고 있고 200 GiB 미만이면
-   경고와 함께 가지친 체크포인트를 권한다. GB10에서 원본을 올리려다 OOM 킬러를 만나는
-   사고를 막는 장치다.
-3. **메모리 여유 실측.** 가능하면 `nvidia-smi` 또는 `/proc/meminfo`로 실제 여유를 읽어
-   `--gpu-memory-utilization` 권장값을 계산해 출력한다.
-
-### 9.5 모델 프로필
-
-현재 `HttpTransport`는 `SAMPLING_DEFAULTS`(temperature 1.0, top_p 0.95)를 무조건
-보낸다. 이건 Motif의 공식 평가 설정이고 가지친 모델도 같은 계열이므로 **그대로 두는
-것이 맞다.** 바꾸지 마라.
-
-(참고: 일반 모델을 붙이려 프로필 계층을 만들었다가 릴리스에서 제외한 이력이 있다.
-가지친 Motif에는 필요 없다.)
-
-### 9.6 문서
-
-- `README.md`의 Status 표에 가지친 체크포인트 항목을 추가하고 실측 수치를 넣는다.
-- 모델 카드를 쓴다. **코딩 성능 유지와 코딩 외 손실을 둘 다 기재하라.** 의도한
-  거래임을 숨기지 마라.
-- **재현 자료를 공개하라** — keep-list JSON, 프로파일링 스크립트, 평가 결과 원본.
-  "어느 전문가를 왜 남겼는지"가 이 모델의 신뢰도 그 자체다.
-
-### 9.7 최종 수용 기준
-
-다음이 전부 참이면 이 작업은 끝났다:
-
-1. `motif doctor --endpoint <GB10>` 이 ✓로 통과한다.
-2. `motif "<실제 과제>"` 가 GB10의 가지친 모델로 완주하고 exit 0을 낸다.
-3. 세션이 `.motif/sessions/`에 기록되고 `motif distil`이 궤적을 뽑는다.
-4. 실측 디코드 속도가 기록돼 있다.
-5. 256K 컨텍스트에서 OOM 없이 돈다.
-6. SWE-bench 결과가 원본 대비 신뢰구간과 함께 보고돼 있다.
-7. 채널 A/B 결과가 원본·가지친 양쪽에 대해 기록돼 있다 (§9.2).
-8. 모델 카드와 keep-list가 공개돼 있다.
-
-### 9.8 공개 전
-
-**Motif Technologies에 사전 연락하라.** 파생 모델을 내는 것은 MIT상 자유지만, 원
-저작자가 모르는 채로 "Motif-3 코더"가 돌아다니는 것은 서로에게 손해다. 이 시점이면
-보여줄 결과물이 있으니 훨씬 좋은 대화가 된다.
+Report TTFT, prefill tok/s, decode tok/s, inter-token latency, p50 and p95, and
+raw samples. `completion_tokens / request wall time` is request-effective
+throughput and must be labelled as such — it includes prefill and queueing,
+which on a long context is most of it.
 
 ---
 
-## 10. 하지 말아야 할 것
+## 10. Stages
 
-- **프로파일링 전에 가지치기.** 어느 전문가를 남길지 모른 채 자르면 그냥 무작위다.
-- **퍼플렉시티로 판정.** §2.4-3.
-- **기준 하나만 믿기.** §2.4-2.
-- **단발 벤치마크만 보기.** §2.4-4. 수리 턴 조건을 반드시 병행.
-- **정합성 검증 없이 품질 판정.** §6.1. 수술 버그를 품질 손실로 오진한다.
-- **임대를 여러 번 켜기.** 187 GB 로딩이 매번 든다. 준비를 끝내고 한 번에 몰아라.
-- **`experts_top_k` 손대기.** §9.3.
-- **`shared_experts` 자르기.** 모든 토큰에 대해 실행되는 경로다. 라우팅 뱅크가 아니다.
-- **keep-list를 정렬 안 한 채 넘기기.** 라우터의 남은 로짓 순서가 뒤바뀐다.
-  `validate_keep()`이 막지만 우회하지 마라.
-- **GB10에서 메모리 캡 없이 기동.** §2.6.
+`status` is one of `not_started`, `blocked`, `in_progress`, `passed`, `failed`.
+
+| id | stage | status | prerequisite | tool | artifact | acceptance |
+|---|---|---|---|---|---|---|
+| S0 | environment and schema preflight | passed | — | `surgery.py` preflight | plan hash | 612 slice targets, hashes match §2 |
+| S1 | harness evidence path | passed | S0 | `motif distil` | graded trajectories | round-trips into the profiler |
+| S2 | corpus and leakage audit | not_started | S1 | `corpus.py` | corpus manifest | audit clean, splits disjoint |
+| S3 | profiler feasibility | passed | S0 | `profile_routing.py` | 50k pilot profile | invariants hold, memory recorded |
+| S4 | full profile and stability | not_started | S2, S3 | `profile_routing.py` | profile + manifest | stability gates in §5 |
+| S5 | criterion and ratio selection | not_started | S4 | `select_experts.py` | keep-lists | dev comparison, controls included |
+| S6 | surgery | not_started | S5 | `surgery.py --apply` | pruned checkpoint | 612 sliced, manifest hashes |
+| S7 | structural verification | not_started | S6 | `verify.py` | V1 report | V1 and V2 pass |
+| S8 | runtime bring-up | blocked | S6 | Motif vLLM | serving logs | §9 ladder |
+| S9 | dev evaluation | blocked | S7, S8 | `packages/eval` | dev results | candidate chosen |
+| S10 | sealed evaluation | blocked | S9 | `packages/eval` | paired stats | non-inferiority in §8 |
+| S11 | recovery tuning | blocked | S10 | — | — | see below |
+| S12 | mixed dense FP8 | blocked | S10 | — | — | see below |
+
+S8's blocker is that the Motif vLLM fork has not been built here. S11 and S12
+are blocked on S10 deliberately: both are ways to make a pruned model better,
+and running either before the unhealed baseline is measured makes it impossible
+to say what the pruning itself cost.
+
+### S11: recovery, when it is unblocked
+
+Two priors conflict and neither is settled for post-pruning healing. Motif's own
+teacher recipe freezes the router and the selection bias (`FACT` — technical
+report §5.2.3); the nearest pruning work trains the router (`FACT` — pruning
+paper §5.7). Those are different problems, and the answer has to be measured:
+
+- Arm A: router and selection bias frozen, LoRA on attention/shared/dense paths
+- Arm B: router trained, selection-bias policy stated, same dense LoRA
+
+with routed expert weights frozen in both, identical teacher outputs, optimizer,
+steps, seed and data, and a held-out recovery validation set disjoint from the
+sealed test. Routed expert tensors must be bit-identical afterwards, and the
+unhealed candidate is the paired comparison.
+
+Feasibility first: NVFP4 direct-load kernels are not an autograd training
+backend, and the official training example is a B200 multi-GPU path. Either a
+BF16/MXFP8 training checkpoint or a training runtime that passes gradients
+through frozen quantised experts has to exist before this is a step rather than
+an intention.
+
+### S12: mixed dense FP8, when it is unblocked
+
+`--quantization modelopt_blockfp8` is not "keep NVFP4 experts, make dense FP8".
+It is a *different* quantisation config that changes the MoE method itself:
+`modelopt_blockfp8` converts a BF16 checkpoint at load time, while this
+checkpoint's `modelopt_nvfp4` direct-loads packed expert tensors. `FACT` — the
+two configs in the fork's
+[modelopt.py](https://github.com/MotifTechnologies/vllm/blob/4cd9eb4129883565e69d508038d783d59ee01867/vllm/model_executor/layers/quantization/modelopt.py).
+
+What is actually wanted is a mixed loader: experts stay NVFP4 direct-load, dense
+`LinearBase` modules go block-FP8, the router stays FP32, shared experts stay
+BF16 to begin with. That does not exist yet. Until it does, and until a backend
+log confirms the experts are still on the NVFP4 path, this is not a flag anyone
+can pass.
 
 ---
 
-## 11. 아직 아무도 모르는 것
+## 11. Licence and release
 
-정직하게 남겨둔다. 이 작업의 성패가 여기 달려 있다.
+`FACT` — Motif-3 and Motif-3-NVFP4 are MIT-licensed on the Hub. That permits a
+derivative, and permission is not the whole checklist.
 
-1. **314B·384전문가 규모에서 절반 가지치기가 성립하는가.** 선행 연구는 35B·26B였다.
-2. **어느 선택 기준이 이 모델에서 맞는가.** 계열 간 이전이 안 된다는 것만 알려져 있다.
-3. **부하 균형된 라우터에서 도메인 대조가 충분한 신호를 내는가.** 논리적으로는
-   그래야 하지만 검증된 바 없다.
-4. **GB10에서 vLLM NVFP4가 도는가.** 미해결 버그가 있다.
-5. **수리 턴의 회복 효과가 이 규모에서도 나타나는가.**
+Before publishing anything:
 
-1·2·3은 P1~P4로, 4는 P5로, 5는 §6.3으로 답이 나온다. **전부 몇 주 안에 답을 알 수
-있는 질문이지, 답이 없는 질문이 아니다.**
+- [ ] record the source `LICENSE` text and its hash in the artifact manifest
+- [ ] read the model card for usage restrictions beyond the licence
+- [ ] check the tokenizer and any runtime code for separate terms
+- [ ] carry the licence and attribution into the derivative's own files
+- [ ] confirm the derivative's name does not imply endorsement
+- [ ] review the keep-list, profile and benchmark artifacts separately — the
+      corpus may carry terms the checkpoint does not
+- [ ] state the corpus's provenance and licence in the model card
 
----
+Telling the upstream authors is good practice and is not a substitute for any of
+the above.
 
-## 12. 참고 자료
-
-| 자료 | 용도 |
-|---|---|
-| [Motif-Technologies/Motif-3](https://huggingface.co/Motif-Technologies/Motif-3) | 모델 카드, `config.json`, `chat_template.jinja`, `modeling_motif.py` |
-| [Motif-3-NVFP4](https://huggingface.co/Motif-Technologies/Motif-3-NVFP4) | 작업 대상 체크포인트 |
-| [arXiv:2608.09119](https://arxiv.org/abs/2608.09119) | Motif 3 기술 보고서. §5.1.2 부하균형, §5.2.3 교사 학습, Appendix C 평가 설정 |
-| [arXiv:2607.16721](https://arxiv.org/abs/2607.16721) | Half the Experts, All the Code — 이 작업의 방법론 근거 |
-| [arXiv:2608.16157](https://arxiv.org/abs/2608.16157) | FreeToken — §8 대체 경로 |
-| [MotifTechnologies/vllm](https://github.com/MotifTechnologies/vllm) | 서빙 포크. 툴콜/추론 파서 원본 |
-| [motif3-training-example](https://github.com/MotifTechnologies/motif3-training-example) | P5 회복 튜닝용 |
-| 이 저장소 `toolkit/prune/` | 실행 코드와 테스트 |
-| 이 저장소 `packages/cli/src/doctor.ts` | 서버 설정 점검 항목의 근거가 주석에 있음 |
+The model card must record: source revision and attribution; pruning criterion,
+ratio and sidecar handling; runtime requirements; the benchmark manifests behind
+every number; off-domain regressions; the GB10 limits actually verified; and
+known failure modes. Every score carries its manifest id and config id, and raw
+per-instance outcomes are published alongside aggregates.
 
 ---
 
-*이 문서는 gitignore에 등록돼 있다. 공개 저장소에 올라가지 않는다.*
+## 12. Sources
+
+| source | revision or date | what it supports | verified |
+|---|---|---|---|
+| [Motif-3-NVFP4](https://huggingface.co/Motif-Technologies/Motif-3-NVFP4/tree/3a4416f7b555720d36e41f93207b826003ffe327) | `3a4416f7` | every number in §2 | 2026-08-20, by reading headers |
+| [Motif-3](https://huggingface.co/Motif-Technologies/Motif-3) | `883d5c44` | `modeling_motif.py`, routing semantics | 2026-08-20 |
+| [Motif vLLM fork](https://github.com/MotifTechnologies/vllm/tree/4cd9eb4129883565e69d508038d783d59ee01867) | `4cd9eb41` | sidecar loader, quantisation configs | 2026-08-20, source read |
+| [Motif-3 technical report](https://arxiv.org/html/2608.09119v1) | v1 | 76.2 / 74.9 and their setup; teacher recipe §5.2.3 | 2026-08-20 |
+| [Half the Experts, All the Code](https://arxiv.org/html/2607.16721v1) | v1 | contrast collapse, REAP, MBPP+ −4.5pp, §5.7 | 2026-08-20 |
+| [DGX Spark hardware](https://docs.nvidia.com/dgx/dgx-spark/hardware.html) | — | 128 GB, 273 GB/s | 2026-08-20 |
+| [DGX Spark release notes](https://docs.nvidia.com/dgx/dgx-spark/release-notes.html) | — | UMA OOM handling | 2026-08-20 |
+| [vLLM serve CLI](https://docs.vllm.ai/en/latest/cli/serve/) | — | `--kv-cache-memory-bytes` upstream | 2026-08-20 |
+| `toolkit/prune/` | this repository | everything labelled `MEASURED` | continuously, by CI |
+
+Commit permalinks rather than branch names throughout: a mutable reference
+turns a reproducible claim into a claim about whatever is there today. Where a
+source does not directly support a statement, the statement is `INFERENCE` and
+says so.
