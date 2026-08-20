@@ -613,6 +613,7 @@ def write_profile(args, profiler, sequences, tools_sha, started, completed) -> N
         total_sequences=completed,
         sequence_length=args.seq_len,
         packing="per-conversation windows, no cross-document packing",
+        corpus_slice=args.slice or "1/1",
         seed=0,
         dtype=str(profiler.config.dtype),
         # Recorded because they decide what `gate_sum` means. Motif normalises

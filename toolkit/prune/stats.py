@@ -79,6 +79,11 @@ class ProfileManifest:
     route_scale: float
     gate_sum_includes_route_scale: bool
     selection_bias_applied: bool
+    # `i/n` if this profile covers every n-th record, or `pooled:...` for a sum
+    # of such profiles. Recorded because adding two profiles is only valid when
+    # their slices are disjoint, and a sum of overlapping slices looks exactly
+    # like a profile of twice as many tokens.
+    corpus_slice: str = ""
     peak_host_bytes: int = 0
     peak_device_bytes: int = 0
     elapsed_seconds: float = 0.0
@@ -151,18 +156,25 @@ def validate_stats(stats: dict, manifest: ProfileManifest) -> None:
         raise ProfileError("; ".join(problems))
 
 
+def manifest_path(path: Path) -> Path:
+    """`a/b/target.stats.safetensors` -> `a/b/target.manifest.json`."""
+    return Path(path).with_suffix("").with_suffix(".manifest.json")
+
+
 def load_profile(path: Path) -> tuple[dict, ProfileManifest]:
     """Read a profile and its manifest, validating before returning either."""
     from safetensors.numpy import load_file  # noqa: PLC0415
 
     stats_path = Path(path)
-    manifest_path = stats_path.with_suffix("").with_suffix(".manifest.json")
-    if not manifest_path.exists():
-        manifest_path = stats_path.parent / "profile.manifest.json"
-    if not manifest_path.exists():
+    found = manifest_path(stats_path)
+    if not found.exists():
+        # The older layout, kept readable so profiles taken before the rename
+        # are not orphaned.
+        found = stats_path.parent / "profile.manifest.json"
+    if not found.exists():
         raise ProfileError(f"no manifest beside {stats_path}; a profile without one is not usable")
 
-    manifest = ProfileManifest.from_json(json.loads(manifest_path.read_text()))
+    manifest = ProfileManifest.from_json(json.loads(found.read_text()))
     stats = load_file(str(stats_path))
     validate_stats(stats, manifest)
     return stats, manifest
@@ -175,7 +187,12 @@ def save_profile(path: Path, stats: dict, manifest: ProfileManifest) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     save_file(stats, str(path))
-    (path.parent / "profile.manifest.json").write_text(
+    # Named after the profile, not after the directory. A fixed
+    # `profile.manifest.json` means the second profile written into a directory
+    # silently overwrites the first one's manifest, and every later comparison
+    # reads one profile's statistics against another's provenance. `load_profile`
+    # has always looked for this name first; the writer did not produce it.
+    manifest_path(path).write_text(
         json.dumps(manifest.to_json(), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
