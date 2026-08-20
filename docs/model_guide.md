@@ -517,44 +517,73 @@ evidence about GB10 only.
 ### Getting a vLLM that knows what a Motif is
 
 `MEASURED`, 2026-08-20. Neither of the vendor's two distribution routes runs
-here:
+here: the container `ghcr.io/motiftechnologies/vllm:v0.20.2-motif3.rc3`
+publishes a single `linux/amd64` manifest and this host is aarch64, and the
+image tag's version is misleading — the fork's HEAD requires torch 2.11.0 and
+is nine days old, not a year.
 
-- the container `ghcr.io/motiftechnologies/vllm:v0.20.2-motif3.rc3` publishes a
-  single `linux/amd64` manifest, and this host is aarch64;
-- the fork is pinned to a vLLM that predates both CUDA 13 and this GPU, so
-  building it means compiling a year-old engine for hardware it has never
-  heard of.
+The first attempt was to register the fork's five Motif files into the
+installed vLLM 0.26 from outside (`toolkit/serving/build_plugin.py`). Their
+module-level imports all resolve, which is what made it look cheap. That test
+was too weak: the imports that matter are inside `__init__`, and running the
+model found the next drift each time — two quantization config classes upstream
+does not have, then `MoERunner.local_num_experts`, and no reason to think that
+was the last. Each patch risks being subtly wrong rather than loudly broken,
+and a MoE that computes almost the right thing yields a plausible bad model
+rather than an error. The plugin script is kept because its extraction and
+import-rewriting are useful reading, but it is not the supported path.
 
-Neither is necessary. `MEASURED` — the fork's Motif support is five Python
-files, and every vLLM API they import resolves against the installed vLLM
-0.26.0 unchanged. The two pieces that would have made this hard are Triton
-rather than C++: the diff-KV attention backend and the mHC kernels. The one
-CUDA file is a fused PolyNorm-quantise fast path, and the model already selects
-a torch fallback when the extension is absent — the profiler's own logs show it
-doing so.
+`toolkit/serving/build_fork.sh` builds the fork itself. `MEASURED` — 28 minutes
+of nvcc on 20 cores, and afterwards `MotifForCausalLM`, `MotifMTPModel` and
+`modelopt_nvfp4` are all native. Four things it handles that are not obvious:
 
-`toolkit/serving/build_plugin.py` copies those files at a pinned fork revision,
-re-points their intra-fork imports, and writes a package that registers
-`MotifForCausalLM` and `MotifMTPModel` from outside:
+- `VLLM_USE_PRECOMPILED=1` fetches an x86_64 wheel, so only the
+  architecture-neutral `cumem_allocator` lands and `vllm._C` is absent. The
+  installed vLLM 0.26's `_C_stable_libtorch` is a different extension under a
+  different name and is not a substitute.
+- `pip install -e .` returns in four seconds once the editable install exists,
+  having compiled nothing.
+- CMake's FindPython needs development headers this host cannot install, and
+  does not read `CPATH`; the extracted `.deb` under `~/local/pydev` has to be
+  passed as CMake arguments.
+- pip resolves transformers 4.57 on its own. The checkpoint's tokenizer is
+  `TokenizersBackend`, which is transformers 5.x, and the fork's own
+  constraint allows 5.6+.
 
-```bash
-python toolkit/serving/build_plugin.py --out ~/motif-prune/vllm_motif
-PYTHONPATH=~/motif-prune/vllm_motif vllm serve <checkpoint>
-```
+### The deep_gemm shim, and what it does not prove
 
-`MEASURED` — both architectures appear in `ModelRegistry.get_supported_archs()`
-after `register()`. That is an import-level result and nothing more: it says the
-plugin loads, not that it computes the right thing. Step 4 of the ladder below
-is where that gets decided.
+`MEASURED` — the fork's mHC path calls `tf32_hc_prenorm_gemm` with no fallback,
+so DeepGEMM is required whatever the quantization. The fork vendors a prebuilt
+`deep_gemm/_C...so` and no source for it; the kernel headers ship alongside,
+including an `sm120` variant, because DeepGEMM compiles kernels at runtime.
 
-The files are copied rather than vendored, for the same reason
-`modeling_motif.py` is: they are somebody else's, and a copy in this repository
-would drift from upstream the moment it was made. The rewrite is the only
-change, and `toolkit/serving/test_build_plugin.py` tests it — an import that
-silently binds to a stale local copy of a vLLM interface is exactly the failure
-that would not announce itself.
+That binary was built against an older torch than the fork's own requirements
+demand. Of the 428 symbols it imports, **427 resolve against torch 2.11.0**.
+The one that does not is
+`c10::ValueError::ValueError(SourceLocation, std::string)` — and
+`c10::Error::Error(SourceLocation, std::string)`, its base, is exported. The
+subclass gained `using Error::Error`, which makes the inherited constructor
+implicit and inline, so nothing is emitted. That is a source change, not an ABI
+break.
 
-### Host guardrails come first
+`toolkit/serving/c10_valueerror_shim.cpp` emits that one symbol.
+`LD_PRELOAD`ed, deep_gemm imports and its hyperconnection kernel resolves.
+
+The shim asserts that the only difference between the two torches, as far as
+this binary is concerned, is where that constructor lives. 427 of 428 resolving
+is evidence for that and not proof: a struct whose layout changed silently
+would corrupt rather than fail. **Nothing computed through this path is
+believable until V3 has compared it against the reference implementation**, and
+that gate is not optional here in the way it might be elsewhere.
+
+`BLOCKED` — the tiny synthetic checkpoint now reaches the DeepGEMM kernel and
+fails an internal `dim == 2 or dim == 3` assertion. The tiny model has already
+produced two false alarms of this kind — MLA head dimensions no kernel
+implements, and a bf16 path the real checkpoint never takes — so this is
+recorded rather than chased. The decisive test is the pruned checkpoint, which
+is the real shape and the real quantization.
+
+### Host guardrails come first### Host guardrails come first
 
 Before any large allocation: a cgroup memory cap, a watchdog that can kill the
 server on `MemAvailable` crossing a pre-registered reserve, and health logging.

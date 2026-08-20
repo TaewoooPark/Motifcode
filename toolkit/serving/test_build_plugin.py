@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from build_plugin import FILES, LOCAL, rewrite
+from build_plugin import FILES, LOCAL, PACKAGE_OF, rewrite
 
 
 class TestRewrite(unittest.TestCase):
@@ -42,6 +42,27 @@ class TestRewrite(unittest.TestCase):
     def test_a_string_mentioning_an_import_is_not_a_line_to_rewrite(self):
         line = '    doc = "from .interfaces import SupportsPP"'
         self.assertEqual(rewrite(line), line)
+
+    def test_a_sibling_resolves_against_the_file_s_own_package(self):
+        # `flash_attn_diffkv.py` lives in `v1.attention.backends`, beside
+        # `flash_attn.py`. Sending its relative imports to the models package
+        # produces `vllm.model_executor.models.flash_attn`, which does not
+        # exist — and vLLM reports that as "architectures failed to be
+        # inspected", four frames away from anything naming the cause.
+        line = "from .flash_attn import FlashAttentionMetadata"
+        self.assertEqual(
+            rewrite(line, PACKAGE_OF["flash_attn_diffkv.py"]),
+            "from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata",
+        )
+        self.assertEqual(
+            rewrite(line, PACKAGE_OF["motif_model.py"]),
+            "from vllm.model_executor.models.flash_attn import FlashAttentionMetadata",
+        )
+
+    def test_every_copied_file_knows_where_it_came_from(self):
+        self.assertEqual(set(PACKAGE_OF), set(FILES.values()))
+        self.assertEqual(PACKAGE_OF["motif_model.py"], "vllm.model_executor.models")
+        self.assertEqual(PACKAGE_OF["flash_attn_diffkv.py"], "vllm.v1.attention.backends")
 
     def test_every_local_name_matches_a_file_the_script_copies(self):
         # A name in LOCAL that no file produces means some relative import is
