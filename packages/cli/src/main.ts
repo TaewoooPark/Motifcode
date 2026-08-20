@@ -258,6 +258,7 @@ Flags
   --max-output-tokens <n>   cap on each model step
   --seed <n>                sampling seed, passed to the server
   --cwd <path>              working directory
+  --journal <path>          write the session record here instead of .motif/sessions
   --no-hero                 skip the splash
 
 distil flags
@@ -611,8 +612,14 @@ async function main(): Promise<number> {
   const transport = new HttpTransport({ endpoint, model });
   const screen = new Screen();
   const runId = new Date().toISOString().replace(/[:.]/g, "-");
+  // `--journal` so a benchmark runner knows where the record went without
+  // scraping a directory for the newest file. Two rows finishing in the same
+  // second would otherwise be indistinguishable, and the one that lost would
+  // be scored against the other's transcript.
+  const journalPath = flagStr(args.flags, "journal", "")
+    || join(cwd, CONFIG_DIR, "sessions", `${runId}.jsonl`);
   const journal = new Journal(
-    join(cwd, CONFIG_DIR, "sessions", `${runId}.jsonl`),
+    journalPath,
     newHeader({
       runId,
       cwd,
