@@ -446,6 +446,55 @@ materialised before anything runs. Missing, crashed and timed-out rows stay in
 and score zero. Scoring over surviving journals instead means the configuration
 that crashes on its hardest instances outscores the one that struggles through.
 
+### The suite, and what it can and cannot say
+
+`MEASURED` on the GB10, 2026-08-20. The Exercism polyglot exercises
+([Aider-AI/polyglot-benchmark](https://github.com/Aider-AI/polyglot-benchmark)),
+built into one single-commit repository each by `motif-suite build`, and
+checked by `motif-suite verify` before any campaign:
+
+| track | confirmed | reference broken | already passing |
+|---|---|---|---|
+| cpp | 26 | 0 | 0 |
+| go | 36 | 0 | 3 |
+| java | 45 | 0 | 2 |
+| javascript | 48 | 0 | 1 |
+| python | 34 | 0 | 0 |
+| rust | 24 | 6 | 0 |
+| **total** | **213** | **6** | **6** |
+
+225 checked, none unrunnable. Toolchains installed under `$HOME` with no root:
+Go 1.24, Rust 1.97, JDK 21, boost headers for the two C++ exercises that
+include `boost/date_time`.
+
+`verify` asks two questions and keeps the answers apart, because they call for
+opposite responses.
+
+*Can the tests run here?* Graded from the untouched stub, which must come back
+`failed` — tests that executed and reported a failure. Nothing failed this.
+
+*Is the exercise solvable as shipped?* The exercise's own reference solution
+must pass. Six Rust exercises ship a `.meta/example.rs` importing crates their
+own `Cargo.toml` does not declare — `regex`, `rand`, `itertools`,
+`num_bigint`, `thiserror`, `counter`. The reference cannot build; the stub and
+the tests are consistent, and a model that solves the exercise without those
+crates passes. Those six are runnable instances with unconfirmed references,
+which is a different thing from a broken instance, and merging the two would
+have discarded them.
+
+Six exercises pass with the stub untouched: `ledger` on three tracks,
+`go/counter`, `go/markdown`, `java/tree-building`. They are refactoring
+exercises — the code works and the task is to clean it up — and "do the tests
+pass" cannot grade that. Left in they are a free point for every configuration
+alike, which raises every absolute rate and separates nothing. They are
+excluded by name.
+
+What this suite cannot say: these are self-contained exercises with a stub and
+a test file, not repository work. They exercise reading a specification,
+writing code, running tests and reading the failure — not search across an
+unfamiliar codebase, not a patch against code somebody else wrote. A number
+here is evidence about the first thing and silent about the second.
+
 ### Candidate selection is not the final test
 
 Comparing several criteria and ratios on the sealed set and reporting the best

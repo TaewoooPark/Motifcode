@@ -92,3 +92,39 @@ PYTHONPATH=~/motif-prune/vllm_motif vllm serve <checkpoint>
 
 The copied files are the vendor's, under their repository's licence; the script
 records the fork revision it took them from in `motif_vllm/SOURCE`.
+
+## Benchmark toolchains
+
+`motif-suite` builds instances from a checkout of
+[Aider-AI/polyglot-benchmark](https://github.com/Aider-AI/polyglot-benchmark).
+All six tracks run without root; the toolchains install under `$HOME`.
+
+```bash
+# Go
+curl -sSL https://go.dev/dl/go1.24.0.linux-arm64.tar.gz | tar xz -C ~/toolchains
+# Rust
+curl -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal
+# JDK, for the Gradle wrapper the Java exercises ship
+curl -sSL "https://api.adoptium.net/v3/binary/latest/21/ga/linux/aarch64/jdk/hotspot/normal/eclipse" \
+  | tar xz -C ~/toolchains
+# Boost headers, for the two C++ exercises that include boost/date_time
+curl -sSL https://archives.boost.io/release/1.86.0/source/boost_1_86_0.tar.gz \
+  | tar xz -C ~/toolchains boost_1_86_0/boost
+# jest, shared by every JavaScript exercise
+mkdir -p ~/js-deps && cp <any javascript exercise>/package.json ~/js-deps/ \
+  && (cd ~/js-deps && npm install)
+```
+
+```bash
+export PATH=$HOME/toolchains/go/bin:$HOME/.cargo/bin:$HOME/toolchains/jdk-21*/bin:$PATH
+export JAVA_HOME=$HOME/toolchains/jdk-21.0.12+8
+export CXX_EXTRA_INCLUDE=$HOME/toolchains/boost_1_86_0
+
+motif-suite verify --benchmark <checkout> --out <dir> \
+  --languages python,javascript,go,rust,cpp,java \
+  --node-path ~/js-deps/node_modules
+```
+
+Run `verify` before any campaign. It separates "the tests cannot run here"
+from "the exercise's own reference does not build", which need opposite
+responses — see `docs/model_guide.md` §8.
