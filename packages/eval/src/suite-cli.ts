@@ -9,11 +9,22 @@
  *     motif-suite run     --manifest <json> --benchmark <checkout> --out <dir> \
  *                         --agent <path to motif.js> --endpoint <url> --model <id>
  *
- * `verify` runs each exercise's own reference solution against its own tests.
- * An exercise that fails there fails for every configuration, and a suite full
- * of them reports a model that cannot code when what it has is a machine
- * missing a toolchain. Running it first turns that into a list of instances to
- * exclude, named, before any number is produced.
+ * `verify` asks two different questions and keeps their answers apart.
+ *
+ * Can the tests run here at all? Checked by grading the untouched stub, which
+ * must come back `failed` — tests that execute and report a failure. If that
+ * errors instead, the machine cannot run the instance and no configuration
+ * will ever pass it.
+ *
+ * Does the exercise's own reference solution pass? A stronger check, and the
+ * one that confirms the instance is solvable as shipped.
+ *
+ * They fail for different reasons and merging them was wrong. Six Rust
+ * exercises ship a `.meta/example.rs` importing crates their own `Cargo.toml`
+ * does not declare — the reference cannot build, but the stub and the tests are
+ * perfectly consistent and a model that solves it without those crates passes.
+ * Dropping those instances would discard good work on the strength of a defect
+ * in the benchmark's own reference material.
  *
  * `run` materialises the manifest's rows before starting, drives the agent
  * through each one, and reports over the planned denominator rather than over
@@ -76,8 +87,42 @@ function referencePatch(instance: PolyglotInstance, files: Record<string, string
       cwd: instance.repo,
     });
     for (const [name, content] of Object.entries(files)) {
+      mkdirSync(dirname(join(tree, name)), { recursive: true });
       writeFileSync(join(tree, name), content, "utf8");
     }
+    // Staged first. Several reference solutions add files the stub does not
+    // have — Java's `bowling` ships `Frame.java` beside `BowlingGame.java` —
+    // and `git diff` without `git add` does not show a new file at all. The
+    // reference then applies as a partial solution and fails to compile,
+    // which reads as a broken exercise rather than a broken check.
+    execFileSync("git", ["add", "-A"], { cwd: tree });
+    return execFileSync("git", ["diff", "--cached", "--binary"], {
+      cwd: tree,
+      encoding: "utf8",
+      maxBuffer: 32 * 1024 * 1024,
+    });
+  } finally {
+    execFileSync("git", ["worktree", "remove", "--force", tree], { cwd: instance.repo });
+    rmSync(tree, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A patch that applies cleanly and changes nothing the tests read.
+ *
+ * `verify` needs to run the tests against the untouched stub, and the grader
+ * short-circuits an empty patch to `failed` without running anything — correct
+ * during a campaign, useless here. Appending a line to the instructions is a
+ * real change to a file no test looks at.
+ */
+function noopPatch(instance: PolyglotInstance): string {
+  const tree = mkdtempSync(join(tmpdir(), "motif-stub-"));
+  try {
+    execFileSync("git", ["worktree", "add", "--detach", "-q", "-f", tree, instance.baseCommit], {
+      cwd: instance.repo,
+    });
+    const path = join(tree, "INSTRUCTIONS.md");
+    writeFileSync(path, readFileSync(path, "utf8") + "\n<!-- stub check -->\n", "utf8");
     return execFileSync("git", ["diff"], { cwd: tree, encoding: "utf8", maxBuffer: 32 * 1024 * 1024 });
   } finally {
     execFileSync("git", ["worktree", "remove", "--force", tree], { cwd: instance.repo });
@@ -118,7 +163,7 @@ async function main(): Promise<number> {
           baseCommit: i.baseCommit,
           language: i.language,
           exercise: i.exercise,
-          testFile: i.testFile,
+          testFiles: i.testFiles,
           solutionFiles: i.solutionFiles,
           ...(i.setupCommand ? { setupCommand: i.setupCommand } : {}),
         })),
@@ -138,37 +183,109 @@ async function main(): Promise<number> {
     return 2;
   }
 
-  const unusable: string[] = [];
-  let checked = 0;
+  const timeout = Number(str(flags, "timeout", "300"));
+  const unrunnable: string[] = [];
+  const alreadyPassing: string[] = [];
+  const referenceBroken: string[] = [];
+  const confirmed: string[] = [];
+
   for (const instance of instances) {
-    const files = referenceSolution(benchmark, instance);
-    if (!files) {
-      unusable.push(`${instance.id}: no reference solution in .meta`);
+    const grader = polyglotGrader(instance, nodePath ? { nodePath } : {});
+    const detail = (text: string | undefined): string =>
+      text
+        ? " — " +
+          text
+            .trim()
+            .split("\n")
+            .filter((l) => /error|Error|cannot|not found|No such/.test(l))
+            .slice(0, 2)
+            .join(" / ")
+            .slice(0, 300)
+        : "";
+
+    // The stub, with a patch that touches nothing the tests read. An empty
+    // patch would short-circuit in the grader, which is right for a campaign
+    // and useless here.
+    const stub = await grader.grade({
+      instanceId: instance.id,
+      patch: noopPatch(instance),
+      baseCommit: instance.baseCommit,
+      timeoutSeconds: timeout,
+    });
+    if (stub.status === "passed") {
+      // The tests already pass with no work done. Exercism's refactoring
+      // exercises are like this — `ledger`, `tree-building` — and the task is
+      // to clean working code up, which "do the tests pass" cannot grade. Left
+      // in, it is a free point for every configuration alike, which inflates
+      // every absolute rate and tells you nothing about any of them.
+      alreadyPassing.push(`${instance.id}: tests pass with the stub untouched`);
+      process.stderr.write("0");
       continue;
     }
-    const grader = polyglotGrader(instance, nodePath ? { nodePath } : {});
-    const result = await grader.grade({
+    if (stub.status !== "failed") {
+      unrunnable.push(`${instance.id}: stub graded ${stub.status}${detail(stub.stderrArtifact)}`);
+      process.stderr.write("E");
+      continue;
+    }
+
+    const files = referenceSolution(benchmark, instance);
+    if (!files) {
+      referenceBroken.push(`${instance.id}: no reference solution in .meta`);
+      process.stderr.write("?");
+      continue;
+    }
+    const reference = await grader.grade({
       instanceId: instance.id,
       patch: referencePatch(instance, files),
       baseCommit: instance.baseCommit,
-      timeoutSeconds: 120,
+      timeoutSeconds: timeout,
     });
-    checked++;
-    if (result.status !== "passed") {
-      unusable.push(
-        `${instance.id}: reference solution ${result.status}` +
-          (result.stderrArtifact ? ` — ${result.stderrArtifact.trim().split("\n").slice(-1)[0]}` : ""),
+    if (reference.status === "passed") {
+      confirmed.push(instance.id);
+      process.stderr.write(".");
+    } else {
+      referenceBroken.push(
+        `${instance.id}: reference ${reference.status}${detail(reference.stderrArtifact)}`,
       );
+      process.stderr.write("x");
     }
-    process.stderr.write(result.status === "passed" ? "." : "x");
   }
   process.stderr.write("\n");
 
-  process.stdout.write(JSON.stringify({ checked, usable: checked - unusable.length, unusable }, null, 2) + "\n");
-  if (unusable.length > 0) {
+  process.stdout.write(
+    JSON.stringify(
+      {
+        checked: instances.length,
+        confirmed: confirmed.length,
+        referenceBrokenButRunnable: referenceBroken.length,
+        alreadyPassing: alreadyPassing.length,
+        unrunnable: unrunnable.length,
+        confirmedIds: confirmed,
+        referenceBroken,
+        alreadyPassingDetail: alreadyPassing,
+        unrunnableDetail: unrunnable,
+      },
+      null,
+      2,
+    ) + "\n",
+  );
+  if (unrunnable.length > 0) {
     process.stderr.write(
-      `${unusable.length} instance(s) cannot pass on this machine. Exclude them by name, or fix ` +
-        "the toolchain — leaving them in reports a model failing at tasks nothing could run.\n",
+      `\n${unrunnable.length} instance(s) cannot run here at all — exclude them by name or fix ` +
+        "the toolchain. Leaving them in reports a model failing at tasks nothing could run.\n",
+    );
+  }
+  if (alreadyPassing.length > 0) {
+    process.stderr.write(
+      `${alreadyPassing.length} instance(s) already pass untouched and cannot discriminate ` +
+        "between configurations. Exclude them: they raise every rate by the same amount.\n",
+    );
+  }
+  if (referenceBroken.length > 0) {
+    process.stderr.write(
+      `${referenceBroken.length} instance(s) run but their shipped reference does not pass. ` +
+        "The tests still work; what is unconfirmed is that the exercise is solvable as shipped. " +
+        "Keeping them is defensible, excluding them is defensible, doing it silently is not.\n",
     );
   }
   return 0;
