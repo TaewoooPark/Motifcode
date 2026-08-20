@@ -6,18 +6,30 @@
  *
  *     motif-suite build   --benchmark <checkout> --out <dir> [--languages ...]
  *     motif-suite verify  --benchmark <checkout> --out <dir> [--languages ...]
+ *     motif-suite run     --manifest <json> --benchmark <checkout> --out <dir> \
+ *                         --agent <path to motif.js> --endpoint <url> --model <id>
  *
  * `verify` runs each exercise's own reference solution against its own tests.
  * An exercise that fails there fails for every configuration, and a suite full
  * of them reports a model that cannot code when what it has is a machine
  * missing a toolchain. Running it first turns that into a list of instances to
  * exclude, named, before any number is produced.
+ *
+ * `run` materialises the manifest's rows before starting, drives the agent
+ * through each one, and reports over the planned denominator rather than over
+ * the rows that happened to finish. It writes results as it goes: a campaign
+ * of several hundred rows that reports only at the end reports nothing when it
+ * is interrupted in row three hundred.
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { validateManifest } from "./manifest.js";
+import { countStatuses, formatCounts, materialize, passed, planRuns, resolvedRate } from "./results.js";
+import { runAll } from "./runner.js";
+import { formatPaired, judgeNonInferiority, pairedBootstrap, type PairedOutcome } from "./stats.js";
 import {
   buildPolyglotSuite,
   instanceSummary,
@@ -117,6 +129,10 @@ async function main(): Promise<number> {
     return 0;
   }
 
+  if (command === "run") {
+    return campaign(flags, instances, nodePath);
+  }
+
   if (command !== "verify") {
     process.stderr.write(`unknown command ${command}\n`);
     return 2;
@@ -153,6 +169,124 @@ async function main(): Promise<number> {
     process.stderr.write(
       `${unusable.length} instance(s) cannot pass on this machine. Exclude them by name, or fix ` +
         "the toolchain — leaving them in reports a model failing at tasks nothing could run.\n",
+    );
+  }
+  return 0;
+}
+
+/**
+ * One campaign: every planned row, then the report.
+ *
+ * The instances are filtered to what the manifest names, not the other way
+ * round. A suite that quietly contributes extra instances changes the
+ * denominator after the fact, which is the same problem as dropping rows with
+ * the sign reversed.
+ */
+async function campaign(
+  flags: Flags,
+  built: readonly PolyglotInstance[],
+  nodePath: string,
+): Promise<number> {
+  const manifestPath = str(flags, "manifest");
+  const agent = str(flags, "agent");
+  const endpoint = str(flags, "endpoint", "http://127.0.0.1:8080");
+  const model = str(flags, "model");
+  const results = str(flags, "results", "results.jsonl");
+  const exclude = new Set(str(flags, "exclude").split(",").filter(Boolean));
+  if (!manifestPath || !agent || !model) {
+    process.stderr.write("run needs --manifest, --agent and --model\n");
+    return 2;
+  }
+
+  const manifest = validateManifest(JSON.parse(readFileSync(manifestPath, "utf8")));
+  const usable = built.filter((i) => !exclude.has(i.id));
+  if (exclude.size > 0) {
+    // Named, in the output, next to the number. An exclusion nobody can see is
+    // indistinguishable from a suite that was always that size.
+    process.stderr.write(`excluded ${exclude.size}: ${[...exclude].join(", ")}\n`);
+  }
+
+  const planned = planRuns(manifest, usable.map((i) => i.id));
+  process.stderr.write(
+    `${planned.length} planned row(s) = ${usable.length} instance(s) x ` +
+      `${manifest.sampling.seeds.length} seed(s) x ` +
+      `${manifest.baseline ? 2 : 1} config(s)\n`,
+  );
+
+  mkdirSync(dirname(results) || ".", { recursive: true });
+  writeFileSync(results, "");
+
+  const workRoot = str(flags, "work-root", join(tmpdir(), "motif-campaign"));
+  const observed = await runAll(
+    {
+      manifest,
+      instances: usable,
+      grader: {
+        name: "polyglot",
+        version: "1",
+        // Per instance, because the test file and command differ per exercise.
+        grade: (request) => {
+          const instance = usable.find((i) => i.id === request.instanceId);
+          if (!instance) throw new Error(`no instance ${request.instanceId}`);
+          return polyglotGrader(instance, nodePath ? { nodePath } : {}).grade(request);
+        },
+      },
+      agentCommand: agent.split(" "),
+      endpoint,
+      model,
+      workRoot,
+      onRow: (row) => {
+        appendFileSync(results, JSON.stringify(row) + "\n");
+        const mark = passed(row) ? "PASS" : row.status === "completed" ? "fail" : row.status;
+        process.stderr.write(`  ${row.instanceId} seed ${row.seed}: ${mark}\n`);
+      },
+    },
+    planned,
+  );
+
+  const rows = materialize(planned, observed);
+  const overall = resolvedRate(rows);
+  process.stdout.write(
+    `\nresolved ${(overall.rate * 100).toFixed(1)}% ` +
+      `(${overall.numerator}/${overall.denominator})\n${formatCounts(overall.counts)}\n`,
+  );
+
+  if (manifest.baseline) {
+    const pairs: PairedOutcome[] = [];
+    for (const instance of usable) {
+      for (const seed of manifest.sampling.seeds) {
+        const find = (configId: string) =>
+          rows.find(
+            (r) => r.configId === configId && r.instanceId === instance.id && r.seed === seed,
+          );
+        const candidate = find(manifest.candidate.config_id);
+        const baseline = find(manifest.baseline.config_id);
+        // A row that is missing on either side is still a pair, scored false.
+        // Dropping it would compare the candidate's easy instances against the
+        // baseline's full set.
+        pairs.push({
+          instanceId: instance.id,
+          seed,
+          candidate: candidate ? passed(candidate) : false,
+          baseline: baseline ? passed(baseline) : false,
+        });
+      }
+    }
+    const result = pairedBootstrap(pairs, {
+      confidenceLevel: manifest.design.confidence_level,
+      bootstrapSeed: manifest.design.randomization_seed,
+    });
+    const verdict = judgeNonInferiority(result, manifest.design.noninferiority_margin_pp);
+    process.stdout.write("\n" + formatPaired(result, verdict) + "\n");
+  }
+
+  const counts = countStatuses(rows);
+  if (counts.transportFailure > 0) {
+    // Not a footnote. Rows the server refused are rows the model never saw,
+    // and a rate computed over them describes the server.
+    process.stderr.write(
+      `\n${counts.transportFailure} row(s) ended on transport failure. The number above ` +
+        "includes them as zeroes; decide whether that is a result or a broken campaign.\n",
     );
   }
   return 0;
