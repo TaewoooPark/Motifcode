@@ -41,6 +41,16 @@ export interface Instance {
   baseCommit: string;
   /** What the agent is asked to do. The only task description it ever sees. */
   prompt: string;
+  /**
+   * Run in the agent's fresh checkout before it starts.
+   *
+   * For anything the exercise needs in order to *run* but does not ship — a
+   * linked `node_modules`, a virtualenv. The agent has to be able to run the
+   * tests while it works; an agent that cannot check itself is being asked to
+   * write correct code blind, which measures something other than what the
+   * benchmark claims to.
+   */
+  setupCommand?: string[];
 }
 
 export interface RunnerOptions {
@@ -192,6 +202,19 @@ export async function runRow(
   }
 
   try {
+    if (instance.setupCommand) {
+      try {
+        await exec(instance.setupCommand[0]!, instance.setupCommand.slice(1), { cwd: checkout });
+      } catch (err) {
+        // The agent never got a working environment, so anything it did next
+        // is not evidence about the agent.
+        return {
+          ...planned,
+          status: "grader_infra_error",
+          agentEndReason: `checkout setup failed: ${String(err).slice(0, 300)}`,
+        };
+      }
+    }
     const outcome = await runAgent(opts, instance, checkout, journalPath, planned.seed);
     const patch = await extractPatch(checkout).catch(() => "");
     const grade = await opts.grader.grade({
