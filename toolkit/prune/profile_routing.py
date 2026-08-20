@@ -393,7 +393,20 @@ class LayerMajorProfiler:
         return tokens
 
 
-def read_corpus(path: Path, tokenizer, sequence_length: int, max_tokens: int):
+def parse_slice(text: str) -> tuple[int, int]:
+    """`i/n` -> (i-1, n). Empty means the whole corpus."""
+    if not text:
+        return 0, 1
+    try:
+        index, count = (int(part) for part in text.split("/", 1))
+    except ValueError:
+        raise SystemExit(f"--slice wants `i/n`, got {text!r}") from None
+    if not 1 <= index <= count:
+        raise SystemExit(f"--slice {text}: i must be between 1 and n")
+    return index - 1, count
+
+
+def read_corpus(path: Path, tokenizer, sequence_length: int, max_tokens: int, slice_spec=(0, 1)):
     """Tokenise conversations the harness already rendered.
 
     The profiler does not apply a chat template. `motif corpus-render` does,
@@ -405,10 +418,15 @@ def read_corpus(path: Path, tokenizer, sequence_length: int, max_tokens: int):
     """
     import torch  # noqa: PLC0415
 
+    offset, stride = slice_spec
     sequences = []
     total = 0
+    seen = -1
     for line in Path(path).read_text(encoding="utf-8").splitlines():
         if not line.strip():
+            continue
+        seen += 1
+        if seen % stride != offset:
             continue
         record = json.loads(line)
         text = record.get("text")
@@ -485,6 +503,17 @@ def main() -> None:
         default=8,
         help="sequences held in memory at once; more means fewer passes over the weights",
     )
+    ap.add_argument(
+        "--slice",
+        default="",
+        help=(
+            "`i/n`: profile only records congruent to i-1 mod n. Independent slices are what "
+            "the stability gate compares — see `stability_report` in corpus.py. Interleaved "
+            "rather than contiguous, so every slice spans every repository and both languages; "
+            "a contiguous split would measure how the repositories differ, not how the "
+            "sampling varies"
+        ),
+    )
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--corpus-manifest-sha256", default="")
     ap.add_argument("--tool-schema-sha256", default="")
@@ -493,7 +522,10 @@ def main() -> None:
     started = time.time()
     tokenizer = load_tokenizer(args.checkpoint)
     _tools, tools_sha, _system_sha = load_spec(args.spec, args.corpus)
-    sequences, tokens = read_corpus(args.corpus, tokenizer, args.seq_len, args.max_tokens)
+    slice_spec = parse_slice(args.slice)
+    sequences, tokens = read_corpus(
+        args.corpus, tokenizer, args.seq_len, args.max_tokens, slice_spec
+    )
     if not sequences:
         raise SystemExit(f"{args.corpus} produced no sequences")
     print(f"{len(sequences)} sequence(s), {tokens} tokens", file=sys.stderr, flush=True)
@@ -532,12 +564,29 @@ def main() -> None:
 
         profiler.run_shard(shard, progress=progress)
         done += len(shard)
+        write_profile(args, profiler, sequences, tools_sha, started, done)
+        rate = (time.time() - started) / max(done, 1)
         print(
-            f"  {done}/{len(sequences)} sequences  ({(time.time() - shard_started) / 60:.1f}m)",
+            f"  {done}/{len(sequences)} sequences  "
+            f"({(time.time() - shard_started) / 60:.1f}m, "
+            f"~{rate * (len(sequences) - done) / 3600:.1f}h left)  -> {args.out}",
             file=sys.stderr,
             flush=True,
         )
 
+    write_profile(args, profiler, sequences, tools_sha, started, len(sequences))
+
+
+def write_profile(args, profiler, sequences, tools_sha, started, completed) -> None:
+    """Serialise the accumulators as they stand.
+
+    Called after every shard, not only at the end. A full pass over 3.5M
+    tokens is a six-hour run, and a six-hour run that writes once writes
+    nothing at all if the machine is rebooted in hour five. The accumulators
+    are sums, so a partial file is a valid profile of the sequences that have
+    completed — `total_sequences` says which — and resuming means profiling
+    the remainder and adding the two.
+    """
     import torch  # noqa: PLC0415
 
     peak_device = (
@@ -561,7 +610,7 @@ def main() -> None:
         experts_top_k=profiler.config.experts_top_k,
         moe_layers=profiler.moe_layers,
         total_tokens=profiler.stats.total_tokens,
-        total_sequences=len(sequences),
+        total_sequences=completed,
         sequence_length=args.seq_len,
         packing="per-conversation windows, no cross-document packing",
         seed=0,
@@ -578,11 +627,6 @@ def main() -> None:
         elapsed_seconds=round(time.time() - started, 1),
     )
     save_profile(args.out, profiler.stats.to_numpy(), manifest)
-    print(
-        f"wrote {args.out} — {profiler.stats.total_tokens} tokens, "
-        f"peak device {peak_device / 1e9:.1f} GB, {manifest.elapsed_seconds}s",
-        file=sys.stderr,
-    )
 
 
 if __name__ == "__main__":
