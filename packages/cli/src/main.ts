@@ -44,6 +44,7 @@ import {
   toolSchemaHash,
   type ChannelId,
   type Message,
+  type Tool,
 } from "@motifcode/protocol";
 import { BUILTIN_SKILLS, SkillRegistry, parseSkill } from "@motifcode/skills";
 import { CORE_TOOLS, CORE_TOOL_NAMES, lintTools, formatFindings, toolPrefix } from "@motifcode/tools";
@@ -347,7 +348,7 @@ async function main(): Promise<number> {
         return 2;
       }
       const spec = JSON.parse(readFileSync(specPath, "utf8")) as {
-        tools: typeof CORE_TOOLS;
+        tools: Tool[];
         systemPromptSha256: string;
         toolSchemaSha256: string;
       };

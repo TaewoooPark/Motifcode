@@ -6,7 +6,7 @@ import { AgentRegistry, BUILTIN_AGENTS } from "@motifcode/agents";
 import { renderPrompt, sharedPrefixLength } from "@motifcode/protocol";
 import { BUILTIN_SKILLS, SkillRegistry } from "@motifcode/skills";
 import { CORE_TOOLS, toolPrefix } from "@motifcode/tools";
-import { ToolExecutor, patchPaths } from "../src/executor.js";
+import { readinessMarker, readinessProbe, ToolExecutor, patchPaths } from "../src/executor.js";
 import { buildAgentPrompt, buildSystemPrompt } from "../src/prompt.js";
 import { doctor, formatChecks, worstState } from "../src/doctor.js";
 
@@ -152,12 +152,22 @@ describe("executor", () => {
     expect(r.output).toContain("first-call");
   });
 
+  it("writes a readiness probe that does not read as its own output", () => {
+    // The bug this exists for: an interactive bash with a prompt echoes what it
+    // is sent, so a probe whose command contains the marker matches its own
+    // echo. The reader then consumes up to the echo and returns the real marker
+    // line as the first call's output. Reproduces on Linux CI, not on macOS.
+    const marker = readinessMarker(1234, 1);
+    expect(readinessProbe(marker)).not.toContain(marker);
+    expect(readinessProbe(marker)).not.toContain("motif_ready");
+  });
+
   it("keeps the readiness probe out of the first call's output", async () => {
     const ex = new ToolExecutor({ cwd });
     const r = await ex.run({ id: "1", name: "term", arguments: { keystrokes: "echo visible\n", duration_s: 0.2 }, repaired: false, validated: true });
     ex.close();
     expect(r.output).toContain("visible");
-    expect(r.output).not.toContain("motif_shell_ready");
+    expect(r.output).not.toContain("motif_ready");
   });
 
   it("loads a skill body through the skill tool", async () => {

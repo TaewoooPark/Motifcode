@@ -121,6 +121,26 @@ export interface TerminalSend {
  * late — the tail of the previous command, a background job's line — was
  * either lost or attributed to the wrong call.
  */
+/** The string the shell must print before it is considered started. */
+export function readinessMarker(pid: number, generation: number): string {
+  return `__motif_ready_${pid}_${generation}__`;
+}
+
+/**
+ * The command that makes the shell print `marker`, written so that the command
+ * itself does not contain it.
+ *
+ * An interactive bash with a prompt echoes what it is sent. If the command and
+ * the output read the same, the reader matches the echo, consumes up to there,
+ * and hands the real marker line back as the first `term` call's output.
+ * Splitting the literal across two adjacent shell strings keeps the two
+ * distinguishable — the shell concatenates them, the search does not.
+ */
+export function readinessProbe(marker: string): string {
+  const split = marker.length >> 1;
+  return `echo "${marker.slice(0, split)}""${marker.slice(split)}"\n`;
+}
+
 export class PersistentShell {
   private proc: ChildProcess | null = null;
   private buffer = "";
@@ -181,10 +201,17 @@ export class PersistentShell {
    * A sentinel echo is the cheap way to know: the shell cannot print it before
    * it is ready to run commands. Its own line is consumed, so it never appears
    * in the first call's output.
+   *
+   * The marker is split across two adjacent shell strings so that the command
+   * and its output do not contain the same text. An interactive bash with a
+   * prompt echoes what it was sent — which is most machines, and was not the
+   * one this was written on — and searching for an unsplit marker then finds
+   * the echo, consumes up to there, and leaves the real output line sitting in
+   * the buffer to be returned as the first call's result.
    */
   private async waitUntilStarted(proc: ChildProcess, generation: number): Promise<void> {
-    const marker = `__motif_shell_ready_${process.pid}_${generation}__`;
-    proc.stdin?.write(`echo ${marker}\n`);
+    const marker = readinessMarker(process.pid, generation);
+    proc.stdin?.write(readinessProbe(marker));
     const deadline = Date.now() + 10_000;
     while (Date.now() < deadline) {
       if (this.exited) return;
