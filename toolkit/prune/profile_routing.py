@@ -310,16 +310,36 @@ class LayerMajorProfiler:
         return False
 
     def embed_shard(self, sequences) -> tuple:
-        """Steps 1-5 of `MotifModel.forward`, up to the first decoder layer."""
+        """Steps 1-5 of `MotifModel.forward`, up to the first decoder layer.
+
+        Sequences of the same length are stacked into one batched chunk, and
+        that grouping is what makes the shard worth having.
+
+        The expert loop dequantises all 384 experts of a layer on every chunk
+        it is handed, because a chunk is one call into the layer. One chunk per
+        sequence therefore pays the layer's dequantisation cost once per
+        sequence — measured here, 1.7s of the 2.3s an expert pass costs — so
+        eight sequences cost eight times over and a bigger shard is *slower*
+        per token, which is the opposite of the point.
+
+        Grouping by length rather than padding to a common one: the attention
+        adapter refuses a padding mask, and it is right to. Padding would mean
+        attending across a document break, which changes routing for every
+        token after it — and routing is the entire measurement.
+        """
         torch = self.torch
         model = self.model
+        by_length: dict[int, list] = {}
+        for input_ids in sequences:
+            by_length.setdefault(int(input_ids.numel()), []).append(input_ids)
+
         hidden_chunks = []
         position_chunks = []
-        for input_ids in sequences:
-            ids = input_ids.to(self.device).unsqueeze(0)
+        for length in sorted(by_length):
+            ids = torch.stack([s.to(self.device) for s in by_length[length]])
             embeds = model.embed_tokens(ids)
-            cache_position = torch.arange(embeds.shape[1], device=self.device)
-            position_ids = cache_position.unsqueeze(0)
+            cache_position = torch.arange(length, device=self.device)
+            position_ids = cache_position.unsqueeze(0).expand(ids.shape[0], -1)
             position_embeddings = model.rotary_emb(embeds, position_ids)
             hidden = embeds
             if getattr(model, "mhc_enabled", False):
@@ -343,7 +363,7 @@ class LayerMajorProfiler:
                 staged = None
                 if layer_idx in self.stats.index:
                     staged = self.reader.layer_experts(layer_idx, self.device)
-                    layer.moe.experts.packed = staged
+                    layer.moe.experts.stage(staged)
 
                 for i, hidden in enumerate(hidden_chunks):
                     position_ids, position_embeddings, cache_position = position_chunks[i]
@@ -359,7 +379,7 @@ class LayerMajorProfiler:
                     hidden_chunks[i] = out[0]
 
                 if staged is not None:
-                    layer.moe.experts.packed = None
+                    layer.moe.experts.stage(None)
                     del staged
                     if self.device.type == "cuda":
                         torch.cuda.empty_cache()

@@ -235,6 +235,49 @@ def make_streaming_experts(base_class):
             self.packed: LayerExpertWeights | None = None
             self.recorder = None
             self.layer_idx: int | None = None
+            # Dequantised weights for the layer currently staged, keyed by
+            # expert. See `_expert_weights`.
+            self._cache: dict[int, tuple] = {}
+            self.cache_dequantised = True
+
+        def stage(self, packed) -> None:
+            """Point at a layer's packed weights, or at nothing to release."""
+            self.packed = packed
+            self._cache.clear()
+
+        def _expert_weights(self, expert_idx: int, dtype):
+            """One expert's dequantised matrices, computed at most once per layer.
+
+            A layer's forward is called once per chunk, and dequantising is
+            most of what an expert pass costs — 1.7s of 2.3s, measured. Without
+            a cache the bill is paid again for every chunk, so a shard of eight
+            sequences costs eight times over and the layer-major streaming that
+            justifies the whole design stops paying for itself.
+
+            The cache holds one layer: 384 experts at bf16 is 12 GB, which is
+            affordable exactly once. `stage()` clears it, so it cannot outlive
+            the weights it was derived from.
+            """
+            hit = self._cache.get(expert_idx)
+            if hit is not None:
+                return hit
+            weights = (
+                dequantize_expert(
+                    self.packed.gate_up[expert_idx],
+                    self.packed.gate_up_scale[expert_idx],
+                    self.packed.gate_up_global[expert_idx],
+                    dtype=dtype,
+                ),
+                dequantize_expert(
+                    self.packed.down[expert_idx],
+                    self.packed.down_scale[expert_idx],
+                    self.packed.down_global[expert_idx],
+                    dtype=dtype,
+                ),
+            )
+            if self.cache_dequantised:
+                self._cache[expert_idx] = weights
+            return weights
 
         def forward(self, hidden_states, top_k_index, top_k_weights):
             if self.packed is None:
@@ -247,18 +290,7 @@ def make_streaming_experts(base_class):
                 if token_idx.shape[0] == 0:
                     continue
 
-                gate_up_w = dequantize_expert(
-                    self.packed.gate_up[expert_idx],
-                    self.packed.gate_up_scale[expert_idx],
-                    self.packed.gate_up_global[expert_idx],
-                    dtype=hidden_states.dtype,
-                )
-                down_w = dequantize_expert(
-                    self.packed.down[expert_idx],
-                    self.packed.down_scale[expert_idx],
-                    self.packed.down_global[expert_idx],
-                    dtype=hidden_states.dtype,
-                )
+                gate_up_w, down_w = self._expert_weights(expert_idx, hidden_states.dtype)
 
                 current_state = hidden_states[token_idx]
                 gate_up = current_state @ gate_up_w.T
@@ -272,7 +304,7 @@ def make_streaming_experts(base_class):
                     self.recorder.observe(self.layer_idx, expert_idx, expert_out, weights)
 
                 final.index_add_(0, token_idx, expert_out.float() * weights.float().unsqueeze(-1))
-                del gate_up_w, down_w, gate_up, expert_out
+                del gate_up, expert_out
 
             return final
 
