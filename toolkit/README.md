@@ -77,3 +77,18 @@ whole shard, apply one layer to all of them, move on. Chunk-major would re-read
 all 173 GB for every chunk. That reordering means reimplementing the body of
 `MotifModel.forward`, which is why `test_streaming.py` builds a tiny Motif and
 requires both paths to produce the same output.
+
+## Serving
+
+`serving/build_plugin.py` makes an unforked vLLM able to load Motif-3. The
+vendor ships a fork and an amd64-only container; on aarch64 neither is usable,
+and the fork's Motif support turns out to be five Python files that import
+nothing the installed vLLM lacks. See `docs/model_guide.md` §9.
+
+```bash
+python toolkit/serving/build_plugin.py --out ~/motif-prune/vllm_motif
+PYTHONPATH=~/motif-prune/vllm_motif vllm serve <checkpoint>
+```
+
+The copied files are the vendor's, under their repository's licence; the script
+records the fork revision it took them from in `motif_vllm/SOURCE`.

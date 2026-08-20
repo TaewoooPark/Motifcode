@@ -461,12 +461,49 @@ recorded.
 
 ## 9. GB10 bring-up
 
-`BLOCKED` — the Motif vLLM fork has not been built on this machine. Everything
-below is the intended order, not a record.
-
 The fork is verified by its authors on 2×B200. `FACT` — the model card. GB10 is
 a different architecture and a different memory model, and results there are
 evidence about GB10 only.
+
+### Getting a vLLM that knows what a Motif is
+
+`MEASURED`, 2026-08-20. Neither of the vendor's two distribution routes runs
+here:
+
+- the container `ghcr.io/motiftechnologies/vllm:v0.20.2-motif3.rc3` publishes a
+  single `linux/amd64` manifest, and this host is aarch64;
+- the fork is pinned to a vLLM that predates both CUDA 13 and this GPU, so
+  building it means compiling a year-old engine for hardware it has never
+  heard of.
+
+Neither is necessary. `MEASURED` — the fork's Motif support is five Python
+files, and every vLLM API they import resolves against the installed vLLM
+0.26.0 unchanged. The two pieces that would have made this hard are Triton
+rather than C++: the diff-KV attention backend and the mHC kernels. The one
+CUDA file is a fused PolyNorm-quantise fast path, and the model already selects
+a torch fallback when the extension is absent — the profiler's own logs show it
+doing so.
+
+`toolkit/serving/build_plugin.py` copies those files at a pinned fork revision,
+re-points their intra-fork imports, and writes a package that registers
+`MotifForCausalLM` and `MotifMTPModel` from outside:
+
+```bash
+python toolkit/serving/build_plugin.py --out ~/motif-prune/vllm_motif
+PYTHONPATH=~/motif-prune/vllm_motif vllm serve <checkpoint>
+```
+
+`MEASURED` — both architectures appear in `ModelRegistry.get_supported_archs()`
+after `register()`. That is an import-level result and nothing more: it says the
+plugin loads, not that it computes the right thing. Step 4 of the ladder below
+is where that gets decided.
+
+The files are copied rather than vendored, for the same reason
+`modeling_motif.py` is: they are somebody else's, and a copy in this repository
+would drift from upstream the moment it was made. The rewrite is the only
+change, and `toolkit/serving/test_build_plugin.py` tests it — an import that
+silently binds to a stale local copy of a vLLM interface is exactly the failure
+that would not announce itself.
 
 ### Host guardrails come first
 
