@@ -24,6 +24,12 @@ surgery = [
 fixtures = [
   "jinja2==3.1.6",
 ]
+# What Motif's own `modeling_motif.py` imports. Listed because the profiler
+# runs the vendor's architecture rather than a reimplementation of it.
+reference = [
+  "transformers==5.14.1",
+  "einops==0.8.2",
+]
 
 [tool.setuptools]
 packages = []

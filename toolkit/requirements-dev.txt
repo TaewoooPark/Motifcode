@@ -11,3 +11,10 @@ torch==2.11.0
 safetensors==0.8.0
 numpy==2.3.4
 jinja2==3.1.6
+
+# The reference architecture's own imports. `modeling_motif.py` is Motif's code
+# and these are its dependencies, not ours — pinned so an upstream transformers
+# change cannot alter what the equivalence test compares against without a
+# commit here.
+transformers==5.14.1
+einops==0.8.2
