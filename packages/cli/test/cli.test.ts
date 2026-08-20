@@ -141,6 +141,25 @@ describe("executor", () => {
     expect(r.output).toContain("42");
   });
 
+  it("does not race the shell into existence on the first call", async () => {
+    // `spawn` returns before bash has read its startup files. Without waiting
+    // for the shell to actually start, a short first call spends its whole
+    // budget on startup and returns "", which the model reads as a command
+    // that produced no output — and then acts on.
+    const ex = new ToolExecutor({ cwd });
+    const r = await ex.run({ id: "1", name: "term", arguments: { keystrokes: "echo first-call\n", duration_s: 0.2 }, repaired: false, validated: true });
+    ex.close();
+    expect(r.output).toContain("first-call");
+  });
+
+  it("keeps the readiness probe out of the first call's output", async () => {
+    const ex = new ToolExecutor({ cwd });
+    const r = await ex.run({ id: "1", name: "term", arguments: { keystrokes: "echo visible\n", duration_s: 0.2 }, repaired: false, validated: true });
+    ex.close();
+    expect(r.output).toContain("visible");
+    expect(r.output).not.toContain("motif_shell_ready");
+  });
+
   it("loads a skill body through the skill tool", async () => {
     const ex = new ToolExecutor({ cwd, skills });
     const r = await ex.run({ id: "1", name: "skill", arguments: { name: "commit" }, repaired: false, validated: true });

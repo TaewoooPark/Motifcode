@@ -127,6 +127,8 @@ export class PersistentShell {
   private cursor = 0;
   private exitCode: number | undefined;
   private exited = false;
+  private ready: Promise<void> | null = null;
+  private spawns = 0;
 
   constructor(private readonly cwd: string) {}
 
@@ -162,7 +164,40 @@ export class PersistentShell {
       this.exited = true;
     });
     this.proc = proc;
+    this.ready = this.waitUntilStarted(proc, ++this.spawns);
     return proc;
+  }
+
+  /**
+   * Block until the shell is actually running.
+   *
+   * `spawn` returns as soon as the process exists, not when bash has finished
+   * reading its startup files. On a loaded machine that gap is longer than the
+   * `duration_s` of a quick first command, so the call waits out its whole
+   * budget against a shell that had not started, returns nothing, and the
+   * model reads the empty string as "the command produced no output" — then
+   * acts on it.
+   *
+   * A sentinel echo is the cheap way to know: the shell cannot print it before
+   * it is ready to run commands. Its own line is consumed, so it never appears
+   * in the first call's output.
+   */
+  private async waitUntilStarted(proc: ChildProcess, generation: number): Promise<void> {
+    const marker = `__motif_shell_ready_${process.pid}_${generation}__`;
+    proc.stdin?.write(`echo ${marker}\n`);
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      if (this.exited) return;
+      const at = this.buffer.indexOf(marker, this.cursor);
+      if (at !== -1) {
+        const eol = this.buffer.indexOf("\n", at);
+        this.cursor = eol === -1 ? this.buffer.length : eol + 1;
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    // Fall through rather than throw: a shell that never echoes is still worth
+    // sending to, and the caller finds out from an empty result either way.
   }
 
   get alive(): boolean {
@@ -176,6 +211,7 @@ export class PersistentShell {
     signal?: AbortSignal,
   ): Promise<TerminalSend> {
     const proc = this.ensure();
+    await this.ready;
     if (keystrokes !== "") proc.stdin?.write(encodeKeystrokes(keystrokes));
 
     const wait = Math.min(Math.max(durationS, 0), 60) * 1000;

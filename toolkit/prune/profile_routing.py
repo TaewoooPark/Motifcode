@@ -63,6 +63,41 @@ from streaming import (
 )
 
 
+def load_tokenizer(checkpoint: Path):
+    """The tokenizer and the chat template, without going through AutoConfig.
+
+    `AutoTokenizer.from_pretrained` resolves the model config first, which means
+    honouring `auto_map` — and this repository's `auto_map` names a
+    `modeling_motif.py` it does not contain. Even with `trust_remote_code`, the
+    shipped `configuration_motif.py` and the installed transformers disagree
+    about where RoPE parameters live, and the failure surfaces as a missing
+    `max_position_embeddings` five frames from anything to do with tokenising.
+
+    None of that is needed here. A tokenizer is `tokenizer.json` plus its
+    special tokens, and the chat template is a file. Reading them directly is
+    both simpler and immune to a config incompatibility that has nothing to do
+    with the profiler.
+    """
+    from transformers import PreTrainedTokenizerFast  # noqa: PLC0415
+
+    config = json.loads((checkpoint / "tokenizer_config.json").read_text())
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_file=str(checkpoint / "tokenizer.json"),
+        bos_token=config.get("bos_token"),
+        eos_token=config.get("eos_token"),
+        pad_token=config.get("pad_token"),
+        additional_special_tokens=config.get("extra_special_tokens", []),
+    )
+    template_path = checkpoint / "chat_template.jinja"
+    if not template_path.exists():
+        raise SystemExit(
+            f"{template_path} is missing. The corpus has to be rendered with the model's own "
+            "template, or the profile describes a prompt nobody sends."
+        )
+    tokenizer.chat_template = template_path.read_text(encoding="utf-8")
+    return tokenizer
+
+
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -158,18 +193,44 @@ class LayerMajorProfiler:
 
     def _build(self) -> None:
         torch = self.torch
+        # The checkpoint's dtype, not torch's default.
+        #
+        # `MotifModel(config)` takes no dtype and builds at the process default,
+        # which is float32. Loading bf16 weights into it then upcasts silently:
+        # the resident half doubles to ~28 GB, flash attention refuses fp32
+        # outright, and — worst of the three — the routing measured is routing
+        # at a precision the served model never runs at.
+        dtype = getattr(torch, str(self.config.dtype).split(".")[-1])
+        self.dtype = dtype
+
         # Replace the expert block before construction, so the 8 GB-per-layer
         # parameters are never allocated in the first place.
         original = self.modeling.MotifExperts
         self.modeling.MotifExperts = make_streaming_experts(original)
+        previous = torch.get_default_dtype()
+        torch.set_default_dtype(dtype)
         try:
             with torch.device("meta"):
                 self.model = self.modeling.MotifModel(self.config)
         finally:
+            torch.set_default_dtype(previous)
             self.modeling.MotifExperts = original
 
         self.model = self.model.to_empty(device=self.device)
+        # One unambiguous witness that the construction above took. The
+        # embedding is the model's compute dtype by definition, so if it is not
+        # what the checkpoint declares, everything downstream — including every
+        # routing decision this profiler exists to measure — is at the wrong
+        # precision, and the per-tensor check below would read the discrepancy
+        # as deliberate rather than as the build error it is.
+        built = self.model.embed_tokens.weight.dtype
+        if built != dtype:
+            raise SystemExit(
+                f"model built at {built}, checkpoint declares {dtype}. Routing measured at a "
+                "precision the served model never runs at is not a measurement of it."
+            )
         self.model.eval()
+        self.promotions: list[str] = []
         self._load_resident()
 
         self.recorder.instrument(self.model, self.moe_layers)
@@ -194,6 +255,26 @@ class LayerMajorProfiler:
                 raise SystemExit(
                     f"{name}: checkpoint has {tuple(tensor.shape)}, model expects {tuple(target.shape)}"
                 )
+            # `copy_` casts silently, so a dtype disagreement has to be
+            # adjudicated rather than absorbed.
+            #
+            # There is one legitimate case: the vendor's model declares a
+            # parameter at a dtype other than the model's own — `expert_bias`
+            # is `torch.float32` in `modeling_motif.py` while the checkpoint
+            # ships it bf16 — and widening bf16 to fp32 is exact. Everything
+            # else is a discrepancy the profile would hide.
+            if tensor.dtype != target.dtype:
+                exact = target.dtype == torch.float32 and tensor.dtype in (
+                    torch.bfloat16,
+                    torch.float16,
+                )
+                declared = target.dtype != self.dtype
+                if not (exact and declared):
+                    raise SystemExit(
+                        f"{name}: checkpoint is {tensor.dtype}, model expects {target.dtype}. "
+                        "Copying would cast silently and profile a different model."
+                    )
+                self.promotions.append(f"{name}: {tensor.dtype} -> {target.dtype}")
             with torch.no_grad():
                 target.copy_(tensor)
             loaded += 1
@@ -201,6 +282,15 @@ class LayerMajorProfiler:
             del tensor
         self.resident_bytes = resident_bytes
         self.resident_tensors = loaded
+        if self.promotions:
+            # Reported, not buried. A lossless widening is still a place where
+            # the checkpoint and the architecture disagree.
+            kinds = sorted({p.split(": ", 1)[1] for p in self.promotions})
+            print(
+                f"widened {len(self.promotions)} tensor(s) the model declares at a different "
+                f"dtype than the checkpoint ships ({'; '.join(kinds)}), losslessly",
+                flush=True,
+            )
 
     # -------------------------------------------------------------- #
 
@@ -284,11 +374,14 @@ class LayerMajorProfiler:
 
 
 def read_corpus(path: Path, tokenizer, sequence_length: int, max_tokens: int):
-    """Render each conversation with the frozen chat template, then pack.
+    """Tokenise conversations the harness already rendered.
 
-    Not raw text. The system prompt, the tools block, the role markers and the
-    tool-result envelope are what the model actually reads on every request, and
-    a profile taken without them describes a prompt this harness never sends.
+    The profiler does not apply a chat template. `motif corpus-render` does,
+    using the same `renderPrompt` the agent loop calls, so the tokens measured
+    here are the tokens the harness puts on the wire — not a second renderer's
+    reading of the same messages. Two templates that agree today can drift
+    tomorrow, and the drift would show up as a routing profile for a prompt
+    nobody sends.
     """
     import torch  # noqa: PLC0415
 
@@ -298,14 +391,18 @@ def read_corpus(path: Path, tokenizer, sequence_length: int, max_tokens: int):
         if not line.strip():
             continue
         record = json.loads(line)
-        messages = record.get("messages")
-        if messages is None:
+        text = record.get("text")
+        if text is None:
             raise SystemExit(
-                f"{path}: record {record.get('sample_id', '?')} has no `messages`. "
-                "The profiler consumes rendered conversations, not raw text — "
-                "see corpus.py and `motif distil --format trajectory-jsonl`."
+                f"{path}: record {record.get('sample_id', '?')} has no `text`. Render the "
+                "corpus first:\n"
+                "    motif corpus-render --spec spec.json corpus.jsonl > corpus.rendered.jsonl"
             )
-        ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=False)
+        ids = tokenizer(text, add_special_tokens=False)["input_ids"]
+        # Windowed rather than packed across documents: a sequence that spans a
+        # document boundary makes the model attend across a break it would
+        # never see, and the routing for every token after the boundary is
+        # measured under conditions that do not occur.
         for start in range(0, len(ids), sequence_length):
             window = ids[start : start + sequence_length]
             if len(window) < 16:
@@ -315,6 +412,29 @@ def read_corpus(path: Path, tokenizer, sequence_length: int, max_tokens: int):
             if total >= max_tokens:
                 return sequences, total
     return sequences, total
+
+
+def load_spec(path: Path, corpus: Path) -> tuple[list, str, str]:
+    """The harness's tools and prompt hashes, checked against the corpus.
+
+    A corpus rendered against one tool list and profiled against another is
+    measuring a prompt that was never sent, and nothing downstream can see it.
+    """
+    spec = json.loads(Path(path).read_text())
+    tools = spec["tools"]
+    tools_sha = spec["toolSchemaSha256"]
+
+    for line in Path(corpus).read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        record = json.loads(line)
+        if record.get("tools_sha256") not in (tools_sha, None):
+            raise SystemExit(
+                f"{corpus}: record {record.get('sample_id', '?')} was rendered against tool "
+                f"schemas {str(record.get('tools_sha256'))[:12]}, but the spec is "
+                f"{tools_sha[:12]}. Rebuild the corpus, or profile with the spec it was built from."
+            )
+    return tools, tools_sha, spec.get("systemPromptSha256", "unrecorded")
 
 
 def main() -> None:
@@ -329,6 +449,12 @@ def main() -> None:
         help="directory holding modeling_motif.py and configuration_motif.py",
     )
     ap.add_argument("--corpus", type=Path, required=True, help="rendered conversations, JSONL")
+    ap.add_argument(
+        "--spec",
+        type=Path,
+        required=True,
+        help="`motif corpus-spec` output: the tool schemas the corpus was rendered against",
+    )
     ap.add_argument("--name", default="target", help="corpus label: target | reference")
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--max-tokens", type=int, default=50_000)
@@ -344,28 +470,53 @@ def main() -> None:
     ap.add_argument("--tool-schema-sha256", default="")
     args = ap.parse_args()
 
-    from transformers import AutoTokenizer  # noqa: PLC0415
-
     started = time.time()
-    tokenizer = AutoTokenizer.from_pretrained(str(args.checkpoint))
+    tokenizer = load_tokenizer(args.checkpoint)
+    _tools, tools_sha, _system_sha = load_spec(args.spec, args.corpus)
     sequences, tokens = read_corpus(args.corpus, tokenizer, args.seq_len, args.max_tokens)
     if not sequences:
         raise SystemExit(f"{args.corpus} produced no sequences")
-    print(f"{len(sequences)} sequence(s), {tokens} tokens", file=sys.stderr)
+    print(f"{len(sequences)} sequence(s), {tokens} tokens", file=sys.stderr, flush=True)
 
     profiler = LayerMajorProfiler(args.checkpoint, args.modeling, args.device)
     print(
         f"resident: {profiler.resident_tensors} tensors, "
         f"{profiler.resident_bytes / 1e9:.1f} GB",
         file=sys.stderr,
+        flush=True,
     )
 
+    # A shard is 51 layers deep and each layer stages gigabytes of experts, so
+    # a run that reports only per-shard is silent for tens of minutes at a
+    # time. Without per-layer progress there is no way to tell a slow machine
+    # from a hung one, and no throughput number to size the real run from.
     done = 0
+    layers = len(profiler.model.layers)
     for start in range(0, len(sequences), args.shard_sequences):
         shard = sequences[start : start + args.shard_sequences]
-        profiler.run_shard(shard)
+        shard_started = time.time()
+        marks: list[float] = [shard_started]
+
+        def progress(layer_idx: int, _marks=marks, _t0=shard_started) -> None:
+            now = time.time()
+            fraction = (layer_idx + 1) / layers
+            elapsed = now - _t0
+            print(
+                f"    layer {layer_idx + 1}/{layers}  "
+                f"{now - _marks[-1]:5.1f}s  "
+                f"({elapsed / 60:.1f}m elapsed, ~{elapsed * (1 - fraction) / fraction / 60:.1f}m left)",
+                file=sys.stderr,
+                flush=True,
+            )
+            _marks.append(now)
+
+        profiler.run_shard(shard, progress=progress)
         done += len(shard)
-        print(f"  {done}/{len(sequences)} sequences", file=sys.stderr)
+        print(
+            f"  {done}/{len(sequences)} sequences  ({(time.time() - shard_started) / 60:.1f}m)",
+            file=sys.stderr,
+            flush=True,
+        )
 
     import torch  # noqa: PLC0415
 
@@ -383,7 +534,7 @@ def main() -> None:
         sidecar_sha256=sha256_file(args.checkpoint / "nvfp4_act_scales.safetensors"),
         corpus_manifest_sha256=args.corpus_manifest_sha256 or "unrecorded",
         template_sha256=sha256_file(template_path) if template_path.exists() else "unrecorded",
-        tool_schema_sha256=args.tool_schema_sha256 or "unrecorded",
+        tool_schema_sha256=args.tool_schema_sha256 or tools_sha,
         backend="layer-major-streaming",
         backend_version=f"1+{profiler.attention_source}",
         num_experts=profiler.config.num_experts,

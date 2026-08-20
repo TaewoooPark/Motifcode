@@ -39,9 +39,11 @@ import {
 import { readFileSync as readFile } from "node:fs";
 import {
   SAMPLING_DEFAULTS,
+  renderPrompt,
   systemPromptHash,
   toolSchemaHash,
   type ChannelId,
+  type Message,
 } from "@motifcode/protocol";
 import { BUILTIN_SKILLS, SkillRegistry, parseSkill } from "@motifcode/skills";
 import { CORE_TOOLS, CORE_TOOL_NAMES, lintTools, formatFindings, toolPrefix } from "@motifcode/tools";
@@ -70,7 +72,7 @@ function parseArgs(argv: string[]): Args {
       if (eq !== -1) flags[a.slice(2, eq)] = a.slice(eq + 1);
       else if (argv[i + 1] && !argv[i + 1]!.startsWith("-")) flags[a.slice(2)] = argv[++i]!;
       else flags[a.slice(2)] = true;
-    } else if (rest.length === 0 && ["doctor", "sessions", "resume", "skills", "agents", "lint", "distil", "metrics", "trust", "redact", "help", "version"].includes(a)) {
+    } else if (rest.length === 0 && ["doctor", "sessions", "resume", "skills", "agents", "lint", "distil", "metrics", "trust", "redact", "corpus-spec", "corpus-render", "help", "version"].includes(a)) {
       command = a;
     } else {
       rest.push(a);
@@ -112,6 +114,15 @@ function flagInt(flags: Args["flags"], key: string, fallback: number, min: numbe
 }
 
 const CHANNELS = ["toolcall", "object", "raw"] as const;
+
+/**
+ * Whether an MCP adapter is wired up.
+ *
+ * False, and stated once rather than in two places: the tool list the harness
+ * sends and the tool list a corpus is rendered against have to be the same
+ * list, or the corpus describes a prompt nobody sends.
+ */
+const mcpConnectedDefault = false;
 const CHANNEL_POLICIES = ["fixed", "adaptive"] as const;
 const DISTIL_FORMATS = ["trajectory-jsonl", "profile-jsonl"] as const satisfies readonly DistilFormat[];
 const DISTIL_FILTERS = ["grader-passed", "grader-failed", "all"] as const satisfies readonly DistilFilter[];
@@ -234,6 +245,8 @@ const HELP = `motif ${VERSION} — a coding agent built for Motif-3
   motif distil <dir>        export graded trajectories
   motif metrics <dir>       per-run metrics, one JSON object per line
   motif redact <file>       print a journal with recognised secrets masked
+  motif corpus-spec         emit the system prompt and tool schemas, with hashes
+  motif corpus-render       render a corpus JSONL to prompt text, as the harness would
 
 Flags
   --endpoint <url>          model server (default http://127.0.0.1:8080)
@@ -279,6 +292,89 @@ async function main(): Promise<number> {
     case "version":
       process.stdout.write(`${VERSION}\n`);
       return 0;
+
+    case "corpus-spec": {
+      // The exact bytes a profiling corpus has to be rendered against.
+      //
+      // A calibration corpus is only about *this* harness if it carries the
+      // system prompt, the tools block and the role markers this harness
+      // actually sends. Reading them out of the harness rather than
+      // transcribing them is the difference between a corpus that is provably
+      // current and one that was right when somebody last copied it — and the
+      // hashes let the profiler refuse a stale one.
+      const chan: ChannelId = flagEnum(args.flags, "channel", CHANNELS, "toolcall");
+      const tools = mcpConnectedDefault ? [...CORE_TOOLS] : toolPrefix(CORE_TOOLS.length - 1);
+      const skillsForSpec = loadSkills(cwd);
+      const agentsForSpec = new AgentRegistry();
+      agentsForSpec.registerAll(BUILTIN_AGENTS);
+      const system = buildSystemPrompt({
+        channel: chan,
+        tools,
+        skills: skillsForSpec,
+        agents: agentsForSpec,
+        cwd,
+      });
+      process.stdout.write(
+        JSON.stringify(
+          {
+            schemaVersion: "motifcode.corpus-spec/v1",
+            harnessVersion: VERSION,
+            channel: chan,
+            system,
+            tools,
+            systemPromptSha256: systemPromptHash(system),
+            toolSchemaSha256: toolSchemaHash(tools),
+          },
+          null,
+          2,
+        ) + "\n",
+      );
+      return 0;
+    }
+
+    case "corpus-render": {
+      // Render a corpus with the harness's own renderer, not with Jinja.
+      //
+      // The profiler needs to tokenise exactly what this harness puts on the
+      // wire. Two renderers that agree today can drift tomorrow, and a profile
+      // taken through the second one describes a prompt nobody sends. So the
+      // corpus is rendered once, here, by the same `renderPrompt` the loop
+      // uses, and the profiler consumes the text rather than re-deriving it.
+      const specPath = flagStr(args.flags, "spec", "");
+      const corpusPath = args.rest[0];
+      if (!specPath || !corpusPath) {
+        process.stderr.write("corpus-render needs --spec <spec.json> and a corpus JSONL path\n");
+        return 2;
+      }
+      const spec = JSON.parse(readFileSync(specPath, "utf8")) as {
+        tools: typeof CORE_TOOLS;
+        systemPromptSha256: string;
+        toolSchemaSha256: string;
+      };
+      let rendered = 0;
+      for (const line of readFileSync(corpusPath, "utf8").split("\n")) {
+        if (!line.trim()) continue;
+        const record = JSON.parse(line) as { messages: Message[]; tools_sha256?: string };
+        if (record.tools_sha256 && record.tools_sha256 !== spec.toolSchemaSha256) {
+          process.stderr.write(
+            `record was built against tool schemas ${record.tools_sha256.slice(0, 12)}, ` +
+              `spec is ${spec.toolSchemaSha256.slice(0, 12)}\n`,
+          );
+          return 1;
+        }
+        const text = renderPrompt({
+          messages: record.messages,
+          tools: spec.tools,
+          addGenerationPrompt: false,
+        });
+        process.stdout.write(
+          JSON.stringify({ ...record, text, rendered_by: `motifcode/${VERSION}` }) + "\n",
+        );
+        rendered++;
+      }
+      process.stderr.write(`rendered ${rendered} record(s)\n`);
+      return 0;
+    }
 
     case "redact": {
       const file = args.rest[0];
@@ -477,7 +573,7 @@ async function main(): Promise<number> {
   // tokens on every request to teach the model about a capability it does not
   // have. `mcp` is last in the canonical order, so leaving it out is exactly a
   // prefix and costs no cache.
-  const mcpConnected = false;
+  const mcpConnected = mcpConnectedDefault;
   const activeTools = mcpConnected ? [...CORE_TOOLS] : toolPrefix(CORE_TOOLS.length - 1);
   const activeToolNames = CORE_TOOL_NAMES.slice(0, activeTools.length);
   const schemaHash = toolSchemaHash(activeTools);
