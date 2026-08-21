@@ -427,3 +427,71 @@ export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
     signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
+
+/**
+ * Remove Node's own idle timeouts from `fetch`, so this module's deadline is
+ * the only one.
+ *
+ * MEASURED 2026-08-20, Motif-3 served locally at roughly 2 tok/s: an ordinary
+ * agent step — one reasoning block and one tool call — takes longer than five
+ * minutes, and the session died with
+ *
+ *     fetch failed (UND_ERR_HEADERS_TIMEOUT)
+ *
+ * on three consecutive retries, each exactly five minutes apart. Nothing was
+ * wrong with the server; it was still generating. Node's HTTP client gives up
+ * waiting for response headers after 300 s by default, and the tool path is
+ * deliberately non-streaming — see the note at the top of this file — so no
+ * headers arrive until the whole completion is done. `requestTimeoutMs` is 30
+ * minutes precisely because a long turn is expected, and it never got the
+ * chance to apply.
+ *
+ * That default is a reasonable one for a hosted API answering in seconds. It is
+ * the wrong one for a large model on a desk, and a harness that only works
+ * against fast endpoints is not a local-first harness.
+ *
+ * There is no supported API for this: Node bundles undici but does not export
+ * it. The global dispatcher is reachable through a well-known symbol, and its
+ * constructor takes the options we need. Everything here is feature-detected
+ * and failure is silent by design — if a future Node changes the shape, the
+ * result is today's behaviour, which is the thing we are already handling.
+ *
+ * Process-global, so it belongs to whoever owns the process. The CLI calls it
+ * at startup; a library embedding `HttpTransport` decides for itself.
+ *
+ * How close the default cuts it, measured over one polyglot campaign: 348
+ * requests completed, median 35.1 s, p99 254.2 s, longest 286.6 s, none above
+ * 290 s. Every one of those was a request that finished inside the 300 s
+ * window by a margin of seconds, and the two that did not finish inside it
+ * ended their rows in `transport_error`. Awaiting the result matters for the
+ * same reason: this is a promise now, and firing it without awaiting puts the
+ * first request in a race against the swap.
+ */
+export async function relaxNodeHttpTimeouts(): Promise<boolean> {
+  const key = Symbol.for("undici.globalDispatcher.1");
+  const holder = globalThis as unknown as Record<symbol, unknown>;
+  try {
+    if (holder[key] === undefined) {
+      // Node exposes `fetch` as a wrapper that loads its bundled undici on the
+      // first *call*, not on first access, and it is that module load which
+      // installs the global dispatcher. So at startup — before any request has
+      // gone out, which is precisely when this function wants to run — the
+      // symbol holds nothing. The first version of this function read it,
+      // found nothing, returned false and changed the process not at all;
+      // silently, because the return value was discarded. The 300 s timeout
+      // stayed in force and the failure this function exists to prevent came
+      // back and cost two campaign rows. A `data:` URL is a real fetch that
+      // opens no socket and resolves no name, so it forces the load for free.
+      await fetch("data:text/plain,").catch(() => undefined);
+    }
+    const current = holder[key] as { constructor?: unknown } | undefined;
+    const Ctor = current?.constructor as (new (o: unknown) => unknown) | undefined;
+    if (typeof Ctor !== "function") return false;
+    // 0 disables the timer in undici. Both matter: headersTimeout covers the
+    // wait before the first byte, bodyTimeout the gaps after it.
+    holder[key] = new Ctor({ headersTimeout: 0, bodyTimeout: 0 });
+    return true;
+  } catch {
+    return false;
+  }
+}

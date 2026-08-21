@@ -11,7 +11,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { AgentRegistry, AgentScheduler, BUILTIN_AGENTS, concurrencyFor } from "@motifcode/agents";
-import { HttpTransport, runLoop, type LoopEvent } from "@motifcode/core";
+import { HttpTransport, relaxNodeHttpTimeouts, runLoop, type LoopEvent } from "@motifcode/core";
 import { DEFAULT_HOOKS } from "@motifcode/hooks";
 import {
   approve as approveTrust,
@@ -813,7 +813,17 @@ async function main(): Promise<number> {
   }
 }
 
-main()
+// Before anything opens a socket. Node's default HTTP idle timeouts are set for
+// endpoints that answer in seconds; a large model served locally answers a
+// single step in minutes, and the transport's own 30-minute deadline is the one
+// that should decide. See `relaxNodeHttpTimeouts` for what that cost when it
+// was left in place.
+//
+// Awaited rather than fired and forgotten: it has to make Node load its bundled
+// undici before it can reach the dispatcher, so the swap lands a microtask late
+// and the first request would otherwise race it.
+relaxNodeHttpTimeouts()
+  .then(() => main())
   .then((code) => process.exit(code))
   .catch((err: unknown) => {
     // Bad usage gets one line and exit 2; anything else is a real failure and
