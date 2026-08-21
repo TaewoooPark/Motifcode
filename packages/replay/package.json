@@ -1,6 +1,6 @@
 {
   "name": "@motifcode/replay",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "description": "Record, replay and fault-inject the model transport",

@@ -54,7 +54,7 @@ import { ToolExecutor } from "./executor.js";
 import { policyForAgent } from "./policy.js";
 import { buildAgentPrompt, buildSystemPrompt } from "./prompt.js";
 
-const VERSION = "0.0.1";
+const VERSION = "0.1.0";
 
 interface Args {
   command: string;

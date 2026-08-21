@@ -1,6 +1,6 @@
 {
   "name": "motifcode",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "type": "module",
   "description": "The motif command line — a coding agent harness built for Motif-3",
   "license": "Apache-2.0",

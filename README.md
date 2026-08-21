@@ -90,17 +90,33 @@ the model a conversation it never had.
 
 ## Status
 
-Pre-alpha. **Nothing here has been run against Motif-3 yet** — no machine on hand
-holds 187 GB of weights. Everything verifiable without the model has been
-verified, and that turns out to cover most of the hard parts.
+Alpha. **It has now been run against Motif-3**, on one GB10 with 128 GB of
+unified memory, serving a mixed-quant GGUF of the 314.8B/13B-activated
+checkpoint through a llama.cpp-family runtime. Agent sessions complete, tests
+run, and the polyglot grader scores them.
+
+What that turned up is worth stating plainly, because none of it was visible
+from the tests alone:
+
+| Measured over one polyglot campaign | |
+|---|---|
+| `apply_patch` calls that applied | **1 of 12** — patches ending without a newline, hunk counts off by one, and `git apply` reporting both in the host's language |
+| edit attempts routed through shell heredocs instead | **85%** |
+| output tokens spent rewriting a file already written | **~30%** |
+| turns that produced no action at all | **21%**, and a no-action turn was followed by another **55.7%** of the time against 20.6% after a turn that acted |
+| decode throughput | 11.8 tok/s single stream, **36% of what the memory bandwidth allows** |
+
+Every one of those is a harness or runtime defect rather than a model
+limitation, and the first four are fixed in this release. The measurements are
+in the journals; `toolkit/serving/report_campaign.py` reads them.
 
 | Component | State |
 |---|---|
 | `protocol` — chat template | **byte-identical** to the real Jinja across 14 cases |
 | `protocol` — tool-call repair | 11 golden cases from the vendor's own suite, all passing |
 | `protocol` — reasoning scrubber | passing, including every split point of a marker |
-| `protocol` — action channels | implemented; the comparison that matters needs the model |
-| `tools` — frozen set + linter | passing |
+| `protocol` — action channels | implemented; `toolcall` exercised against the model, the other two still only against fixtures |
+| `tools` — frozen set + linter | passing; `write` added on evidence, and the tool ceiling raised to 9 with it |
 | `core` — agent loop | passing, driven entirely by injected faults |
 | `replay` — record / replay / fault injection | passing; a recorded session replays identically |
 | `tui` — cells, two-region streaming, instruments | passing, snapshot-tested |
@@ -110,6 +126,8 @@ verified, and that turns out to cover most of the hard parts.
 | `journal` — append-only log, resume, trajectory export | passing |
 | `cli` — `motif`, `doctor`, `sessions`, `resume`, `distil` | passing; runs end to end against a mock server |
 | `toolkit/prune` — surgery | unit-tested; dry-runs against the real checkpoint index |
+| `toolkit/serving` — bring-up, manifest, score table | used to stand the model up and to report a campaign |
+| `eval` — polyglot runner, worktree grader | run end to end against the model |
 
 Six errors were caught by testing rather than by reading: the pruning surgery
 touches **ten** tensors per MoE layer, not six — the NVFP4 scale tensors were
@@ -120,9 +138,13 @@ import left the skill parser uninitialised at load; and tool cells were being
 committed to scrollback before their output arrived, so every command appeared
 to produce nothing. The last two only surfaced when the CLI was run for real.
 
-Because there is no model to misbehave, the loop is tested by **injecting the
-misbehaviour**: invalid escapes, truncated tool calls, unparseable bodies, empty
-turns and a dead server are all faults the suite produces on purpose.
+The loop is still tested by **injecting the misbehaviour** — invalid escapes,
+truncated tool calls, unparseable bodies, empty turns and a dead server are all
+faults the suite produces on purpose — and that remains the only way to test
+most of it on a laptop. What running against the real model changed is which
+faults are worth injecting: the announce-then-stop turn and the miscounted
+patch are now in the suite because the model produced them, not because they
+seemed plausible.
 
 ---
 

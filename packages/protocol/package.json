@@ -1,6 +1,6 @@
 {
   "name": "@motifcode/protocol",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "description": "Motif-3 wire protocol: chat template, tool-call repair, reasoning scrubber, action channels",

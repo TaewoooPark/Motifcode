@@ -15,7 +15,7 @@
 import { execFileSync } from "node:child_process";
 import { spawn } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import { existsSync, mkdtempSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -58,9 +58,16 @@ describe("the installed CLI", () => {
     expect(statSync(BUNDLE).mode & 0o111).toBeGreaterThan(0);
   });
 
-  it("installs a `motif` binary that runs", () => {
+  it("installs a `motif` binary that runs, reporting the version it was packed at", () => {
+    // Read rather than written down: a hardcoded version here fails on the
+    // release that bumps it, which trains whoever is releasing to edit the test
+    // until it passes. What is worth asserting is that the binary agrees with
+    // the manifest it was built from.
+    const packed = JSON.parse(
+      readFileSync(resolve(dirname(BUNDLE), "..", "package.json"), "utf8"),
+    ) as { version: string };
     expect(existsSync(motif)).toBe(true);
-    expect(run(motif, ["version"], installDir).trim()).toBe("0.0.1");
+    expect(run(motif, ["version"], installDir).trim()).toBe(packed.version);
   });
 
   it("prints help without a server", () => {

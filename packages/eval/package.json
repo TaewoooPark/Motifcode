@@ -1,6 +1,6 @@
 {
   "name": "@motifcode/eval",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "description": "Immutable benchmark manifests, planned denominators, trusted grading and paired statistics",
