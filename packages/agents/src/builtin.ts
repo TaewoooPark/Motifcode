@@ -63,7 +63,7 @@ export const BUILTIN_AGENTS: readonly AgentDef[] = Object.freeze([
   {
     name: "tester",
     description: "Run the tests, diagnose failures, fix the cause",
-    toolCount: 5, // + apply_patch, term
+    toolCount: 6, // + write, apply_patch, term
     maxTurns: 40,
     source: "builtin",
     instructions: [
@@ -104,7 +104,7 @@ export const BUILTIN_AGENTS: readonly AgentDef[] = Object.freeze([
   {
     name: "patcher",
     description: "Apply a well-specified change — for work the caller has already scoped",
-    toolCount: 4, // + apply_patch
+    toolCount: 5, // + write, apply_patch
     maxTurns: 30,
     source: "builtin",
     instructions: [

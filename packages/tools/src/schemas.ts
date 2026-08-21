@@ -83,6 +83,23 @@ export const CORE_TOOLS: readonly Tool[] = Object.freeze([
   {
     type: "function",
     function: {
+      name: "write",
+      description:
+        "Write a file, creating it or replacing it entirely. Use this to create a file and to rewrite one whose new contents you already have; use `apply_patch` to change a few lines of a file you have read. Never write a file by shelling out to `cat`, `tee` or a heredoc — the content would pass through the shell, and every backtick, `$` and quote in it becomes something you have to escape correctly.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Path to the file. Parent directories are created." },
+          content: { type: "string", description: "The complete new contents. Sent verbatim; nothing in it is interpreted." },
+        },
+        required: ["path", "content"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "apply_patch",
       description:
         "Apply a unified diff to the working tree. The whole patch is one argument on purpose: an edit tool with separate path/old/new fields has three separate escaping contexts to get wrong, and this has one.",

@@ -23,7 +23,26 @@ export interface Finding {
 }
 
 export const LIMITS = {
-  maxTools: 8,
+  /**
+   * Nine, raised from eight to admit `write`.
+   *
+   * The limit exists because the repair search has to disambiguate a malformed
+   * block against the registered names, so each extra tool is another wrong
+   * reading it could accept. That cost is not uniform, though: it comes from
+   * names that partially match each other and from wide parameter lists, both
+   * of which are checked separately below. `write` is two parameters and shares
+   * no substring with any other name, so it adds a candidate the oracle can
+   * always tell apart.
+   *
+   * Against that, the campaign it was added for: with only `apply_patch` and
+   * `bash` available, 85% of the model's edits went through shell heredocs, one
+   * file was rewritten ten times in a single task, and about a third of every
+   * token generated was a file already written once. The oracle was never the
+   * thing costing the score.
+   *
+   * Raising this again should need the same kind of evidence.
+   */
+  maxTools: 9,
   maxParams: 3,
 } as const;
 

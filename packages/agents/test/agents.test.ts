@@ -38,9 +38,10 @@ describe("built-in agents", () => {
   });
 
   it("prevents recursion without a special rule", () => {
-    // `task` sits at position 7 in the canonical order, past every count used
+    // `task` sits last but one in the canonical order, past every count used
     // here, so no subagent can spawn another. The guard falls out of the
-    // ordering rather than needing to be enforced.
+    // ordering rather than needing to be enforced — which also means adding a
+    // tool ahead of it, as `write` was, cannot quietly hand it to anyone.
     for (const def of reg.list()) {
       expect(names(reg.get(def.name)!), def.name).not.toContain("task");
     }

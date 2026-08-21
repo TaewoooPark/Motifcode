@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -6,7 +6,7 @@ import { AgentRegistry, BUILTIN_AGENTS } from "@motifcode/agents";
 import { renderPrompt, sharedPrefixLength } from "@motifcode/protocol";
 import { BUILTIN_SKILLS, SkillRegistry } from "@motifcode/skills";
 import { CORE_TOOLS, toolPrefix } from "@motifcode/tools";
-import { readinessMarker, readinessProbe, ToolExecutor, patchPaths } from "../src/executor.js";
+import { readinessMarker, readinessProbe, ToolExecutor, patchHint, patchPaths } from "../src/executor.js";
 import { buildAgentPrompt, buildSystemPrompt } from "../src/prompt.js";
 import { doctor, formatChecks, worstState } from "../src/doctor.js";
 
@@ -262,6 +262,73 @@ describe("executor", () => {
   it("extracts the paths a patch touches, for the hook environment", () => {
     const patch = "--- a/src/x.ts\n+++ b/src/x.ts\n@@\n-old\n+new\n--- a/y.ts\n+++ b/y.ts\n";
     expect(patchPaths(patch)).toEqual(["src/x.ts", "y.ts"]);
+  });
+
+  it("writes a file without the content passing through a shell", async () => {
+    // The reason this tool exists. Given only `apply_patch` and `bash`, the
+    // model wrote files with heredocs and had to escape the file's own
+    // contents; a backtick or a `$` in the code became a shell problem on top
+    // of the task. Here the content is an argument, so nothing in it is
+    // interpreted.
+    const dir = mkdtempSync(join(tmpdir(), "motifcode-write-"));
+    const ex = new ToolExecutor({ cwd: dir });
+    const content = "const s = `${x}` // $(rm -rf /) 'quoted' \"double\"\n";
+    const r = await ex.run({
+      id: "1", name: "write", arguments: { path: "src/deep/x.ts", content },
+      repaired: false, validated: true,
+    });
+    ex.close();
+    expect(r.ok).toBe(true);
+    // Parent directories are created, because the alternative is a `mkdir -p`
+    // turn and a turn costs a model request.
+    expect(readFileSync(join(dir, "src/deep/x.ts"), "utf8")).toBe(content);
+    expect(r.output).toContain("created");
+  });
+
+  it("says whether a write created or replaced the file", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "motifcode-write2-"));
+    writeFileSync(join(dir, "a.txt"), "old\n");
+    const ex = new ToolExecutor({ cwd: dir });
+    const r = await ex.run({
+      id: "1", name: "write", arguments: { path: "a.txt", content: "new\n" },
+      repaired: false, validated: true,
+    });
+    ex.close();
+    expect(r.output).toContain("replaced");
+    expect(readFileSync(join(dir, "a.txt"), "utf8")).toBe("new\n");
+  });
+
+  it("applies a patch with miscounted hunks and no trailing newline", async () => {
+    // Both faults arrived together in one real patch, and either alone is
+    // enough for `git apply` to reject it. What it says is "corrupt patch at
+    // line 14", which names the diff's last line rather than the missing byte
+    // after it — so a model asked to repair from that message is being pointed
+    // at the wrong thing. Over a campaign of 12 calls this tool applied once.
+    const dir = mkdtempSync(join(tmpdir(), "motifcode-patch-"));
+    writeFileSync(join(dir, "lib.rs"), "one\ntwo\nthree\n}\n");
+    const ex = new ToolExecutor({ cwd: dir });
+    // Header claims 5 old and 7 new; the body carries 4 and 6. Ends on `}`
+    // with nothing after it.
+    const patch = "--- a/lib.rs\n+++ b/lib.rs\n@@ -1,5 +1,7 @@\n-one\n-two\n-three\n+1\n+2\n+3\n+4\n+5\n }";
+    const r = await ex.run({
+      id: "1", name: "apply_patch", arguments: { patch }, repaired: false, validated: true,
+    });
+    ex.close();
+    expect(r.ok).toBe(true);
+    expect(readFileSync(join(dir, "lib.rs"), "utf8")).toBe("1\n2\n3\n4\n5\n}\n");
+  });
+
+  it("names the cause when a patch is rejected", () => {
+    // The three shapes the failures actually took. Each hint is appended to
+    // git's own message rather than replacing it.
+    expect(patchHint("@@ -1,4 +1,3 @@\n-a\n+b\n", "error: No valid patches in input"))
+      .toContain("no `--- a/path`");
+    expect(patchHint("--- a/x\n+++ b/x\n@@\n-a\n", "error: x: does not exist in index"))
+      .toContain("not in the tree");
+    expect(patchHint("--- a/x\n+++ b/x\n@@\n-a\n", "error: patch failed: x:7"))
+      .toContain("context lines do not match");
+    // Nothing to add when git's message is already specific.
+    expect(patchHint("--- a/x\n+++ b/x\n@@\n-a\n", "error: unrecognized input")).toBe("");
   });
 });
 

@@ -17,8 +17,8 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import type { Executor, ToolResult, ToolInvocation } from "@motifcode/core";
 import { runHooks, runShell, wasBlocked, type HookConfig, type HookEvent } from "@motifcode/hooks";
 import type { SkillRegistry } from "@motifcode/skills";
@@ -340,6 +340,41 @@ function readSlice(path: string, cwd: string, offset?: number, limit?: number): 
   }
 }
 
+/**
+ * Write a file whole, without a shell anywhere in the path.
+ *
+ * This exists because of what the model did when it did not exist. Given only
+ * `apply_patch` and `bash`, it wrote files through heredocs — and said so:
+ * "Let me rewrite the file directly using bash to avoid patch issues", "I'll
+ * use a Python script to write the file to avoid shell escaping issues". Over
+ * one campaign, 85% of its edit attempts went through the shell, and the same
+ * file was rewritten up to ten times in a single task; roughly a third of every
+ * token it generated was a file it had already written once.
+ *
+ * A heredoc puts the file's contents through the shell, so every backtick, `$`
+ * and quote in the content becomes an escaping problem the model has to solve
+ * on top of the actual task. Here the content is an argument. Nothing in it is
+ * interpreted.
+ *
+ * Parent directories are created because the alternative is a `mkdir -p` turn,
+ * and a turn costs a model request.
+ */
+function writeFile(path: string, content: string, cwd: string): ToolResult {
+  try {
+    const target = resolve(cwd, path);
+    mkdirSync(dirname(target), { recursive: true });
+    const existed = existsSync(target);
+    writeFileSync(target, content, "utf8");
+    const lines = content === "" ? 0 : content.split("\n").length;
+    return {
+      ok: true,
+      output: `${existed ? "replaced" : "created"} ${path} (${lines} lines, ${content.length} bytes)`,
+    };
+  } catch (err) {
+    return { ok: false, output: String(err) };
+  }
+}
+
 /** Files a unified diff touches, for the hook payload. */
 export function patchPaths(patch: string): string[] {
   const paths = new Set<string>();
@@ -348,6 +383,37 @@ export function patchPaths(patch: string): string[] {
     if (m?.[1] && m[1] !== "/dev/null") paths.add(m[1].trim());
   }
   return [...paths];
+}
+
+/**
+ * One line naming the likely cause of a rejected patch.
+ *
+ * `git apply` reports what it found, not what to do about it, and its wording
+ * assumes a human who knows the diff format. Across a campaign of failures the
+ * causes fell into three buckets and none of them are guessable from git's own
+ * message: a diff with no `+++` header at all, a header naming a path that is
+ * not in the tree, and hunks whose context does not match the file — which for
+ * a model usually means it diffed against what it believes the file contains
+ * rather than reading it first.
+ *
+ * The hint is appended, never substituted: git's message is the evidence and
+ * hiding it would make a wrong hint unfalsifiable.
+ */
+export function patchHint(patch: string, gitOutput: string): string {
+  const hasHeader = /^\+\+\+ /m.test(patch) && /^--- /m.test(patch);
+  if (!hasHeader) {
+    return "\nhint: no `--- a/path` and `+++ b/path` header pair was found."
+      + " A bare `@@` hunk cannot be applied — say which file it belongs to.";
+  }
+  if (/does not exist in index|No such file or directory|new file/i.test(gitOutput)) {
+    return "\nhint: the path in the header is not in the tree."
+      + " Check it, and for a file being created use `--- /dev/null`.";
+  }
+  if (/patch failed|while searching for|does not apply/i.test(gitOutput)) {
+    return "\nhint: the context lines do not match the file."
+      + " Read the file and diff against what it actually contains.";
+  }
+  return "";
 }
 
 /* ------------------------------------------------------------------ */
@@ -369,7 +435,7 @@ export class ToolExecutor implements Executor {
     this.timeoutMs = opts.timeoutMs ?? 120_000;
     this.policy =
       opts.policy ??
-      fullPolicy(opts.cwd, ["done", "bash", "read", "apply_patch", "term", "skill", "task", "mcp"]);
+      fullPolicy(opts.cwd, ["done", "bash", "read", "write", "apply_patch", "term", "skill", "task", "mcp"]);
   }
 
   async run(call: ToolInvocation, signal?: AbortSignal): Promise<ToolResult> {
@@ -399,7 +465,12 @@ export class ToolExecutor implements Executor {
     const result = await this.dispatch(call, signal);
 
     if (hooks) {
-      const paths = call.name === "apply_patch" ? patchPaths(str(call.arguments, "patch")) : [];
+      const paths =
+        call.name === "apply_patch"
+          ? patchPaths(str(call.arguments, "patch"))
+          : call.name === "write"
+            ? [str(call.arguments, "path")]
+            : [];
       const post = await runHooks(hooks, {
         event: "PostToolUse",
         tool: call.name,
@@ -452,19 +523,49 @@ export class ToolExecutor implements Executor {
       case "read":
         return readSlice(str(args, "path"), cwd, num(args, "offset"), num(args, "limit"));
 
+      case "write":
+        return writeFile(str(args, "path"), str(args, "content"), cwd);
+
       case "apply_patch": {
         // argv and stdin, never a shell. The patch is data: a heredoc
         // delimiter, a backtick or a `$(...)` inside it is text here, and a
         // program if it goes through a shell.
+        //
+        // Three departures from a bare `git apply`, each one measured against
+        // a campaign in which this tool failed 11 times out of 12 and the
+        // model gave up on it and rewrote whole files through `bash` instead.
+        //
+        // A trailing newline is added when the model left it off. `git apply`
+        // requires the patch to end in one and reports its absence as "corrupt
+        // patch at line N", pointing at the last line rather than at the
+        // missing byte after it. Five of those eleven patches ended without a
+        // newline.
+        //
+        // `--recount` derives hunk line counts from the hunk body instead of
+        // trusting the `@@` header. Getting `@@ -1,5 +1,7 @@` right means
+        // counting two interleaved sequences by hand, and the counts were
+        // wrong far more often than the diff itself was. Neither of these two
+        // is sufficient alone: on the one patch where both applied, the
+        // newline alone still failed and `--recount` alone still failed.
+        //
+        // `LC_ALL=C` because git speaks the host's language otherwise. On the
+        // box this was measured on, the model was being handed
+        // "error: 패치가 14번 줄에서 망가졌습니다" and asked to repair from it.
+        // It also means the tool behaves the same on every machine, which a
+        // harness that reports numbers has to.
+        const patch = str(args, "patch");
         const r = await runShell("git", {
-          argv: ["apply", "--whitespace=nowarn", "-"],
+          argv: ["apply", "--whitespace=nowarn", "--recount", "-"],
           cwd,
-          stdin: str(args, "patch"),
+          stdin: patch.endsWith("\n") ? patch : `${patch}\n`,
+          env: { ...process.env, LC_ALL: "C", LANG: "C" },
           timeoutMs: this.timeoutMs,
           ...(signal ? { signal } : {}),
         });
         if (r.aborted) return { ok: false, output: "(cancelled)" };
-        return { ok: r.code === 0, output: r.output.trim() || (r.code === 0 ? "applied" : `(exit ${r.code})`) };
+        if (r.code === 0) return { ok: true, output: r.output.trim() || "applied" };
+        const git = r.output.trim();
+        return { ok: false, output: `${git || `(exit ${r.code})`}${patchHint(patch, git)}` };
       }
 
       case "skill": {

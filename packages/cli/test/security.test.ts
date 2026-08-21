@@ -21,6 +21,7 @@ import {
   saveTrustStore,
   settingsHash,
 } from "@motifcode/hooks";
+import { CORE_TOOL_NAMES } from "@motifcode/tools";
 import { redactJournal, redactText } from "@motifcode/journal";
 import { DANGEROUS_SEQUENCES, sanitize } from "@motifcode/tui";
 import { ToolExecutor, encodeKeystrokes } from "../src/executor.js";
@@ -237,6 +238,50 @@ describe("read-only means read-only", () => {
     expect(temp.ok, temp.output).toBe(true);
     expect(temp.output).toContain("staged");
   }, 20_000);
+});
+
+/** A writing agent that has every core tool. */
+function writer(root: string) {
+  return policyForAgent({ root, tools: [...CORE_TOOL_NAMES], readOnly: false });
+}
+
+describe("writes stay inside the workspace, and read-only means it", () => {
+  it("refuses `write` to a read-only agent", () => {
+    // A new tool is a new way through the boundary. `write` is the reason the
+    // model stopped needing shell heredocs, which also means it is a direct
+    // path to the filesystem that did not exist before.
+    const policy = readOnlyPolicy("/repo", ["done", "bash", "read", "write"]);
+    expect(policy.allowedTools.has("write")).toBe(false);
+    expect(approvePolicy(policy, call("write", { path: "x.ts", content: "" })).allowed).toBe(false);
+  });
+
+  it("refuses a write that resolves outside the root", () => {
+    const p = writer("/repo");
+    for (const path of ["/etc/cron.d/x", "../../.ssh/authorized_keys"]) {
+      const v = approvePolicy(p, call("write", { path, content: "x" }));
+      expect(v.allowed, path).toBe(false);
+      // Narrowed rather than asserted: the refusal has to say which boundary it
+      // was, or a model cannot act on it.
+      if (!v.allowed) expect(v.reason).toContain("writes are confined");
+    }
+  });
+
+  it("refuses a write through a symlink that leaves the workspace", () => {
+    const dir = workspace();
+    const outside = workspace();
+    writeFileSync(join(outside, "target.txt"), "s", "utf8");
+    symlinkSync(join(outside, "target.txt"), join(dir, "innocent.txt"));
+    const p = writer(dir);
+    expect(approvePolicy(p, call("write", { path: "innocent.txt", content: "x" })).allowed).toBe(
+      false,
+    );
+  });
+
+  it("allows an ordinary relative write", () => {
+    const dir = workspace();
+    const p = writer(dir);
+    expect(approvePolicy(p, call("write", { path: "src/x.ts", content: "x" })).allowed).toBe(true);
+  });
 });
 
 describe("reads stay inside the workspace", () => {

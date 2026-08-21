@@ -40,9 +40,9 @@ export type Approval = { allowed: true } | { allowed: false; reason: string };
 /**
  * Tools a read-only agent cannot have at all.
  *
- * `apply_patch` writes by definition. `term` is a shell that outlives the call,
- * which no per-call sandbox can contain. `task` and `mcp` hand the work to
- * something else, and the something else has its own permissions.
+ * `write` and `apply_patch` write by definition. `term` is a shell that outlives
+ * the call, which no per-call sandbox can contain. `task` and `mcp` hand the
+ * work to something else, and the something else has its own permissions.
  *
  * `bash` is deliberately not on this list. Taking it away would leave the
  * explorer unable to run `rg`, which is most of what it exists to do; instead
@@ -51,7 +51,7 @@ export type Approval = { allowed: true } | { allowed: false; reason: string };
  * blocklist: the sandbox stops `python -c 'open("x","w")'` without anyone
  * having thought of it.
  */
-const DENIED_TO_READONLY = new Set(["term", "apply_patch", "task", "mcp"]);
+const DENIED_TO_READONLY = new Set(["write", "term", "apply_patch", "task", "mcp"]);
 
 export function readOnlyPolicy(root: string, tools: readonly string[]): ExecutionPolicy {
   return {
@@ -117,13 +117,19 @@ export function approve(policy: ExecutionPolicy, call: ToolInvocation): Approval
     };
   }
 
-  if (call.name === "read") {
+  // `write` is confined the same way `read` is, and for a stronger reason: a
+  // read that escapes leaks, a write that escapes damages. Both go through one
+  // check so the two cannot drift apart.
+  if (call.name === "read" || call.name === "write") {
     const path = call.arguments["path"];
-    if (typeof path !== "string") return { allowed: false, reason: "read needs a string path" };
+    if (typeof path !== "string") {
+      return { allowed: false, reason: `${call.name} needs a string path` };
+    }
     if (!isInside(policy.root, path)) {
+      const verb = call.name === "read" ? "reads" : "writes";
       return {
         allowed: false,
-        reason: `${path} resolves outside ${policy.root}; reads are confined to the working directory`,
+        reason: `${path} resolves outside ${policy.root}; ${verb} are confined to the working directory`,
       };
     }
   }
