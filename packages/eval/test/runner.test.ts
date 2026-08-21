@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { EvalManifest } from "../src/manifest.js";
 import type { PlannedRun } from "../src/results.js";
-import { runRow } from "../src/runner.js";
+import { runAll, runRow } from "../src/runner.js";
 import { WorktreeGrader } from "../src/worktree-grader.js";
 
 let repo: string;
@@ -166,6 +166,17 @@ describe("runner", () => {
     expect(row.status).toBe("model_transport_failure");
   });
 
+  it("reports the turn limit as an ending, not as a crash", async () => {
+    // `motif` exits non-zero for every ending except `done`, so a row that ran
+    // out of the manifest's turns arrives with a failing exit code and a
+    // perfectly good journal. Calling that a crash would put a harness failure
+    // in the results table where a budget outcome belongs.
+    const agent = fakeAgent(`${SESSION_END("turn_limit")}\nexit 1`);
+    const row = await runRow(options(agent), planned, instance());
+    expect(row.status).toBe("completed");
+    expect(row.agentEndReason).toBe("turn_limit");
+  });
+
   it("reports an agent that died without writing an ending as a crash", async () => {
     const agent = fakeAgent(`exit 3`);
     const row = await runRow(options(agent), planned, instance());
@@ -186,6 +197,41 @@ describe("runner", () => {
     const row = await runRow(brief, planned, instance());
     expect(row.status).toBe("agent_timeout");
     expect(row.grade?.status).toBe("passed");
+  });
+
+  it("runs rows concurrently and still returns them in plan order", async () => {
+    // Each row sleeps, so if the runner were serial the wall time would be at
+    // least rows x sleep. The assertion is on overlap rather than on a
+    // stopwatch value, which is what keeps this from being a flaky timing test.
+    const SLEEP_S = 1;
+    const ROWS = 4;
+    const agent = fakeAgent(`sleep ${SLEEP_S}\n${SESSION_END("done")}`);
+    const rows: PlannedRun[] = Array.from({ length: ROWS }, (_, i) => ({
+      ...planned,
+      seed: 100 + i,
+    }));
+
+    const started = Date.now();
+    const out = await runAll({ ...options(agent), concurrency: ROWS }, rows);
+    const elapsedS = (Date.now() - started) / 1000;
+
+    expect(out).toHaveLength(ROWS);
+    // Plan order, not completion order.
+    expect(out.map((r) => r.seed)).toEqual(rows.map((r) => r.seed));
+    // Every row actually ran rather than being dropped by the worker loop.
+    expect(out.every((r) => r.status === "completed")).toBe(true);
+    // Serial would be >= ROWS * SLEEP_S; allow generous slack for git and node.
+    expect(elapsedS).toBeLessThan(ROWS * SLEEP_S);
+  });
+
+  it("runs rows one at a time when concurrency is not asked for", async () => {
+    const agent = fakeAgent(SESSION_END("done"));
+    const rows: PlannedRun[] = [
+      { ...planned, seed: 200 },
+      { ...planned, seed: 201 },
+    ];
+    const out = await runAll(options(agent), rows);
+    expect(out.map((r) => r.seed)).toEqual([200, 201]);
   });
 
   it("leaves no worktree behind, whatever the row did", async () => {

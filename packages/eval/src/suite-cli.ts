@@ -137,7 +137,8 @@ async function main(): Promise<number> {
   if (!command || !benchmark || !out) {
     process.stderr.write(
       "usage: motif-suite <build|verify> --benchmark <polyglot checkout> --out <dir>\n" +
-        "       [--languages python,javascript] [--limit N] [--node-path <node_modules>]\n",
+        "       [--languages python,javascript] [--limit N] [--node-path <node_modules>]\n" +
+        "  run also takes --manifest, --agent, --model, [--endpoint] [--results] [--exclude] [--concurrency N] [--keep]\n",
     );
     return 2;
   }
@@ -310,6 +311,11 @@ async function campaign(
   const model = str(flags, "model");
   const results = str(flags, "results", "results.jsonl");
   const exclude = new Set(str(flags, "exclude").split(",").filter(Boolean));
+  const concurrency = Number(str(flags, "concurrency", "1"));
+  // A row that ends badly takes its checkout and journal with it, which is the
+  // right default for a campaign of hundreds and the wrong one the first time a
+  // status shows up that nobody expected.
+  const keepArtifacts = flags["keep"] === true || str(flags, "keep") === "true";
   if (!manifestPath || !agent || !model) {
     process.stderr.write("run needs --manifest, --agent and --model\n");
     return 2;
@@ -352,6 +358,8 @@ async function campaign(
       endpoint,
       model,
       workRoot,
+      concurrency,
+      keepArtifacts,
       onRow: (row) => {
         appendFileSync(results, JSON.stringify(row) + "\n");
         const mark = passed(row) ? "PASS" : row.status === "completed" ? "fail" : row.status;

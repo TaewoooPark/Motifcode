@@ -64,6 +64,23 @@ export interface RunnerOptions {
   /** Where agent checkouts and journals go. Removed per row unless kept. */
   workRoot: string;
   keepArtifacts?: boolean;
+  /**
+   * Rows in flight at once. Default 1.
+   *
+   * Rows are already isolated from each other — a private git worktree, a
+   * private work directory, a private journal — so running several is a
+   * scheduling decision rather than a correctness one. It is a decision worth
+   * making: a single decode stream on one accelerator leaves most of the
+   * memory bandwidth idle, and the same weights are read for every sequence in
+   * a batch, so aggregate throughput rises nearly linearly until the server's
+   * own sequence cap is reached.
+   *
+   * Do not set this above what the serving side admits concurrently. Past that
+   * point requests queue, per-row wall time grows, and rows start hitting
+   * `task_wall_timeout_seconds` — which scores them zero and quietly turns a
+   * scheduling mistake into a quality result.
+   */
+  concurrency?: number;
   onRow?: (row: CompletedRun) => void;
 }
 
@@ -153,10 +170,18 @@ async function runAgent(
       // The timeout is checked first: a process the runner killed cannot have
       // written a meaningful exit code, and reading one as a crash would
       // attribute the runner's own budget to the agent.
+      //
+      // The exit code is the weaker witness. `motif` exits non-zero whenever
+      // its loop ended on anything but `done`, so hitting the turn limit the
+      // manifest itself set exits 1 — and reading that as a crash reports a
+      // budget decision as a harness failure, which is the same mistake the
+      // timeout branch above exists to avoid. The journal says why the loop
+      // ended; believe it when it is there, and fall back to the exit code
+      // only when the agent died without writing an ending at all.
       let status: AgentOutcome["status"];
       if (timedOut) status = "agent_timeout";
       else if (endReason === "transport_error") status = "model_transport_failure";
-      else if (code !== 0 || endReason === undefined) status = "agent_crash";
+      else if (endReason === undefined) status = "agent_crash";
       else status = "completed";
       resolve({ status, ...(endReason ? { endReason } : {}), wallMs, journalPath });
     };
@@ -193,9 +218,17 @@ export async function runRow(
   mkdirSync(rowDir, { recursive: true });
 
   try {
-    await exec("git", ["worktree", "add", "--detach", "-f", checkout, instance.baseCommit], {
-      cwd: instance.repo,
-    });
+    // Serialized: `git worktree add` and `remove` both rewrite `.git/worktrees`
+    // in the instance repository, and two rows for the same instance — a second
+    // seed, a replicate — would be editing it at the same time. The call takes
+    // well under a second, so a single lock costs nothing measurable and
+    // removes a race that would surface as a grader_infra_error on one row in
+    // some runs and not others.
+    await withWorktreeLock(() =>
+      exec("git", ["worktree", "add", "--detach", "-f", checkout, instance.baseCommit], {
+        cwd: instance.repo,
+      }),
+    );
   } catch (err) {
     // The agent never started, so this is not a result about the agent.
     return { ...planned, status: "grader_infra_error", runId: undefined, agentEndReason: String(err).slice(0, 400) };
@@ -234,11 +267,34 @@ export async function runRow(
       wallMs: outcome.wallMs,
     };
   } finally {
-    await exec("git", ["worktree", "remove", "--force", checkout], { cwd: instance.repo }).catch(
-      () => undefined,
-    );
-    if (!opts.keepArtifacts) rmSync(rowDir, { recursive: true, force: true });
+    // Kept means kept: the journal says what the agent decided, the checkout
+    // says what it actually left behind, and a failure is usually only
+    // legible with both. Removing the worktree here while keeping its parent
+    // directory produced a row you could read the reasoning of and not the
+    // code it was reasoning about.
+    if (!opts.keepArtifacts) {
+      await withWorktreeLock(() =>
+        exec("git", ["worktree", "remove", "--force", checkout], { cwd: instance.repo }),
+      ).catch(() => undefined);
+      rmSync(rowDir, { recursive: true, force: true });
+    }
   }
+}
+
+/**
+ * One worktree bookkeeping operation at a time, process-wide.
+ *
+ * Not per repository: the map that would key it is one more thing to get wrong,
+ * and these calls are short enough that a global queue is invisible next to a
+ * row that spends minutes in the model.
+ */
+let worktreeQueue: Promise<unknown> = Promise.resolve();
+function withWorktreeLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = worktreeQueue.then(fn, fn);
+  // Keep the chain alive whether or not this link rejected; the caller still
+  // sees the rejection through `run`.
+  worktreeQueue = run.catch(() => undefined);
+  return run;
 }
 
 /**
@@ -253,22 +309,34 @@ export async function runAll(
   planned: readonly PlannedRun[],
 ): Promise<CompletedRun[]> {
   const byId = new Map(opts.instances.map((i) => [i.id, i]));
-  const out: CompletedRun[] = [];
+  // Indexed rather than appended: workers finish out of order, and the result
+  // order is part of what makes two campaigns comparable.
+  const out: CompletedRun[] = new Array(planned.length);
   mkdirSync(opts.workRoot, { recursive: true });
 
-  for (const row of planned) {
-    const instance = byId.get(row.instanceId);
-    if (!instance) {
-      // The manifest promised a row for an instance the suite does not have.
-      // It stays in the plan and scores zero rather than vanishing.
-      const missing: CompletedRun = { ...row, status: "missing" };
-      out.push(missing);
-      opts.onRow?.(missing);
-      continue;
+  const width = Math.max(1, Math.floor(opts.concurrency ?? 1));
+  let next = 0;
+
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const i = next++;
+      if (i >= planned.length) return;
+      const row = planned[i]!;
+      const instance = byId.get(row.instanceId);
+      if (!instance) {
+        // The manifest promised a row for an instance the suite does not have.
+        // It stays in the plan and scores zero rather than vanishing.
+        const missing: CompletedRun = { ...row, status: "missing" };
+        out[i] = missing;
+        opts.onRow?.(missing);
+        continue;
+      }
+      const done = await runRow(opts, row, instance);
+      out[i] = done;
+      opts.onRow?.(done);
     }
-    const done = await runRow(opts, row, instance);
-    out.push(done);
-    opts.onRow?.(done);
-  }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(width, planned.length) }, worker));
   return out;
 }
