@@ -185,6 +185,80 @@ describe("malformed output", () => {
   });
 });
 
+describe("a turn that announces an action and then stops", () => {
+  // The single most common way this model loses a turn, measured over a
+  // polyglot campaign: 135 turns produced no action at all, a median of 37
+  // completion tokens each, and the content was a sentence like "Let me write
+  // the file directly:" with nothing after it. Left alone it compounds — a
+  // no-action turn was followed by another 55.7% of the time against 20.6%
+  // after a turn that acted — because the failed turn and an identical
+  // instruction went into history, and the model imitated the pattern.
+  const ANNOUNCE = "Let me write the file directly:";
+
+  it("gives up on a task that has stopped acting instead of spending every turn", async () => {
+    const { emit } = collect();
+    const transport = new ScriptedTransport([ANNOUNCE], true);
+    const r = await runLoop({ ...base, transport, executor: okExecutor, emit, maxTurns: 25 });
+    expect(r.reason).toBe("no_action_limit");
+    // Four turns, not twenty-five. The longest run seen before this guard was
+    // eleven, every one of them a full model request.
+    expect(r.turns).toBe(4);
+  });
+
+  it("counts consecutively, so one bad turn among good ones costs nothing", async () => {
+    const { emit } = collect();
+    const transport = new ScriptedTransport(
+      [ANNOUNCE, toolCallBody("bash", { command: "ls" }), ANNOUNCE],
+      true,
+    );
+    const r = await runLoop({ ...base, transport, executor: okExecutor, emit, maxTurns: 25 });
+    expect(r.reason).toBe("no_action_limit");
+    // 1 announce, 1 tool call that resets the count, then four more.
+    expect(r.turns).toBe(6);
+  });
+
+  it("does not let the history grow a pattern to imitate", async () => {
+    const { emit } = collect();
+    const transport = new ScriptedTransport([ANNOUNCE], true);
+    await runLoop({ ...base, transport, executor: okExecutor, emit, maxTurns: 25 });
+    const sizes = transport.seen.map((r) => r.messages?.length ?? 0);
+    // The first failure adds the turn and one instruction. Every later one
+    // replaces the instruction in place, so the conversation stops growing.
+    expect(sizes[1]).toBeGreaterThan(sizes[0]!);
+    expect(sizes[2]).toBe(sizes[1]);
+    expect(sizes[3]).toBe(sizes[1]);
+  });
+
+  it("escalates what it says instead of repeating itself", async () => {
+    const { emit } = collect();
+    const transport = new ScriptedTransport([ANNOUNCE], true);
+    await runLoop({ ...base, transport, executor: okExecutor, emit, maxTurns: 25 });
+    const nudge = (i: number) => String(transport.seen[i]?.messages?.at(-1)?.content ?? "");
+    // Second attempt names the behaviour rather than the syntax rules.
+    expect(nudge(2)).toMatch(/Do not announce/);
+    // Third asks for the action alone.
+    expect(nudge(3)).toMatch(/nothing else/);
+    expect(nudge(1)).not.toMatch(/Do not announce/);
+  });
+
+  it("shows the model the tool output it was responding to", async () => {
+    const { emit } = collect();
+    const transport = new ScriptedTransport(
+      [toolCallBody("bash", { command: "pytest" }), ANNOUNCE],
+      true,
+    );
+    const executor: Executor = { run: async () => ({ ok: false, output: "E   assert 1 == 2" }) };
+    await runLoop({ ...base, transport, executor, emit, maxTurns: 25 });
+    const escalated = transport.seen
+      .map((r) => String(r.messages?.at(-1)?.content ?? ""))
+      .filter((c) => /Do not announce/.test(c));
+    expect(escalated.length).toBeGreaterThan(0);
+    // An instruction that only restates the format gives a stuck model nothing
+    // to act on.
+    expect(escalated[0]).toContain("assert 1 == 2");
+  });
+});
+
 describe("the action gate", () => {
   /** An executor that records every call it is asked to run. */
   function spy(): { calls: string[]; executor: Executor } {

@@ -114,6 +114,11 @@ export type SessionEndReason =
   | "turn_limit"
   | "breakage_limit"
   | "loop_detected"
+  // Consecutive turns that produced no action at all. Distinct from
+  // `breakage_limit`, which counts malformed actions across the whole task:
+  // this is the model announcing an action and then stopping, over and over,
+  // which no amount of remaining turn budget has ever recovered from.
+  | "no_action_limit"
   | "aborted"
   | "transport_error";
 

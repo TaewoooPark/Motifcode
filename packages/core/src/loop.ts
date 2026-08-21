@@ -100,6 +100,15 @@ export interface LoopOptions {
   channelPolicy?: ChannelPolicy;
   maxTurns?: number;
   maxRepairs?: number;
+  /**
+   * Consecutive no-action turns before the task is abandoned.
+   *
+   * Four, because the measured distribution of these runs is bimodal: most are
+   * one turn and recover, and the ones that reach three keep going to seven,
+   * nine, eleven. Each of those turns is a full model request, so the guard is
+   * worth more in wall clock than in score.
+   */
+  noActionLimit?: number;
   /** Retries for a server that died mid-session; GB10 makes this routine. */
   maxServerRetries?: number;
   /** Output cap per model step. Sent on the wire, not merely assumed. */
@@ -248,6 +257,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
     emit,
     maxTurns = 100,
     maxRepairs = 2,
+    noActionLimit = 4,
     maxServerRetries = 3,
     signal,
   } = opts;
@@ -301,6 +311,11 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
 
   let turn = resume?.turn ?? 0;
   let repairsThisTask = resume?.repairsThisTask ?? 0;
+  // Consecutive turns that produced nothing, and the last tool output, so the
+  // instruction sent after one of them can point at something concrete instead
+  // of repeating itself.
+  let consecutiveNoAction = 0;
+  let lastObservation = "";
   let pendingDone: string | null = resume?.pendingDone ?? null;
   let transportErrors = resume?.transportErrors ?? 0;
   let callSequence = resume?.nextCallSequence ?? 1;
@@ -508,20 +523,41 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
       }
       if (budget.exhausted) return finish("breakage_limit");
 
-      handBack(
-        repairPrompt(
-          leaked
-            ? "Your last turn did not produce a usable action. It looks like action syntax that failed to parse."
-            : "Your last turn produced no action.",
-          channel,
-        ),
+      consecutiveNoAction++;
+      if (consecutiveNoAction >= noActionLimit) {
+        // Every turn from here is another request against a model that has
+        // stopped acting, and the row still ends with nothing. The longest run
+        // observed before this guard existed was eleven turns, all of them
+        // "Let me write the file directly:" and then silence.
+        return finish("no_action_limit");
+      }
+
+      const nudge = repairPrompt(
+        leaked
+          ? "Your last turn did not produce a usable action. It looks like action syntax that failed to parse."
+          : "Your last turn produced no action.",
+        channel,
+        consecutiveNoAction,
+        lastObservation,
       );
+      if (consecutiveNoAction === 1) {
+        handBack(nudge);
+      } else {
+        // Neither the failed turn nor another copy of the instruction goes
+        // into history. The model has already been shown one example of a turn
+        // that stopped early and told what to do about it; adding a second
+        // makes a pattern, and it imitates the pattern. Replacing the
+        // instruction in place keeps the history the same length however many
+        // times this fires.
+        session.dropLast(1);
+        session.appendAll(codec.serializeHarnessTurn(nudge));
+      }
       emit({
         type: "repair",
         kind: "parse",
         reason: leaked ? "unparsed action" : "no action",
-        attempt: 1,
-        max: 1,
+        attempt: consecutiveNoAction,
+        max: noActionLimit,
       });
       await lifecycle("OnRepair", leaked ? "unparsed action" : "no action");
       checkpoint();
@@ -594,6 +630,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
 
     const repaired = parsed.actions.some((a) => a.kind === "tool" && a.repaired);
     budget.recordSuccess(repaired);
+    consecutiveNoAction = 0;
 
     // Completion, in two steps.
     //
@@ -675,6 +712,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
         }),
       );
       combinedOutput += output;
+      lastObservation = output;
       if (!result.ok) anyFailure = true;
       checkpoint();
     }
@@ -752,14 +790,58 @@ function refusalPrompt(refusals: readonly Refusal[], channel: ChannelId): string
   ].join("\n");
 }
 
-function repairPrompt(problem: string, channel: ChannelId): string {
+/**
+ * What to say after a turn that produced no action.
+ *
+ * The first version of this said the same three sentences every time, and one
+ * task received them eleven times in a row. Two things changed.
+ *
+ * It escalates. The observed failure is specific — the model writes one
+ * sentence announcing an action ("Let me write the file directly:") and then
+ * stops, a median of 37 completion tokens — so from the second attempt the
+ * instruction names that behaviour instead of describing well-formed syntax in
+ * the abstract, and from the third it asks for the action with no prose at all.
+ *
+ * It carries state. An instruction that repeats the format rules gives a stuck
+ * model nothing to act on; the tail of the last tool output is the thing it was
+ * about to respond to.
+ */
+function repairPrompt(
+  problem: string,
+  channel: ChannelId,
+  attempt = 1,
+  lastObservation = "",
+): string {
   const how =
     channel === "toolcall"
       ? "Emit a well-formed `<tool_call>` block. Watch backslashes: inside JSON strings, shell `$` and regex metacharacters must be escaped or avoided."
       : channel === "object"
         ? "Reply with a single well-formed JSON object matching the schema you were given."
         : "Reply with the XML shape you were given. Command bodies are verbatim — do not escape anything inside them.";
-  return `${problem}\n\n${how}\n\nEvery turn must contain at least one action, and the task ends only by calling \`done\`.`;
+
+  const parts = [problem, "", how];
+
+  if (attempt >= 2) {
+    parts.push(
+      "",
+      "You have now ended two turns without acting. Do not announce what you are" +
+        " about to do — a turn that says \"let me write the file\" and stops has" +
+        " done nothing. Put the action in this turn.",
+    );
+    const tail = lastObservation.trim().split("\n").slice(-20).join("\n");
+    if (tail) {
+      parts.push("", "The last tool output, which is what you were responding to:", "", tail);
+    }
+  }
+  if (attempt >= 3) {
+    parts.push("", "Reply with the action and nothing else. No preamble, no explanation.");
+  }
+
+  parts.push(
+    "",
+    "Every turn must contain at least one action, and the task ends only by calling `done`.",
+  );
+  return parts.join("\n");
 }
 
 function hashTools(names: string[]): string {
