@@ -239,15 +239,15 @@ skill, task, mcp` — 이고, 서브에이전트는 그 *앞부분*만 받습니
 **Node 20 이상**이 필요합니다. 패키지는 런타임 의존성이 없는 파일 하나입니다.
 
 ```bash
-npm install -g motifcode      # 설치 없이 바로 실행하려면: npx motifcode
+npm install -g motifcode      # `motif`와 `motifcode` 명령이 PATH에 생깁니다
 cd your-project
-motif
+motif                         # motifcode 도 같은 명령; 이 폴더에서 세션을 엽니다
 ```
 
-첫 세션은 키를 물어보고, 키가 확인되는 즉시 열립니다.
+첫 세션에서 Infron API 키를 한 번만 물어봅니다. `~/.motif/.env`에 저장되므로
+그다음부터는 `motif`만 치면 바로 시작합니다.
 
 ```
-
 ╭──────────────────────────────────────────────────────────────────────────────╮
 │ Paste your Infron API key to get started                                     │
 │ Get one at https://infron.ai/dashboard/apiKeys                               │

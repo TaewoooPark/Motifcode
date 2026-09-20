@@ -254,15 +254,15 @@ full 262,144-token window advertised.
 Needs **Node 20+**. The package is one file with no runtime dependencies.
 
 ```bash
-npm install -g motifcode      # or, without installing anything: npx motifcode
+npm install -g motifcode      # puts `motif` and `motifcode` on your PATH
 cd your-project
-motif
+motif                         # or motifcode; either opens the session here
 ```
 
-The first session asks for the key and opens as soon as it is accepted:
+The first session asks for your Infron API key, once. It is saved to
+`~/.motif/.env`, and every later `motif` starts straight away:
 
 ```
-
 ╭──────────────────────────────────────────────────────────────────────────────╮
 │ Paste your Infron API key to get started                                     │
 │ Get one at https://infron.ai/dashboard/apiKeys                               │
