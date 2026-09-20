@@ -93,6 +93,8 @@ function headArg(name: string, args: Record<string, unknown>): string {
     const prompt = typeof args["prompt"] === "string" ? args["prompt"] : "";
     return `${agent}${prompt ? `: ${prompt}` : ""}`;
   }
+  // A file tool is about its path, whichever argument the model sent first.
+  if ((name === "write" || name === "read") && typeof args["path"] === "string") return args["path"];
   const first = entries[0]!;
   let v = typeof first[1] === "string" ? first[1] : JSON.stringify(first[1]);
   // The model likes to prefix every command with `cd <cwd> &&`, which is

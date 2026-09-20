@@ -202,8 +202,8 @@ describe("interactive session", () => {
     expect(s.chat.transcript.map((m) => m.role)).toEqual(["user"]);
   });
 
-  it("queues a message sent while a task runs, and sends it after", async () => {
-    const t = new GateTransport([...done("one"), ...done("two")]);
+  it("queues messages sent while a task runs, and sends them in order after", async () => {
+    const t = new GateTransport([...done("one"), ...done("two"), ...done("three")]);
     t.gated = true;
     const s = session(t);
     open.push(s);
@@ -211,11 +211,14 @@ describe("interactive session", () => {
     await vi.waitFor(() => expect(s.chat.running).toBe(true));
     s.type("second\r");
     await vi.waitFor(() => expect(s.screen()).toContain("queued: second"));
+    s.type("third\r");
+    await vi.waitFor(() => expect(s.screen()).toContain("2 queued · next: second"));
     t.open();
-    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(2));
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(3));
     const tasks = t.seen.map((r) => r.messages[r.messages.length - 1]!.content);
     expect(tasks[0]).toBe("first");
     expect(tasks[1]).toContain("second");
+    expect(tasks[2]).toContain("third");
   });
 
   it("turns a trailing backslash into a line break", async () => {

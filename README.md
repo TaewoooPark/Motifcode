@@ -98,6 +98,15 @@ advertises the full 262,144-token window; agent sessions complete and the
 tests they write pass. The hosted endpoint has no `/v1/completions`, so the
 `object` and `raw` channels cannot run there — `doctor` says so.
 
+The interactive session has been checked against Claude Code's, feature by
+feature, under a pseudo-terminal against the real endpoint: a streamed reply,
+a file attached with `@`, a `!` shell line, a `#` note, `/commit` as a skill
+command producing a real commit, `/compact` producing a real summary, the
+permission prompt declining one command and allowing the next, `--continue`
+picking a conversation back up, and a window shrunk mid-session without
+leaving a row behind. What it does not have: image input, a rewind, and
+vim keys.
+
 Moving from a local server to a hosted one exposed a defect the fault-injected
 suite had never reached: with a server that extracts tool calls, the native
 channel wrote the assistant turn back **without its `tool_calls`**, so from turn

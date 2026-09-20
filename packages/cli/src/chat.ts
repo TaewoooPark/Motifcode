@@ -166,7 +166,8 @@ export class Chat {
   /** Tools the person allowed for the rest of the session with `a`. */
   private readonly alwaysAllowed = new Set<string>();
   private active: ActiveTask | null = null;
-  private queued: string | null = null;
+  /** Messages sent while a task ran, in order; each becomes a task when the prompt is free. */
+  private queued: string[] = [];
   private quitting = false;
   private ctrlCArmedAt = 0;
   private lastJournalPath: string | undefined;
@@ -212,7 +213,7 @@ export class Chat {
 
   /** Resolves once no task is running and nothing is queued. */
   whenIdle(): Promise<void> {
-    if (!this.active && this.queued === null) return Promise.resolve();
+    if (!this.active && this.queued.length === 0) return Promise.resolve();
     return new Promise((r) => this.idleWaiters.push(r));
   }
 
@@ -552,7 +553,10 @@ export class Chat {
   private hintText(): string {
     if (this.pendingConfirm) return "waiting for your answer";
     if (this.ctrlCArmedAt > 0 && this.now() - this.ctrlCArmedAt <= CTRL_C_WINDOW_MS) return "ctrl-c again to quit";
-    if (this.queued !== null) return `queued: ${this.queued.split("\n")[0]}`;
+    if (this.queued.length > 0) {
+      const first = this.queued[0]!.split("\n")[0]!;
+      return this.queued.length === 1 ? `queued: ${first}` : `${this.queued.length} queued · next: ${first}`;
+    }
     if (this.active) return RUNNING_HINT;
     if (this.settings.permissions === "auto") return "⏵⏵ auto-approve on (shift-tab to ask)";
     return IDLE_HINT;
@@ -566,15 +570,14 @@ export class Chat {
     if (text.trim() === "") return;
     if (this.opts.historyPath) appendHistory(this.opts.historyPath, text);
     if (this.shellBusy) {
-      this.queued = text;
+      this.queued.push(text);
       this.refresh();
       return;
     }
     if (text.startsWith("!") && text.length > 1) {
       await this.runShellLine(text.slice(1).trim());
-      const next = this.queued;
-      this.queued = null;
-      if (next !== null) await this.submit(next);
+      const next = this.queued.shift();
+      if (next !== undefined) await this.submit(next);
       return;
     }
     if (text.startsWith("#") && text.length > 1) {
@@ -586,7 +589,7 @@ export class Chat {
       // A skill as a command, the way Claude Code runs one: its instructions
       // become the task, with whatever followed the name as the input.
       if (this.active) {
-        this.queued = text;
+        this.queued.push(text);
         this.refresh();
         return;
       }
@@ -615,8 +618,9 @@ export class Chat {
       return;
     }
     if (this.active) {
-      // One queued message, the newest. Sent the moment the current task ends.
-      this.queued = text;
+      // Queued, in order, and sent one by one as the prompt frees up — the
+      // person keeps typing while the model works.
+      this.queued.push(text);
       this.refresh();
       return;
     }
@@ -845,9 +849,8 @@ export class Chat {
       const lines = await this.compactNow();
       this.screen.append({ kind: "system", title: "compaction", lines });
     }
-    const next = this.queued;
-    this.queued = null;
-    if (next !== null) {
+    const next = this.queued.shift();
+    if (next !== undefined) {
       await this.submit(next);
       return;
     }

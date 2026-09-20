@@ -53,6 +53,8 @@ export interface ScreenOptions {
   columns?: () => number;
   /** Show the model's reasoning in the transcript. Off by default. */
   showThinking?: boolean;
+  /** Show tool output in full rather than clipped. Off by default. */
+  verbose?: boolean;
   /** Prefer the shaded small hero over the plain one. */
   shadedHero?: boolean;
   /**
@@ -152,6 +154,7 @@ export class Screen {
     this.columns = opts.columns ?? (() => process.stdout.columns || 80);
     this.rowCount = opts.rows ?? (() => process.stdout.rows || 24);
     this.showThinking = opts.showThinking ?? false;
+    this.verbose = opts.verbose ?? false;
     this.shadedHero = opts.shadedHero ?? false;
     this.interactive = opts.interactive ?? Boolean(process.stdout.isTTY);
     this.now = opts.now ?? (() => Date.now());

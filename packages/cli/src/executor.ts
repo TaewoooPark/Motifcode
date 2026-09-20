@@ -461,9 +461,11 @@ export class ToolExecutor implements Executor {
     if (this.opts.confirm && CONFIRMED_TOOLS.has(call.name)) {
       const verdict = await this.opts.confirm(call);
       if (verdict === "deny") {
-        // Worded for the model: what happened, and what to do about it.
+        // Worded for the model: what happened, and what to do about it. Not
+        // a failure — nothing broke — so it does not start a repair turn
+        // telling the model to read the error and fix it.
         return {
-          ok: false,
+          ok: true,
           output: "The person declined this tool call. Do not retry it as it was; ask what they would prefer, or take a different approach.",
         };
       }

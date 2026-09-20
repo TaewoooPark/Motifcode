@@ -206,7 +206,8 @@ describe("executor", () => {
       },
     });
     const denied = await ex.run({ id: "1", name: "bash", arguments: { command: "echo x" }, repaired: false, validated: true });
-    expect(denied.ok).toBe(false);
+    // A decision, not a failure: no repair turn follows it.
+    expect(denied.ok).toBe(true);
     expect(denied.output).toContain("declined");
     // Reads are never a question.
     writeFileSync(join(cwd, "g.txt"), "g\n", "utf8");
