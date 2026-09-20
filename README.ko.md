@@ -58,7 +58,8 @@ Motifcode는 Claude Code의 모양을 한 터미널 코딩 에이전트입니다
 국내 모델 1위를 기록한 참이었습니다.
 ([디일렉](https://www.thelec.kr/news/articleView.html?idxno=61033),
 [비즈한국](https://bizhankook.com/articles/motif-eliminated-doks-round-3-change.html),
-[헬로티](https://www.hellot.net/news/article.html?no=114379))
+[헬로티](https://www.hellot.net/news/article.html?no=114379);
+현재는 점수체계 변경으로 34점으로 재조정되었음)
 
 코딩 모델의 *사용성*은 대부분 가중치의 속성이 아닙니다. 모델이 내보낸 도구 호출이
 파싱되는가, 프롬프트가 모델 자신의 채팅 템플릿이 기대하는 순서로 배치되는가, 한 번

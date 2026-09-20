@@ -62,7 +62,8 @@ released as open weights, scoring 47 on the Artificial Analysis Intelligence
 Index — first among Korean models.
 ([THE ELEC](https://www.thelec.kr/news/articleView.html?idxno=61033),
 [Biz Hankook](https://bizhankook.com/articles/motif-eliminated-doks-round-3-change.html),
-[HelloT](https://www.hellot.net/news/article.html?no=114379))
+[HelloT](https://www.hellot.net/news/article.html?no=114379);
+the score has since been revised to 34 following changes to the scoring system)
 
 *Usability*, for a coding model, is mostly not a property of the weights. It is
 whether the model's tool calls parse; whether the prompt is laid out the way its
