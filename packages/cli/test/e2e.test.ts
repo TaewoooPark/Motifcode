@@ -217,6 +217,18 @@ describe("cli process end to end", () => {
     expect(server.bodies).toHaveLength(0);
   }, 60_000);
 
+  it("prints only the reply with --print, for pipes", async () => {
+    // A reply with no tool call ends the task; nothing but the reply is
+    // written to stdout, so `motif -p` composes with other tools.
+    server = new MockServer(() => "</think>The answer is 42.");
+    await server.start();
+    const r = await runCli(["what is the answer?", "--print", "--endpoint", server.endpoint], dir);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toBe("The answer is 42.\n");
+    expect(server.bodies).toHaveLength(1);
+    expect(String(server.bodies[0]!.messages[0]!.content)).toContain("A reply with no tool call ends your turn");
+  }, 30_000);
+
   it("prints help and exits 2 for an empty task", async () => {
     // Without a terminal there is no prompt to open, so an empty command is
     // a usage error, as it always was.

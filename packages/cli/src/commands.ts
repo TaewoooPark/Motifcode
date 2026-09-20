@@ -61,8 +61,12 @@ export interface CommandContext {
   setTheme(name: string): string[];
   /** Load a journal's transcript into this conversation. */
   resume(file: string): Promise<string[]>;
-  /** Replace the transcript with the model's summary of it. */
-  compact(): Promise<string[]>;
+  /** Replace the transcript with the model's summary of it, concentrating on `focus` when given. */
+  compact(focus?: string): Promise<string[]>;
+  /** The project notes every task reads. */
+  notes(): string[];
+  /** Configured hooks and whether the project's are trusted. */
+  hooks(): string[];
   /** Forget the transcript and start again; the reason is shown. */
   newConversation(reason: string): void;
   /** Change the working directory; returns what happened. */
@@ -277,8 +281,19 @@ export const COMMANDS: readonly SlashCommand[] = [
   },
   {
     name: "compact",
-    description: "replace the transcript with the model's summary of it",
-    run: async (ctx) => ok("/compact", await ctx.compact()),
+    description: "replace the transcript with the model's summary of it; words after it say what to keep",
+    usage: "[focus]",
+    run: async (ctx, args) => ok("/compact", await ctx.compact(args)),
+  },
+  {
+    name: "notes",
+    description: "show the project notes every task reads (# at the prompt adds one)",
+    run: (ctx) => ok("/notes", ctx.notes()),
+  },
+  {
+    name: "hooks",
+    description: "show the hooks that run around tools, and whether the project's are trusted",
+    run: (ctx) => ok("/hooks", ctx.hooks()),
   },
   {
     name: "compact-at",
@@ -359,7 +374,7 @@ export const COMMANDS: readonly SlashCommand[] = [
   },
 ];
 
-const ALIASES: Record<string, string> = { exit: "quit", clear: "new", q: "quit" };
+const ALIASES: Record<string, string> = { exit: "quit", clear: "new", q: "quit", cost: "status", memory: "notes" };
 
 export function findCommand(name: string): SlashCommand | undefined {
   const key = ALIASES[name.toLowerCase()] ?? name.toLowerCase();

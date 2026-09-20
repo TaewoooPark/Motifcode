@@ -238,6 +238,12 @@ export class Screen {
     this.paint();
   }
 
+  /** The terminal's window title, when this is a terminal. */
+  setTitle(text: string): void {
+    if (!this.interactive) return;
+    this.write(`\x1b]0;${text.replace(/[\x00-\x1f\x07]/g, "")}\x07`);
+  }
+
   /** The fixed part of the right side of the line under the prompt — the model id. */
   setLabel(text: string): void {
     if (this.label === text) return;

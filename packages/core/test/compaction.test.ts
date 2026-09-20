@@ -51,6 +51,13 @@ describe("the summary request", () => {
     expect(req.tools).toHaveLength(CORE_TOOLS.length);
   });
 
+  it("passes the person's focus on to the summary prompt", async () => {
+    const t = new ScriptedTransport(["</think>ok"]);
+    await summarizeTranscript({ transport: t, messages: [{ role: "user", content: "t" }], tools: [], focus: "the failing test" });
+    const last = t.seen[0]!.messages[t.seen[0]!.messages.length - 1]!;
+    expect(String(last.content)).toContain("concentrate on: the failing test");
+  });
+
   it("refuses an empty summary, and drops a tool call the model made anyway", async () => {
     const empty = new ScriptedTransport(["</think>"]);
     await expect(

@@ -22,9 +22,16 @@ export interface ComposerSnapshot {
   cursor: number;
 }
 
+/** A paste longer than this is kept aside and shown as a placeholder. */
+export const PASTE_COLLAPSE_LINES = 8;
+export const PASTE_COLLAPSE_CHARS = 800;
+
 export class Composer {
   private chars: string[] = [];
   private pos = 0;
+  /** Pasted blocks held behind their placeholders until the draft is sent. */
+  private readonly pastes = new Map<number, string>();
+  private pasteSequence = 0;
   private readonly history: string[] = [];
   /** Index into history while browsing, or null when editing a fresh line. */
   private browsing: number | null = null;
@@ -63,6 +70,29 @@ export class Composer {
     this.chars.splice(this.pos, 0, ...incoming);
     this.pos += incoming.length;
     this.browsing = null;
+  }
+
+  /**
+   * Insert a paste, collapsing a long one to `[paste #n: 42 lines]`.
+   *
+   * Claude Code's behaviour, and for the same reason: a pasted stack trace
+   * or file turns the composer into a wall the person cannot see their own
+   * words in. The text goes to the model whole when the draft is sent.
+   */
+  paste(text: string): void {
+    const lines = text.split("\n").length;
+    if (lines <= PASTE_COLLAPSE_LINES && text.length <= PASTE_COLLAPSE_CHARS) {
+      this.insert(text);
+      return;
+    }
+    const id = ++this.pasteSequence;
+    this.pastes.set(id, text);
+    this.insert(`[paste #${id}: ${lines} lines] `);
+  }
+
+  /** The draft with every paste placeholder replaced by its text. */
+  expanded(text = this.text): string {
+    return text.replace(/\[paste #(\d+): \d+ lines\]/g, (m, id: string) => this.pastes.get(Number(id)) ?? m);
   }
 
   backspace(): void {
@@ -167,9 +197,11 @@ export class Composer {
    * an exact repeat of the last one.
    */
   submit(): string {
-    const text = this.text.replace(/\s+$/, "");
-    if (text !== "" && this.history[this.history.length - 1] !== text) this.history.push(text);
+    const shown = this.text.replace(/\s+$/, "");
+    const text = this.expanded(shown);
+    if (shown !== "" && this.history[this.history.length - 1] !== shown) this.history.push(shown);
     this.clear();
+    this.pastes.clear();
     return text;
   }
 

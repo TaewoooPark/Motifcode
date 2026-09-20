@@ -79,6 +79,21 @@ describe("editing", () => {
     expect(c.text).toBe("ab\ncd");
   });
 
+  it("collapses a long paste to a placeholder and sends the whole thing", () => {
+    const c = new Composer();
+    const big = Array.from({ length: 30 }, (_, i) => `line ${i}`).join("\n");
+    c.insert("look: ");
+    c.paste(big);
+    expect(c.text).toBe("look: [paste #1: 30 lines] ");
+    c.insert("ok");
+    const sent = c.submit();
+    expect(sent.startsWith("look: line 0\nline 1")).toBe(true);
+    expect(sent.endsWith("line 29 ok")).toBe(true);
+    // A short paste is just text.
+    c.paste("two\nlines");
+    expect(c.text).toBe("two\nlines");
+  });
+
   it("trims trailing whitespace on submit and skips repeats in history", () => {
     const c = new Composer();
     c.insert("task  \n");

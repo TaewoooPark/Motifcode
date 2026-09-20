@@ -30,10 +30,12 @@ function fakeContext(overrides: Partial<CommandContext> = {}) {
       settings.theme = name;
       return [`theme set to ${name}`];
     },
-    compact: async () => {
-      calls.push("compact");
+    compact: async (focus) => {
+      calls.push(`compact ${focus ?? ""}`);
       return ["compacted"];
     },
+    notes: () => ["- a note"],
+    hooks: () => ["PostToolUse  [apply_patch] true"],
     persist: (key, value) => {
       calls.push(`persist ${key}=${JSON.stringify(value)}`);
       return "/home/u/.motif/settings.json";
@@ -168,7 +170,13 @@ describe("commands", () => {
   it("compacts on request and sets the threshold", async () => {
     const { ctx, settings, calls } = fakeContext();
     expect((await runSlash("/compact", ctx)).lines).toEqual(["compacted"]);
-    expect(calls).toContain("compact");
+    expect(calls).toContain("compact ");
+    await runSlash("/compact keep the file list", ctx);
+    expect(calls).toContain("compact keep the file list");
+    expect((await runSlash("/notes", ctx)).lines).toEqual(["- a note"]);
+    expect((await runSlash("/memory", ctx)).lines).toEqual(["- a note"]);
+    expect((await runSlash("/hooks", ctx)).lines[0]).toContain("PostToolUse");
+    expect((await runSlash("/cost", ctx)).lines).toEqual(["status line"]);
     await runSlash("/compact-at 0.5", ctx);
     expect(settings.compactAt).toBe(0.5);
     expect((await runSlash("/compact-at 3", ctx)).error).toBe(true);

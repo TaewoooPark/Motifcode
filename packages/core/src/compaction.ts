@@ -94,6 +94,8 @@ export interface SummarizeOptions {
   tools: Tool[];
   maxTokens?: number;
   signal?: AbortSignal;
+  /** What the person asked the summary to concentrate on, when they said. */
+  focus?: string;
 }
 
 /**
@@ -105,8 +107,11 @@ export interface SummarizeOptions {
  * treats that as a failed compaction rather than as a history of nothing.
  */
 export async function summarizeTranscript(opts: SummarizeOptions): Promise<string> {
+  const prompt = opts.focus
+    ? `${SUMMARIZATION_PROMPT}\n\nThe person asked the summary to concentrate on: ${opts.focus}`
+    : SUMMARIZATION_PROMPT;
   const response = await opts.transport.complete({
-    messages: [...opts.messages, { role: "user", content: SUMMARIZATION_PROMPT }],
+    messages: [...opts.messages, { role: "user", content: prompt }],
     tools: opts.tools,
     ...(opts.maxTokens !== undefined ? { maxTokens: opts.maxTokens } : {}),
     ...(opts.signal ? { signal: opts.signal } : {}),

@@ -280,6 +280,24 @@ function projectTrusted(cwd: string, content: string, trustFlag: string | boolea
   return again.trusted && again.record.settingsSha256 === trustFlag;
 }
 
+/** What `/hooks` shows: every configured hook, and where the project's stand. */
+function describeHooks(cwd: string, hooks: HookConfig): string[] {
+  const lines: string[] = [];
+  for (const [event, defs] of Object.entries(hooks)) {
+    for (const d of defs ?? []) lines.push(`${event.padEnd(12)} ${d.matcher ? `[${d.matcher}] ` : ""}${d.command}${d.blocking ? "  (blocking)" : ""}`);
+  }
+  if (lines.length === 0) lines.push("no hooks configured");
+  const file = join(cwd, CONFIG_DIR, "settings.json");
+  if (existsSync(file)) {
+    const content = readFileSync(file, "utf8");
+    const trusted = checkTrust(loadTrustStore(), cwd, content).trusted;
+    lines.push("", `${file}: ${trusted ? "trusted" : "present but not trusted — its hooks and settings are not applied; run motif trust"}`);
+  } else {
+    lines.push("", `${file}: absent (the defaults above apply)`);
+  }
+  return lines;
+}
+
 function loadProjectNotes(cwd: string): string | undefined {
   for (const name of ["AGENTS.md", "CLAUDE.md", join(CONFIG_DIR, "NOTES.md")]) {
     const file = join(cwd, name);
@@ -303,6 +321,7 @@ const HELP = `motif ${VERSION} — a coding agent built for Motif-3
 
   motif                     open the interactive session (a terminal is required)
   motif "<task>"            run one task and exit; add --interactive to stay
+  motif -p "<question>"     print only the final reply, for scripts and pipes (also --print)
   motif doctor              check the endpoint, the credentials and what the server produces
   motif sessions            list recorded sessions
   motif resume <file>       resume an interrupted session
@@ -758,6 +777,7 @@ async function main(): Promise<number> {
   // error. Without a terminal the old answer stands: a pipe cannot host a
   // prompt, and printing help is the honest response to an empty command.
   const wantsChat = args.flags["interactive"] === true || args.flags["chat"] === true || args.flags["continue"] === true;
+  const printOnly = args.flags["print"] === true || args.flags["p"] === true;
   const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
   if (wantsChat && !tty) {
     throw new UsageError("--interactive needs a terminal on stdin and stdout");
@@ -782,6 +802,7 @@ async function main(): Promise<number> {
       persist: (key, value) => saveUserSetting(key, value as never),
       historyPath: join(cwd, CONFIG_DIR, "history.jsonl"),
       pluginLines: describePlugins(plugins(cwd)),
+      hookLines: describeHooks(cwd, hooks),
       notesPath: join(cwd, CONFIG_DIR, "NOTES.md"),
       ...(args.flags["continue"] === true
         ? { continueFrom: listSessions(join(cwd, CONFIG_DIR, "sessions"))[0]?.path ?? "" }
@@ -805,6 +826,44 @@ async function main(): Promise<number> {
   if (!task) {
     process.stdout.write(HELP);
     return 2;
+  }
+
+  if (printOnly) {
+    // The conversational contract without the conversation: a reply ends
+    // the task and is written to stdout, nothing else is. For pipes.
+    const transport = new HttpTransport({ endpoint, model, ...(apiKey !== undefined ? { apiKey } : {}) });
+    const executor = new ToolExecutor({
+      cwd,
+      hooks,
+      skills,
+      policy: policyForAgent({ root: cwd, tools: activeToolNames, readOnly: false }),
+    });
+    try {
+      const result = await runLoop({
+        transport,
+        tools: activeTools,
+        system: (ch) => buildSystemPrompt({ mode: "chat", channel: ch, tools: activeTools, skills, agents, ...(projectNotes !== undefined ? { projectNotes } : {}), cwd }),
+        userTask: task,
+        executor,
+        emit: (e) => {
+          if (e.type === "notice" && e.level === "error") process.stderr.write(`${e.text}\n`);
+        },
+        scopeId: "root",
+        repo: { cwd },
+        channel,
+        channelPolicy,
+        maxTurns,
+        ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+        ...(seed !== undefined ? { seed } : {}),
+        replyEnds: true,
+        confirmDone: false,
+      });
+      if (result.summary) process.stdout.write(result.summary.replace(/\s+$/, "") + "\n");
+      if (result.reason !== "done") process.stderr.write(`ended: ${result.reason}\n`);
+      return result.reason === "done" ? 0 : 1;
+    } finally {
+      executor.close();
+    }
   }
 
   const transport = new HttpTransport({ endpoint, model, ...(apiKey !== undefined ? { apiKey } : {}) });

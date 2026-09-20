@@ -91,6 +91,8 @@ export interface ChatOptions {
   historyPath?: string;
   /** Lines for `/plugins`. */
   pluginLines?: string[];
+  /** Lines for `/hooks`. */
+  hookLines?: string[];
   /** Where `#` notes go; also what the system prompt reads as project notes. */
   notesPath?: string;
   /** A journal to continue from before the first prompt — `--continue`. */
@@ -229,6 +231,7 @@ export class Chat {
         });
       }
       this.screen.setLabel(this.settings.model);
+      this.screen.setTitle(`motif · ${this.settings.cwd.split("/").pop() ?? this.settings.cwd}`);
       if (!this.opts.apiKey) {
         this.screen.append({
           kind: "notice",
@@ -279,7 +282,7 @@ export class Chat {
         else this.composer.insert(key.text);
         break;
       case "paste":
-        this.composer.insert(key.text);
+        this.composer.paste(key.text);
         break;
       case "newline":
         this.composer.insert("\n");
@@ -719,6 +722,7 @@ export class Chat {
 
     const abort = new AbortController();
     this.active = { task, journal, transport, abort, scope };
+    this.screen.setTitle(`✳ motif · ${(display ?? task).split("\n")[0]!.slice(0, 40)}`);
     this.refresh();
 
     const sink = journal.sinkFor(scope);
@@ -825,6 +829,7 @@ export class Chat {
     } finally {
       this.active = null;
       this.screen.setActivity(null);
+      this.screen.setTitle(`motif · ${this.settings.cwd.split("/").pop() ?? this.settings.cwd}`);
       this.totals.tasks += 1;
       forgetFiles();
       this.refresh();
@@ -868,7 +873,7 @@ export class Chat {
    * Replace the transcript with the model's summary of it, Codex-style: the
    * person's messages stay verbatim, the rest becomes a handoff.
    */
-  private async compactNow(): Promise<string[]> {
+  private async compactNow(focus = ""): Promise<string[]> {
     if (this.history.length === 0) return ["nothing to compact; the conversation is empty"];
     const before = this.totals.lastContext;
     const transport = (this.opts.makeTransport ?? defaultTransport)(this.settings, this.opts.apiKey);
@@ -878,6 +883,7 @@ export class Chat {
         transport,
         messages: [{ role: "system", content: this.systemFor(this.settings.channel) }, ...this.history],
         tools: this.opts.tools,
+        ...(focus ? { focus } : {}),
       });
       this.history = buildCompactedHistory(this.tasks, summary);
       this.screen.apply({ type: "compaction", beforeTokens: before, summaryChars: summary.length, summary });
@@ -1050,7 +1056,13 @@ export class Chat {
         this.refresh();
         return [`theme set to ${name}`];
       },
-      compact: () => this.compactNow(),
+      compact: (focus) => this.compactNow(focus),
+      notes: () => {
+        const path = this.opts.notesPath ?? join(this.settings.cwd, ".motif", "NOTES.md");
+        if (!existsSync(path)) return [`no notes yet; # <text> at the prompt writes ${path}`];
+        return [path, "", ...readFileSync(path, "utf8").replace(/\s+$/, "").split("\n")];
+      },
+      hooks: () => this.opts.hookLines ?? ["no hooks"],
       persist: (key, value) => (this.opts.persist ? this.opts.persist(key, value) : null),
       doctor: async () =>
         formatChecks(
