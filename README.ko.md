@@ -46,10 +46,7 @@ Motifcode는 Claude Code의 모양을 한 터미널 코딩 에이전트입니다
 <br>
 
 <p align="center">
-  <img src="docs/benchmark.svg" alt="Aider polyglot 벤치마크의 Motif-3: 213개 인스턴스 통과율 Motifcode 92.0%, OpenCode 83.1%, Codex 79.8%, 언어별 결과 포함" width="912">
-</p>
-<p align="center">
-  <sub>Aider polyglot(Exercism 문제 213개, 6개 언어)에서 같은 Motif-3를 세 하네스로 돌린 결과. 인스턴스당 1회 실행. 방법과 전체 행은 <a href="#벤치마크">벤치마크</a> 절과 <a href="packages/eval/REPORT.md"><code>packages/eval/REPORT.md</code></a>.</sub>
+  <img src="docs/screen-large.jpg" alt="넓은 터미널에서 실행한 motif" width="912">
 </p>
 
 ---
@@ -277,6 +274,15 @@ Motif-3는 총 314B 매개변수에 토큰당 13.2B가 활성화되는 mixture-o
 ---
 
 ## 벤치마크
+
+> 다만 Aider polyglot만으로는 성능을 완전하게 비교할 수 없습니다. 두 파일짜리
+> 저장소에서 명세를 코드로 옮기고 테스트를 돌리는 능력을 인스턴스당 1회로 잰
+> 것이라, Motif-3의 공식 점수가 나온 SWE-bench Verified와 Terminal-Bench 2.1
+> 같은 벤치마크를 같은 세 하네스로 추가 시행할 필요가 있습니다.
+
+<p align="center">
+  <img src="docs/benchmark.svg" alt="Aider polyglot 벤치마크의 Motif-3: 213개 인스턴스 통과율 Motifcode 92.0%, OpenCode 83.1%, Codex 79.8%, 언어별 결과 포함" width="912">
+</p>
 
 위의 주장을 2026-09-20/21에 측정했습니다. 같은 모델을 세 하네스에 물려 Aider polyglot
 벤치마크(C++, Go, Java, JavaScript, Python, Rust의 Exercism 문제 213개, 225개 중 12개는

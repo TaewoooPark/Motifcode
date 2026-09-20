@@ -47,10 +47,7 @@ different base URL.
 <br>
 
 <p align="center">
-  <img src="docs/benchmark.svg" alt="Motif-3 on the Aider polyglot benchmark: Motifcode 92.0%, OpenCode 83.1%, Codex 79.8% pass rate over 213 instances, with per-language results" width="912">
-</p>
-<p align="center">
-  <sub>Aider polyglot (213 Exercism exercises, six languages), one run per instance, the same Motif-3 behind three harnesses. Method and every row: <a href="#benchmark">Benchmark</a> and <a href="packages/eval/REPORT.md"><code>packages/eval/REPORT.md</code></a>.</sub>
+  <img src="docs/screen-large.jpg" alt="motif in a wide terminal" width="912">
 </p>
 
 ---
@@ -287,6 +284,16 @@ so Codex, Claude Code and other harnesses reach the same model.
 ---
 
 ## Benchmark
+
+> Aider polyglot alone cannot settle the comparison. It measures spec-to-code
+> with a test loop in a two-file repository, one run per instance. SWE-bench
+> Verified and Terminal-Bench 2.1, the benchmarks behind Motif-3's published
+> scores, still need to be run with the same three harnesses before the gap
+> can be called general.
+
+<p align="center">
+  <img src="docs/benchmark.svg" alt="Motif-3 on the Aider polyglot benchmark: Motifcode 92.0%, OpenCode 83.1%, Codex 79.8% pass rate over 213 instances, with per-language results" width="912">
+</p>
 
 The claim above was measured on 2026-09-20/21: the same model behind three
 harnesses on the Aider polyglot benchmark — 213 Exercism exercises across C++,

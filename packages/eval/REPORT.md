@@ -2,6 +2,8 @@
 
 **Date:** 2026-09-21 (KST) · **Model:** `motif/motif-3` (Motif Technologies, 314B-A13B MoE) via Infron · **Suite:** Aider polyglot-benchmark, 213 instances · **Harnesses:** motifcode 0.3.0, codex-cli 0.154.0, opencode 1.17.9
 
+This campaign was a first, deliberately small measurement. The Aider polyglot benchmark was chosen to test performance quickly: it is the only agentic coding suite the machine at hand could run without Docker, and it exercises spec-to-code with a test loop rather than repository work. SWE-bench Verified and Terminal-Bench 2.1, the benchmarks behind Motif-3's published scores, have not been run with these harnesses; Section 8 lists the other limits.
+
 Every number in this report is computed by `make_report.py` from the campaign directory: the runner's rows (`results/*.jsonl`), the per-row logs (`logs/`), the manifests and `results/campaign.log`. Those raw artifacts are not in this repository; the kit that produces them is `packages/eval/polyglot-bench/` (Section 10, *How to reproduce*).
 
 ## 1. Executive summary
