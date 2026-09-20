@@ -96,6 +96,10 @@ export const term = {
   hideCursor: `${ESC}?25l`,
   showCursor: `${ESC}?25h`,
   clearLine: `${ESC}2K`,
+  /** Erase the visible screen; scrollback is untouched. */
+  clearScreen: `${ESC}2J`,
+  /** Top-left of the visible screen. */
+  home: `${ESC}H`,
   lineStart: "\r",
   up: (n: number) => (n > 0 ? `${ESC}${n}A` : ""),
   down: (n: number) => (n > 0 ? `${ESC}${n}B` : ""),

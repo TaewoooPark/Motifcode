@@ -14,9 +14,14 @@
  * screen. Every footer line is at most one terminal row wide: the footer is
  * cleared by counting rows upward, and a line the terminal wrapped on its own
  * is a row the count does not know about, so a long command left its first
- * half behind on every repaint. And a resize is not a repaint: the terminal
- * reflows the rows already on screen, so the count has to be redone at the
- * new width before anything is cleared.
+ * half behind on every repaint. And a resize is not a repaint. Terminals
+ * reflow what is on screen when they are narrowed, each in its own way and
+ * with the cursor wherever they choose to leave it — measured on tmux, which
+ * splits every over-wide row and parks the cursor at the top — so nothing
+ * written before the resize can be found again by counting. Instead the
+ * visible screen is erased and rebuilt: the tail of the transcript at the
+ * new width, then the footer. Scrollback is untouched, and this is what
+ * Claude Code's renderer does when the terminal changes under it.
  *
  * The terminal's cursor is left inside the composer after each paint, so the
  * terminal's own input method composes where the text will land — Hangul
@@ -24,9 +29,10 @@
  */
 
 import { appendCell, initialState, reduce, type Cell, type ViewState } from "./cells.js";
-import type { ComposerRender } from "./composer.js";
+import { renderComposer, type ComposerSnapshot } from "./composer.js";
 import { heroLines, pickHero, welcomeLines, type HeroContext, type WelcomeContext } from "./hero.js";
 import { BRACKETED_PASTE, KeyDecoder, type Key } from "./keys.js";
+import { renderMenu, type MenuItem } from "./menu.js";
 import {
   BULLET,
   renderPendingStyled,
@@ -56,13 +62,23 @@ export interface ScreenOptions {
   interactive?: boolean;
   /** Injected for tests; defaults to `Date.now`. */
   now?: () => number;
+  /** Terminal height, for rebuilding the screen after a resize. */
+  rows?: () => number;
 }
 
-/** What the footer shows for the prompt: the editor's rows and, under them, a menu. */
+/**
+ * What the footer shows for the prompt: the draft, and under it a menu.
+ *
+ * The draft and the menu items, not their rows: rows depend on the width,
+ * and the width is the screen's to know. A composer rendered by the
+ * controller at one width and painted by the screen at another was how a
+ * resize left a 120-column row on a 70-column screen.
+ */
 export interface ComposerView {
-  render: ComposerRender;
-  /** Rows under the input — the slash-command menu — with the selected index. */
-  menu?: { rows: string[]; selected: number };
+  draft: ComposerSnapshot;
+  placeholder?: string;
+  /** The slash-command menu: the matching items and which is selected. */
+  menu?: { items: MenuItem[]; selected: number };
 }
 
 export type KeyHandler = (key: Key) => void;
@@ -99,6 +115,8 @@ export class Screen {
   private shortcutsOpen = false;
   private readonly write: (s: string) => void;
   private readonly columns: () => number;
+  private readonly rowCount: () => number;
+  private resizeTimer: NodeJS.Timeout | null = null;
   private showThinking: boolean;
   private readonly shadedHero: boolean;
   private readonly interactive: boolean;
@@ -108,6 +126,7 @@ export class Screen {
   constructor(opts: ScreenOptions = {}) {
     this.write = opts.write ?? ((s) => process.stdout.write(s));
     this.columns = opts.columns ?? (() => process.stdout.columns || 80);
+    this.rowCount = opts.rows ?? (() => process.stdout.rows || 24);
     this.showThinking = opts.showThinking ?? false;
     this.shadedHero = opts.shadedHero ?? false;
     this.interactive = opts.interactive ?? Boolean(process.stdout.isTTY);
@@ -239,7 +258,14 @@ export class Screen {
         else if (key.type === "ctrl" && key.key === "c") process.kill(process.pid, "SIGINT");
       }
     };
-    const onResize = (): void => this.paint();
+    // A drag sends a burst of resizes; one rebuild at the end is enough.
+    const onResize = (): void => {
+      if (this.resizeTimer) clearTimeout(this.resizeTimer);
+      this.resizeTimer = setTimeout(() => {
+        this.resizeTimer = null;
+        this.repaintAll();
+      }, 40);
+    };
 
     stdin.setRawMode(true);
     stdin.resume();
@@ -250,6 +276,10 @@ export class Screen {
     const restore = (): void => {
       stdin.off("data", onData);
       process.stdout.off("resize", onResize);
+      if (this.resizeTimer) {
+        clearTimeout(this.resizeTimer);
+        this.resizeTimer = null;
+      }
       if (handler) this.write(BRACKETED_PASTE.disable);
       try {
         stdin.setRawMode(false);
@@ -322,6 +352,12 @@ export class Screen {
   }
 
   private paint(): void {
+    if (this.interactive && this.footer.length > 0 && this.columns() !== this.paintedWidth) {
+      // The width changed without a resize event reaching us first — a
+      // resize is rebuilt, never repainted over.
+      this.repaintAll();
+      return;
+    }
     this.clearFooter();
     // Only settled cells go to scrollback. A tool cell between `tool_start` and
     // `tool_end` is still growing, and committing it there would print a tool
@@ -330,6 +366,32 @@ export class Screen {
     const fresh = this.commits.take(settled.map((l) => l.text));
     for (const line of settled.slice(settled.length - fresh.length)) this.write(this.colour(line) + "\n");
     this.paintFooter();
+  }
+
+  /**
+   * Rebuild the visible screen after a resize.
+   *
+   * Nothing on screen can be trusted to be where it was: the terminal has
+   * reflowed it. So the screen is erased — scrollback stays — and refilled
+   * with as much of the transcript's tail as fits above the footer, wrapped
+   * here at the new width, then the footer itself. Lines already committed
+   * stay committed; they are being redrawn, not re-emitted.
+   */
+  private repaintAll(): void {
+    if (!this.interactive) return;
+    const width = this.columns();
+    const settled = renderSettledStyled(this.state, this.renderOptions);
+    const fresh = this.commits.take(settled.map((l) => l.text));
+    void fresh;
+    const footer = this.buildFooter(width);
+    const physical: string[] = [];
+    for (const l of settled) for (const t of wrapToWidth(l.text, width)) physical.push(this.colour({ ...l, text: t }));
+    const keep = Math.max(0, this.rowCount() - footer.rows.length - 1);
+    this.footer = [];
+    this.cursorAt = null;
+    this.write(term.clearScreen + term.home);
+    for (const line of physical.slice(Math.max(0, physical.length - keep))) this.write(line + "\n");
+    this.writeFooter(footer, width);
   }
 
   /** Footer rows from text that may be longer than the width: split here, never wrapped by the terminal. */
@@ -341,7 +403,12 @@ export class Screen {
   private paintFooter(): void {
     if (!this.interactive) return;
     const width = this.columns();
-    const opts = this.renderOptions;
+    this.writeFooter(this.buildFooter(width), width);
+  }
+
+  /** The footer's rows for a width, and where the cursor belongs among them. */
+  private buildFooter(width: number): { rows: Row[]; cursor: { row: number; col: number } | null } {
+    const opts = { ...this.renderOptions, width };
     const rows: Row[] = [];
 
     for (const l of renderPendingStyled(this.state, opts)) {
@@ -370,7 +437,11 @@ export class Screen {
     } else {
       rows.push(...this.rows(this.statusOnly(), (t) => t));
     }
+    return { rows, cursor };
+  }
 
+  private writeFooter(footer: { rows: Row[]; cursor: { row: number; col: number } | null }, width: number): void {
+    const { rows, cursor } = footer;
     if (this.composer) this.write(term.hideCursor);
     for (const r of rows) this.write(r.text + "\n");
     this.footer = rows;
@@ -392,13 +463,19 @@ export class Screen {
    */
   private composerRows(view: ComposerView, width: number): { rows: Row[]; cursorRow: number; cursorCol: number } {
     const inner = Math.max(4, width - 4);
+    // The box takes four columns: its edges and a space inside each.
+    const render = renderComposer(view.draft, {
+      width: inner,
+      prompt: "> ",
+      ...(view.placeholder !== undefined ? { placeholder: view.placeholder } : {}),
+    });
     const border = (l: string, r: string): Row => ({
       text: paint(`${l}${"─".repeat(inner + 2)}${r}`, style.faint),
       width: inner + 4,
     });
     const rows: Row[] = [border("╭", "╮")];
-    for (const row of view.render.rows) {
-      const body = view.render.placeholder ? paint(row.body, style.faint) : row.body;
+    for (const row of render.rows) {
+      const body = render.placeholder ? paint(row.body, style.faint) : row.body;
       const plainWidth = displayWidth(row.prefix) + displayWidth(row.body);
       const pad = " ".repeat(Math.max(0, inner - plainWidth));
       rows.push({
@@ -407,14 +484,15 @@ export class Screen {
       });
     }
     // +1 for the top border; +2 for the box's left edge.
-    const cursorRow = 1 + view.render.cursorRow;
-    const cursorCol = Math.min(2 + view.render.cursorCol, Math.max(0, width - 1));
+    const cursorRow = 1 + render.cursorRow;
+    const cursorCol = Math.min(2 + render.cursorCol, Math.max(0, width - 1));
     rows.push(border("╰", "╯"));
-    if (view.menu) {
-      view.menu.rows.forEach((row, i) => {
+    if (view.menu && view.menu.items.length > 0) {
+      const menu = renderMenu(view.menu.items, view.menu.selected, { width });
+      menu.rows.forEach((row, i) => {
         const t = truncateToWidth(row, width);
         rows.push({
-          text: i === view.menu!.selected ? paint(t, style.accent + style.bold) : paint(t, style.faint),
+          text: i === menu.selectedRow ? paint(t, style.accent + style.bold) : paint(t, style.faint),
           width: displayWidth(t),
         });
       });
@@ -457,29 +535,19 @@ export class Screen {
   }
 
   /**
-   * Erase the footer, wherever the terminal has left it.
+   * Erase the footer.
    *
-   * At the width it was painted at, each footer row is one terminal row and
-   * the cursor is a known number of rows above the line below the footer. After
-   * a resize the terminal has reflowed those rows: a row wider than the new
-   * width now occupies several, and the cursor stays with its text. Both are
-   * recomputed from the plain widths kept per row. This assumes a terminal
-   * that reflows on resize, which Terminal.app, iTerm2 and most others do.
+   * Every footer row is one terminal row at the width it was painted at, so
+   * the cursor is a known number of rows above the line below the footer and
+   * the footer a known number of rows above that. A width change never comes
+   * through here; see `repaintAll`.
    */
   private clearFooter(): void {
     if (!this.interactive || this.footer.length === 0) return;
-    const width = this.columns();
-    const narrowed = width < this.paintedWidth;
-    const rowsOf = (w: number): number => (narrowed ? Math.max(1, Math.ceil(w / width)) : 1);
-    const total = this.footer.reduce((n, r) => n + rowsOf(r.width), 0);
-
+    const total = this.footer.length;
     if (this.cursorAt) {
       // Back to the line below the footer, where the arithmetic expects it.
-      const own = this.footer[this.cursorAt.row]!;
-      const within = narrowed ? Math.floor(this.cursorAt.col / width) : 0;
-      let below = rowsOf(own.width) - 1 - within;
-      for (let i = this.cursorAt.row + 1; i < this.footer.length; i++) below += rowsOf(this.footer[i]!.width);
-      this.write(term.down(below + 1) + term.lineStart);
+      this.write(term.down(total - this.cursorAt.row) + term.lineStart);
       this.cursorAt = null;
     }
     this.write(term.up(total));

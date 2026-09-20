@@ -47,8 +47,6 @@ import {
   applyTheme,
   clampSelection,
   menuItemsFor,
-  renderComposer,
-  renderMenu,
   type ComposerView,
   type Key,
   type MenuItem,
@@ -363,13 +361,11 @@ export class Chat {
 
   /** Repaint the composer, the menu and the hint from current state. */
   private refresh(): void {
-    const width = this.screen.width;
     const items = this.menuItems();
-    // The box takes four columns: its edges and a space inside each.
-    const menu = items.length > 0 ? renderMenu(items, this.menuSelected, { width }) : null;
     const view: ComposerView = {
-      render: renderComposer(this.composer.snapshot(), { width: width - 4, prompt: "> ", placeholder: PLACEHOLDER }),
-      ...(menu ? { menu: { rows: menu.rows, selected: menu.selectedRow } } : {}),
+      draft: this.composer.snapshot(),
+      placeholder: PLACEHOLDER,
+      ...(items.length > 0 ? { menu: { items, selected: clampSelection(this.menuSelected, items.length) } } : {}),
     };
     this.screen.setHint(this.hintText());
     this.screen.setComposer(view);
