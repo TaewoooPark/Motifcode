@@ -43,7 +43,12 @@ Motifcode는 Claude Code의 모양을 한 터미널 코딩 에이전트입니다
 참인 사실들의 결과**이고, 그 대부분은 가정이 아니라 측정으로 얻은 것입니다. 범용
 하네스에 base URL만 바꿔 끼운 것이 아닙니다.
 
-> *"하네스는 모델을 감싸는 껍데기가 아니라 모델의 결과물일 때 제 몫을 한다."*
+<p align="center">
+  <img src="docs/benchmark.svg" alt="Aider polyglot 벤치마크의 Motif-3: 213개 인스턴스 통과율 Motifcode 92.0%, OpenCode 83.1%, Codex 79.8%, 언어별 결과 포함" width="912">
+</p>
+<p align="center">
+  <sub>Aider polyglot(Exercism 문제 213개, 6개 언어)에서 같은 Motif-3를 세 하네스로 돌린 결과. 인스턴스당 1회 실행. 방법과 전체 행은 <a href="#벤치마크">벤치마크</a> 절과 <a href="packages/eval/REPORT.md"><code>packages/eval/REPORT.md</code></a>.</sub>
+</p>
 
 ---
 
@@ -241,77 +246,57 @@ enter send · \ + enter newline · esc interrupt or clear · ctrl-c twice quit �
 ## Motif-3에 맞춰 설계된 지점들
 
 범용 하네스는 모델의 도구 호출이 파싱된다고, 도구 목록을 마음대로 바꿔도 된다고,
-추론은 선택 사항이라고 가정합니다. 여기서는 그 어느 것도 성립하지 않고, 하나하나
-확인해 보니 각각이 설계 제약이 되었습니다.
+추론은 선택 사항이라고 가정합니다. Motif-3에서는 그 어느 것도 성립하지 않고, 아래의
+사실 하나하나가 가정이 아니라 확인을 거쳐 설계 제약이 되었습니다.
 
-| Motif-3에 대한 사실 | 출처 | 강제되는 설계 |
+| Motif-3에 대한 사실 | 출처 | 여기서 강제되는 설계 |
 |---|---|---|
-| `<tool_call>` 안에 잘못된 JSON을 자주 내보내며, 셸의 `\$`와 정규식의 `\s`에서 깨진다 | 벤더 자신의 vLLM 파서 주석 | 클라이언트 쪽 복구 사다리, 깨짐 예산, 문자열 이스케이프를 아예 피하는 채널 |
-| 복구 오라클이 후보를 도구 스키마에 대해 검증한다 | 같음 | 적은 도구, 적은 매개변수, 닫힌 스키마 — 빌드를 실패시키는 린터로 강제 |
-| 도구 블록이 시스템 프롬프트 **앞에**, 같은 턴에 렌더링된다 | `chat_template.jinja` | 도구 목록을 세션 동안 고정하고 *정해진 순서로* 유지 |
-| 도구 두 개의 순서를 바꾸면 프리픽스 재사용이 **약 24%** 로 떨어진다 | **측정 — `template.test.ts`** | 부분집합은 항상 앞부분(prefix)으로만 취하고 필터로 취하지 않는다. 그래서 `done`이 목록의 맨 앞 |
-| 중간 추론은 도구가 등록되어 있을 때 **에만** 렌더링된다 | **측정 — `template.test.ts`** | 도구를 호출하지 않는 채널을 포함해 모든 채널에서 도구를 등록 |
-| Terminal-Bench 74.9는 상태 없는 서브셸이 아니라 지속되는 tmux 세션에서 나왔다 | Terminus 2 소스 | `bash` 옆에 `term` 도구 |
-| SWE-bench 76.2는 `bash` 도구 하나로 나왔다 | mini-SWE-agent 설정 | 얇은 도구 집합이 타협이 아니라 기준선 |
-| 복구 턴 하나가 2비트 양자화 손실을 지운다 | *Half the Experts, All the Code* | 복구 루프는 부가 기능이 아니라 핵심 |
+| 채팅 템플릿이 도구 블록을 시스템 프롬프트 **앞에**, 같은 턴에 렌더링하고, 도구 두 개의 순서만 바꿔도 프리픽스가 약 24%만 남는다 | `chat_template.jinja`; `template.test.ts`에서 측정 | 고정된 정규 순서의 도구 아홉 개(`done, bash, read, write, apply_patch, term, skill, task, mcp`); 서브에이전트는 그 *앞부분*만 받음; 요청당 약 2k 토큰의 프롬프트, 그중 90~98%가 엔드포인트 캐시 적중 |
+| 중간 추론은 도구가 등록돼 있을 때만 렌더링되고, 호스팅 라우터는 돌려보낸 `reasoning_content`를 실제로 프롬프트에 렌더링한다 | 템플릿, 측정; 엔드포인트, 2026-09-20 | 모든 채널에서 도구를 등록하고, 모델의 추론을 매 턴 되돌려 보냄 |
+| `<tool_call>` 안의 JSON이 자주 깨지고(셸 `\$`, 정규식 `\s`), 호스팅 엔드포인트는 가끔 태그 없는 맨 호출을 내보낸다 | 벤더의 vLLM 파서; 엔드포인트, 측정 | 서버 파서 뒤의 클라이언트 수리 사다리, 맨 호출 복구, 깨짐 예산, 빌드를 실패시키는 린터로 강제하는 닫힌 도구 스키마 |
+| 떨어진 도구 호출과 최종 답변이 겉으로는 같다 | 벤더 파서 주석; 캠페인에서 측정 | `done`은 도구이고, 벤치마크 모드에서는 행동 없는 턴을 작업 종료가 아니라 되돌려 줌 |
+| SWE-bench Verified 76.2는 `bash` 도구 하나로, Terminal-Bench 2.1 74.9는 지속되는 tmux 세션에서 나왔다 | mini-SWE-agent 설정; Terminus 2 | 얇은 도구 집합이 기준선이고, `bash` 옆에 `term` 도구 |
+| 호스팅 엔드포인트에서 추론 스텝 하나가 200~300초 걸린다 | 측정 | 전송 계층에 300초 헤더 타임아웃을 두지 않음; 429는 `Retry-After` 뒤에 재시도 |
+| 호스팅 엔드포인트에 `/v1/completions`가 없다 | `motif doctor` | 거기서는 네이티브 `toolcall` 채널만 동작; `object`·`raw` 채널과 프루닝 툴킷은 completions 경로가 있는 로컬 서버가 필요(`--experimental-channel`) |
 
-도구 집합은 고정된 순서의 아홉 개 — `done, bash, read, write, apply_patch, term,
-skill, task, mcp` — 이고, 서브에이전트는 그 *앞부분*만 받습니다. 서버의 프리픽스
-캐시를 따뜻하게 유지하는 방법이자, 어떤 서브에이전트도 다른 서브에이전트를 만들 수
-없는 이유이기도 합니다.
+어느 채널이든 모델 자신의 본문은 대화 기록에 원문 그대로 남기고, 루프는 모델이 실제로
+만들어 내는 결함(잘못된 이스케이프, 잘린 호출, 파싱 불가능한 본문, 빈 턴, 죽은 서버)을
+주입해서 테스트합니다.
 
-모델이 행동을 표현하는 방식은 런타임 스위치이고, 각 선택지는 Motif-3가 공식 점수를
-낸 하네스에서 빌려 왔습니다.
+Motif-3는 총 314B 매개변수에 토큰당 13.2B가 활성화되는 mixture-of-experts 모델로
+네이티브 256K 컨텍스트를 갖고, [모티프테크놀로지스](https://motiftech.io)가 MIT로
+공개했습니다. [가중치](https://huggingface.co/Motif-Technologies/Motif-3),
+[기술 보고서](https://arxiv.org/abs/2608.09119), `motif` 도구 호출 파서가 든
+[서빙 포크](https://github.com/MotifTechnologies/vllm), 그리고 여기서 쓰는
+[Infron API](https://infron.ai/models/motif/motif-3)가 있습니다. 이 API는
+`/v1/responses`와 Anthropic 방식 `/v1/messages`도 열어 두어 Codex, Claude Code 등
+다른 하네스도 같은 모델에 닿습니다.
 
-| 채널 | 엔드포인트 | 어시스턴트 턴 | 출처 |
-|---|---|---|---|
-| `toolcall` | `/v1/chat/completions` | 네이티브 `content` + `tool_calls` | SWE-bench Verified **76.2** — mini-SWE-agent |
-| `object` | `/v1/completions`, 프롬프트는 여기서 렌더링 | 모델의 JSON 원문 그대로 | Terminal-Bench 2.1 **74.9** — Terminus 2 기본 파서 |
-| `raw` | `/v1/completions`, 프롬프트는 여기서 렌더링 | 모델의 XML 원문 그대로 | Terminus 2의 대체 파서 — Motif에서 측정된 적 없음 |
+---
 
-어느 채널이든 모델 자신의 본문은 대화 기록에 원문 그대로 남깁니다. JSON 응답을
-행동으로 파싱한 뒤 네이티브 `tool_calls`로 다시 적어 주면, 두 번째 턴부터 모델은
-쓰지 말라고 들은 형식을 읽게 되기 때문입니다. 호스팅 엔드포인트에는 `/v1/completions`가
-없어서 거기서는 `toolcall`만 동작하고, 나머지 둘은 `--experimental-channel`과
-completions 경로가 있는 서버가 필요합니다.
+## 벤치마크
 
-로컬 서버에서 호스팅 서버로 옮기자 결함 주입 테스트가 한 번도 닿지 못했던 결함이
-드러났습니다. 도구 호출을 서버가 추출해 주는 경우 네이티브 채널이 어시스턴트 턴을
-`tool_calls` 없이 다시 적고 있었던 것으로, 이제 end-to-end 테스트가 와이어에서
-확인하는 항목입니다. 루프는 여전히 오작동을 주입해서 테스트합니다. 잘못된 이스케이프,
-잘린 도구 호출, 파싱 불가능한 본문, 빈 턴, 죽은 서버는 전부 스위트가 일부러 만들어
-내는 결함이고, 실제 모델이 만들어 낸 것들은 그래서 스위트에 들어 있습니다.
+위의 주장을 2026-09-20/21에 측정했습니다. 같은 모델을 세 하네스에 물려 Aider polyglot
+벤치마크(C++, Go, Java, JavaScript, Python, Rust의 Exercism 문제 213개, 225개 중 12개는
+실행 전에 제외)를 돌렸고, 인스턴스당 1회, 시드 0, 15분 상한, 같은 과제 문장, 그리고
+같은 채점기가 각 패치를 깨끗한 체크아웃에 적용해 채점했습니다. Motifcode는 출시 상태의
+벤치마크 모드로, Codex CLI와 OpenCode는 얇은 어댑터를 거쳐 같은 Infron 엔드포인트로
+돌았습니다.
 
-### 호스팅 엔드포인트에서 실측한 것
+| 하네스 | 통과 | 통과율 (95% CI) | Motifcode 대비, 짝지음 | McNemar p |
+|---|---|---|---|---|
+| **Motifcode 0.3.0** + Motif-3 | **196** / 213 | **92.0%** (87.6–95.0) | — | — |
+| OpenCode 1.17.9 + Motif-3 | 177 / 213 | 83.1% (77.5–87.5) | −8.9 pp (−14.6, −3.8) | 0.003 |
+| Codex CLI 0.154.0 + Motif-3 | 170 / 213 | 79.8% (73.9–84.7) | −12.2 pp (−17.4, −7.0) | < 0.001 |
 
-`llm.onerouter.pro`에 직접 확인(2026-09-20), 그리고 각 사실이 강제한 설계:
-
-| 엔드포인트의 실제 동작 | 여기서의 의미 |
-|---|---|
-| `tool_calls`·`reasoning`·`usage.prompt_tokens_details.cached_tokens`를 각각의 필드로 반환 | 실제로 도는 것은 네이티브 `toolcall` 채널이고, 클라이언트 수리 사다리는 서버 자체 수리 뒤의 2차 방어선 |
-| 어시스턴트 턴의 `reasoning_content`를 프롬프트에 다시 렌더링하고, 두 번째 동일 요청부터 고정된 도구·시스템 프리픽스를 캐시로 재사용 | 추론 연속성과 고정 도구 순서는 장식이 아니라 하중을 견디는 설계 — 실제 세션은 프롬프트의 90~98%가 캐시 적중 |
-| `/v1/completions`가 없음 | `object`·`raw` 채널, 적응형 다운그레이드, `toolkit/prune/`는 completions 경로가 있는 로컬 서버가 있어야 동작하며 여기서는 돌지 않음 |
-| 가끔 도구 호출을 `<tool_call>` 태그 없이 맨 객체로 씀 | 답변으로 보여 주는 대신 복구해서 실행 — 태그 *안쪽*의 깨진 JSON을 수리하던 것과 같은 일 |
-
-라우터가 여는 세 가지 프로토콜(`/v1/chat/completions`, `/v1/responses`,
-Anthropic 방식 `/v1/messages`) 덕분에 Motif-3은 Codex·Claude Code 등 다른
-하네스에서도 닿습니다. 이 하네스가 더하는 것은 모델 자신의 템플릿에 맞춘 프롬프트
-배치, 훨씬 작은 요청당 컨텍스트, 그리고 모델이 흘리는 턴에 대한 처리입니다.
-
-### Motif-3 공식 링크
-
-| | |
-|---|---|
-| 모티프테크놀로지스 | [motiftech.io](https://motiftech.io) |
-| 모델 가중치 (MIT) | [huggingface.co/Motif-Technologies/Motif-3](https://huggingface.co/Motif-Technologies/Motif-3) |
-| 기술 보고서 | [arXiv:2608.09119](https://arxiv.org/abs/2608.09119) |
-| 서빙 포크 (vLLM, `motif` 도구 호출 파서 포함) | [github.com/MotifTechnologies/vllm](https://github.com/MotifTechnologies/vllm) |
-| 호스팅 채팅 | [chat.motiftech.io](https://chat.motiftech.io/chat) |
-| 여기서 쓰는 호스팅 API | [infron.ai/models/motif/motif-3](https://infron.ai/models/motif/motif-3) |
-
-Motif-3는 총 314B 매개변수에 토큰당 13.2B가 활성화되는 mixture-of-experts 모델로,
-라우팅되는 전문가 384개와 네이티브 256K 컨텍스트를 갖습니다. Terminal-Bench 2.1
-74.9와 SWE-bench Verified 76.2가 벤더가 공개한 에이전트 벤치마크 점수입니다.
+차이는 모델이 아니라 하네스에서 났습니다. Codex는 38행이 시간 상한에, 2행이 히스토리로
+되돌아간 깨진 도구 호출에 걸려 끝났고, OpenCode는 21행이 라우터의 반복 생성 중단에,
+18행이 상한에 걸렸으며, Motifcode는 22행이 상한에, 9행이 자체 턴·루프 가드에 걸리고
+182행은 정상 종료했습니다. temperature 1.0에 시드 하나라 8pp 미만의 차이는 분해되지
+않고, Codex는 스트림 유휴 타임아웃을 올린 채(스톡 300초는 이 엔드포인트의 긴 추론
+스텝에서 스트림을 끊었음), OpenCode는 웹 도구를 막은 채 돌았습니다. 방법, 언어별
+결과, 전체 행, 사건 기록은 [`packages/eval/REPORT.md`](packages/eval/REPORT.md)에
+있습니다.
 
 ---
 
@@ -328,10 +313,10 @@ packages/agents/     서브에이전트 정의와 로컬 스케줄러
 packages/hooks/      생명주기 셸 훅
 packages/journal/    추가 전용 세션 로그, 재개, 궤적 내보내기
 packages/cli/        `motif` 명령, 대화형 세션, 로그인, doctor, 플러그인
-packages/eval/       폴리글랏 스위트, 캠페인 러너, 워크트리 채점기
+packages/eval/       폴리글랏 스위트, 캠페인 러너, 워크트리 채점기, REPORT.md (위 벤치마크)
 toolkit/             프롬프트 골든(jinja2), 전문가 가지치기 수술, 캠페인 점수표
 corpus/              벤더 템플릿 + 생성된 골든
-docs/                로고, 스크린샷, 모델 가이드
+docs/                로고, 스크린샷, 벤치마크 그림, 모델 가이드
 ```
 
 ```bash

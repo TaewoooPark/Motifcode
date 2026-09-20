@@ -44,7 +44,12 @@ failure handling are **consequences of things that are specifically true about
 measured rather than assumed. It is not a general harness pointed at a
 different base URL.
 
-> *"A harness earns its keep by being a consequence of the model, not a wrapper around it."*
+<p align="center">
+  <img src="docs/benchmark.svg" alt="Motif-3 on the Aider polyglot benchmark: Motifcode 92.0%, OpenCode 83.1%, Codex 79.8% pass rate over 213 instances, with per-language results" width="912">
+</p>
+<p align="center">
+  <sub>Aider polyglot (213 Exercism exercises, six languages), one run per instance, the same Motif-3 behind three harnesses. Method and every row: <a href="#benchmark">Benchmark</a> and <a href="packages/eval/REPORT.md"><code>packages/eval/REPORT.md</code></a>.</sub>
+</p>
 
 ---
 
@@ -249,81 +254,61 @@ a directory with `plugin.json` and its own `skills/` and `agents/`.
 
 ## Built around Motif-3
 
-Generic harnesses assume the model's tool calls parse, that the tool list is
-free to change, and that reasoning is optional. None of those hold here — and
-each one, checked, turned into a design constraint.
+A generic harness assumes the model's tool calls parse, that the tool list is
+free to change, and that reasoning is optional. None of that holds for Motif-3,
+and each fact below, checked rather than assumed, became a design constraint.
 
-| Fact about Motif-3 | Source | What it forces |
+| Fact about Motif-3 | Source | What it forces here |
 |---|---|---|
-| Frequently emits malformed JSON inside `<tool_call>`, failing on shell `\$` and regex `\s` | the vendor's own vLLM parser comments | A client-side repair ladder, a breakage budget, and channels that avoid string escaping altogether |
-| The repair oracle validates candidates against tool schemas | same | Few tools, few parameters, closed schemas — enforced by a linter that fails the build |
-| The tools block renders **before** the system prompt, in the same turn | `chat_template.jinja` | The tool list is frozen *and canonically ordered* for a session |
-| Reordering two tools drops prefix reuse to **~24%** | **measured — `template.test.ts`** | Subsets are taken as prefixes, never as filters. Hence `done` leads the list |
-| Intermediate reasoning renders **only** when tools are registered | **measured — `template.test.ts`** | Tools are registered on every channel, including those that never call them |
-| Terminal-Bench 74.9 came from a persistent tmux session, not stateless subshells | Terminus 2 source | A `term` tool beside `bash` |
-| SWE-bench 76.2 came from a single `bash` tool | mini-SWE-agent config | The thin tool set is the baseline, not a compromise |
-| One repair turn erases a 2-bit quantisation penalty | *Half the Experts, All the Code* | The repair loop is core, not a nicety |
+| The chat template renders the tools block **before** the system prompt, in the same turn; reordering two tools leaves ~24% of the prefix | `chat_template.jinja`; measured in `template.test.ts` | Nine tools in a frozen, canonical order (`done, bash, read, write, apply_patch, term, skill, task, mcp`); a subagent takes a *prefix* of it; a ~2k-token prompt of which 90–98% is served from the endpoint's cache |
+| Intermediate reasoning is rendered only when tools are registered, and the hosted router does render returned `reasoning_content` | template, measured; endpoint, 2026-09-20 | Tools are registered on every channel, and the model's reasoning is sent back every turn |
+| JSON inside `<tool_call>` is frequently malformed (shell `\$`, regex `\s`), and the hosted endpoint sometimes emits a bare call with no tags | the vendor's vLLM parser; endpoint, measured | A client-side repair ladder behind the server's own, recovery of bare calls, a breakage budget, and closed tool schemas enforced by a linter that fails the build |
+| A dropped tool call and a final answer look the same | vendor parser comments; measured in the campaign | `done` is a tool; in benchmark mode a turn without an action is handed back instead of ending the task |
+| SWE-bench Verified 76.2 came from a single `bash` tool; Terminal-Bench 2.1 74.9 from a persistent tmux session | mini-SWE-agent config; Terminus 2 | The thin tool set is the baseline, with a `term` tool beside `bash` |
+| A reasoning step takes 200–300 s on the hosted endpoint | measured | No 300-second header timeout in the transport; a 429 is retried after `Retry-After` |
+| The hosted endpoint has no `/v1/completions` | `motif doctor` | Only the native `toolcall` channel runs there; the `object` and `raw` channels and the pruning toolkit need a local completions server (`--experimental-channel`) |
 
-The tool set is nine tools in a fixed order — `done, bash, read, write,
-apply_patch, term, skill, task, mcp` — and a subagent takes a *prefix* of it,
-which keeps the server's prefix cache warm and is also why no subagent can
-spawn another.
-
-How the model expresses an action is a runtime switch, each option borrowed
-from a harness in which Motif-3 posted a published score:
-
-| channel | endpoint | assistant turn | provenance |
-|---|---|---|---|
-| `toolcall` | `/v1/chat/completions` | native `content` + `tool_calls` | SWE-bench Verified **76.2** — mini-SWE-agent |
-| `object` | `/v1/completions`, prompt rendered here | the model's JSON verbatim | Terminal-Bench 2.1 **74.9** — Terminus 2, default parser |
-| `raw` | `/v1/completions`, prompt rendered here | the model's XML verbatim | Terminus 2's alternative parser — never measured on Motif |
-
-The model's own body is kept verbatim in the transcript, whatever the channel:
-parse a JSON response into actions and write them back as native `tool_calls`,
-and from turn two the model reads a format it was told not to use. The hosted
-endpoint has no `/v1/completions`, so only `toolcall` runs there; the other two
-need `--experimental-channel` and a server with a completions route.
-
-Moving from a local server to the hosted one exposed a defect the fault-injected
-suite had never reached — with a server that extracts tool calls, the native
-channel wrote the assistant turn back without its `tool_calls` — which is now
-what the end-to-end test checks on the wire. The loop is still tested by
-injecting the misbehaviour: invalid escapes, truncated tool calls, unparseable
-bodies, empty turns and a dead server are all faults the suite produces on
-purpose, and the ones the real model produced are in it because it did.
-
-### Measured against the hosted endpoint
-
-Checked directly against `llm.onerouter.pro`, 2026-09-20, and what each finding
-forced:
-
-| What the endpoint does | What it means here |
-|---|---|
-| Returns `tool_calls`, `reasoning` and `usage.prompt_tokens_details.cached_tokens` as their own fields | The native `toolcall` channel is the one that runs; the client repair ladder is a second line of defence behind the server's own |
-| Renders an assistant turn's `reasoning_content` back into the prompt, and reuses the frozen tools-and-system prefix from the second identical request onward | Reasoning continuity and the frozen tool order are load-bearing, not decoration — real sessions run 90–98% of each prompt from cache |
-| Has no `/v1/completions` | The `object` and `raw` channels, the adaptive downgrade and `toolkit/prune/` need a local completions-capable server; they do not run here |
-| Occasionally writes a tool call as a bare object with no `<tool_call>` tags | Recovered and run rather than shown as an answer — the same job the ladder does for malformed JSON *inside* the tags |
-
-The three protocols the router exposes — `/v1/chat/completions`,
-`/v1/responses` and Anthropic-style `/v1/messages` — mean Motif-3 is reachable
-from Codex, Claude Code and other harnesses too; what this one adds is a prompt
-laid out for the model's own template, a much smaller per-request context, and
-handling for the turn the model drops.
-
-### Motif-3 links
-
-| | |
-|---|---|
-| Motif Technologies | [motiftech.io](https://motiftech.io) |
-| Model weights (MIT) | [huggingface.co/Motif-Technologies/Motif-3](https://huggingface.co/Motif-Technologies/Motif-3) |
-| Technical report | [arXiv:2608.09119](https://arxiv.org/abs/2608.09119) |
-| Serving fork (vLLM, with the `motif` tool-call parser) | [github.com/MotifTechnologies/vllm](https://github.com/MotifTechnologies/vllm) |
-| Hosted chat | [chat.motiftech.io](https://chat.motiftech.io/chat) |
-| Hosted API used here | [infron.ai/models/motif/motif-3](https://infron.ai/models/motif/motif-3) |
+Whatever the channel, the model's own body is kept verbatim in the transcript,
+and the loop is tested by injecting the faults the model actually produces:
+invalid escapes, truncated calls, unparseable bodies, empty turns, a dead server.
 
 Motif-3 is a 314B-parameter mixture-of-experts model with 13.2B activated per
-token, 384 routed experts, and a native 256K context; Terminal-Bench 2.1 74.9
-and SWE-bench Verified 76.2 are the vendor's published agentic scores.
+token and a native 256K context, released under MIT by
+[Motif Technologies](https://motiftech.io):
+[weights](https://huggingface.co/Motif-Technologies/Motif-3),
+[technical report](https://arxiv.org/abs/2608.09119),
+[serving fork](https://github.com/MotifTechnologies/vllm) with the `motif`
+tool-call parser, and the [Infron API](https://infron.ai/models/motif/motif-3)
+used here, which also serves `/v1/responses` and Anthropic-style `/v1/messages`,
+so Codex, Claude Code and other harnesses reach the same model.
+
+---
+
+## Benchmark
+
+The claim above was measured on 2026-09-20/21: the same model behind three
+harnesses on the Aider polyglot benchmark — 213 Exercism exercises across C++,
+Go, Java, JavaScript, Python and Rust (225 minus 12 excluded before the run),
+one attempt per instance, seed 0, a 15-minute cap, the same task text, and the
+same grader applying each patch to a pristine checkout. Motifcode ran in
+benchmark mode as shipped; Codex CLI and OpenCode ran through thin adapters
+against the same Infron endpoint.
+
+| harness | passed | pass rate (95% CI) | vs. Motifcode, paired | McNemar p |
+|---|---|---|---|---|
+| **Motifcode 0.3.0** + Motif-3 | **196** / 213 | **92.0%** (87.6–95.0) | — | — |
+| OpenCode 1.17.9 + Motif-3 | 177 / 213 | 83.1% (77.5–87.5) | −8.9 pp (−14.6, −3.8) | 0.003 |
+| Codex CLI 0.154.0 + Motif-3 | 170 / 213 | 79.8% (73.9–84.7) | −12.2 pp (−17.4, −7.0) | < 0.001 |
+
+The gap is the harness, not the model. Codex ended 38 rows on the time cap and
+2 on a malformed tool call echoed back into history; OpenCode ended 21 on the
+router's repetition abort and 18 on the cap; Motifcode ended 22 on the cap and
+9 on its own turn and loop guards, and 182 normally. One seed at temperature
+1.0, so differences under ~8 pp are not resolved; Codex ran with its stream
+idle timeout raised (stock 300 s dropped the stream on this endpoint's long
+reasoning steps), OpenCode with web tools denied. Method, per-language results,
+every row and the incident log are in
+[`packages/eval/REPORT.md`](packages/eval/REPORT.md).
 
 ---
 
@@ -340,10 +325,10 @@ packages/agents/     subagent definitions and the local scheduler
 packages/hooks/      lifecycle shell hooks
 packages/journal/    append-only session log, resume, trajectory export
 packages/cli/        the `motif` command, the interactive session, login, doctor, plugins
-packages/eval/       polyglot suite, campaign runner, worktree grader
+packages/eval/       polyglot suite, campaign runner, worktree grader, REPORT.md (the benchmark above)
 toolkit/             prompt goldens (jinja2), expert-pruning surgery, campaign score table
 corpus/              vendored template + generated goldens
-docs/                logo, screenshots, model guide
+docs/                logo, screenshots, benchmark figure, model guide
 ```
 
 ```bash
