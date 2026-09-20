@@ -75,6 +75,10 @@ export interface CommandContext {
   toggleThinking(): boolean;
   /** Remember a setting across sessions; the file it went to, or null when not persisted. */
   persist(key: PersistableKey, value: unknown): string | null;
+  /** Ask for an API key, check it against the endpoint and save it; returns what happened. */
+  login(): Promise<string[]>;
+  /** Forget the saved API key; returns what happened. */
+  logout(): string[];
   quit(): void;
 }
 
@@ -162,6 +166,16 @@ export const COMMANDS: readonly SlashCommand[] = [
     name: "doctor",
     description: "probe the endpoint: auth, parsers, cache, channels",
     run: async (ctx) => ok("/doctor", await ctx.doctor()),
+  },
+  {
+    name: "login",
+    description: "paste an Infron API key; it is checked against the endpoint and saved to ~/.motif/.env",
+    run: async (ctx) => ok("/login", await ctx.login()),
+  },
+  {
+    name: "logout",
+    description: "remove the saved API key; the next task asks for one",
+    run: (ctx) => ok("/logout", ctx.logout()),
   },
   {
     name: "model",

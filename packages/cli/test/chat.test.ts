@@ -9,9 +9,9 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentRegistry, BUILTIN_AGENTS } from "@motifcode/agents";
@@ -545,5 +545,77 @@ describe("interactive session", () => {
     const second = readFileSync(join(dir, files[1]!), "utf8");
     expect(second).toContain("first");
     expect(second).toContain("second");
+  });
+
+  describe("signing in", () => {
+    const verifyKey = async (k: string) =>
+      k === "sk-good" ? { ok: true as const } : { ok: false as const, reason: "the endpoint rejected this key (401)" };
+    const freshEnvPath = (): string => join(mkdtempSync(join(tmpdir(), "motif-home-")), ".motif", ".env");
+
+    it("asks for the key before the first prompt, masks it, checks it and saves it", async () => {
+      const t = new GateTransport([...done("ok")]);
+      const envPath = freshEnvPath();
+      let seenKey: string | undefined;
+      const s = session(t, {
+        requireKey: true,
+        envPath,
+        verifyKey,
+        makeTransport: (_settings, apiKey) => {
+          seenKey = apiKey;
+          return t;
+        },
+      });
+      open.push(s);
+      await vi.waitFor(() => expect(s.screen()).toContain("Paste your Infron API key to get started"));
+      s.type("sk-bad");
+      await vi.waitFor(() => expect(s.screen()).toContain("key › ••••••"));
+      expect(s.screen()).not.toContain("sk-bad");
+      s.type("\r");
+      await vi.waitFor(() => expect(s.screen()).toContain("rejected this key"));
+      expect(existsSync(envPath)).toBe(false);
+      s.type("sk-good\r");
+      await vi.waitFor(() => expect(s.screen()).toContain("signed in"));
+      expect(readFileSync(envPath, "utf8")).toBe("MOTIF_API_KEY=sk-good\n");
+      expect(statSync(envPath).mode & 0o777).toBe(0o600);
+      expect(s.screen()).not.toContain("sk-good");
+      s.type("hello\r");
+      await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+      expect(seenKey).toBe("sk-good");
+      // The key was never a draft: browsing back finds the task, not the key.
+      s.type("\x1b[A");
+      await vi.waitFor(() => expect(s.screen()).toContain("> hello"));
+    });
+
+    it("can be skipped, and the first task asks again", async () => {
+      const t = new GateTransport([...done("ok")]);
+      const envPath = freshEnvPath();
+      const s = session(t, { requireKey: true, envPath, verifyKey });
+      open.push(s);
+      await vi.waitFor(() => expect(s.screen()).toContain("to get started"));
+      s.type(ESC);
+      await vi.waitFor(() => expect(s.screen()).toContain("no key entered"));
+      s.type("do it\r");
+      await vi.waitFor(() => expect(s.screen()).toContain("An API key is needed before the task can run"));
+      s.type("sk-good\r");
+      await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+      expect(existsSync(envPath)).toBe(true);
+    });
+
+    it("/logout forgets the key and /login takes a new one, keeping the rest of the file", async () => {
+      const t = new GateTransport([]);
+      const envPath = freshEnvPath();
+      mkdirSync(dirname(envPath), { recursive: true });
+      writeFileSync(envPath, "MOTIF_ENDPOINT=https://llm.onerouter.pro\nMOTIF_API_KEY=sk-old\n");
+      const s = session(t, { requireKey: true, apiKey: "sk-old", apiKeySource: `${envPath} (MOTIF_API_KEY)`, envPath, verifyKey });
+      open.push(s);
+      s.type("/logout\r");
+      await vi.waitFor(() => expect(s.screen()).toContain("the key was removed from"));
+      expect(readFileSync(envPath, "utf8")).toBe("MOTIF_ENDPOINT=https://llm.onerouter.pro\n");
+      s.type("/login\r");
+      await vi.waitFor(() => expect(s.screen()).toContain("Paste your Infron API key"));
+      s.type("sk-good\r");
+      await vi.waitFor(() => expect(s.screen()).toContain("signed in"));
+      expect(readFileSync(envPath, "utf8")).toBe("MOTIF_ENDPOINT=https://llm.onerouter.pro\nMOTIF_API_KEY=sk-good\n");
+    });
   });
 });

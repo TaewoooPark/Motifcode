@@ -58,6 +58,14 @@ function fakeContext(overrides: Partial<CommandContext> = {}) {
       calls.push("thinking");
       return true;
     },
+    login: async () => {
+      calls.push("login");
+      return ["signed in"];
+    },
+    logout: () => {
+      calls.push("logout");
+      return ["signed out"];
+    },
     quit: () => calls.push("quit"),
     ...overrides,
   };

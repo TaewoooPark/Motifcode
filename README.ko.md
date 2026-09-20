@@ -11,6 +11,7 @@
 </p>
 
 <p align="center">
+  <img src="https://img.shields.io/npm/v/motifcode?style=flat-square&labelColor=000000&color=333333" alt="npm">
   <img src="https://img.shields.io/github/last-commit/TaewoooPark/Motifcode?style=flat-square&labelColor=000000&color=333333" alt="Last commit">
   <img src="https://img.shields.io/github/actions/workflow/status/TaewoooPark/Motifcode/ci.yml?branch=main&style=flat-square&labelColor=000000&color=333333" alt="CI">
   <img src="https://img.shields.io/badge/license-Apache--2.0-000000?style=flat-square&labelColor=000000&color=333333" alt="Apache-2.0">
@@ -28,6 +29,7 @@
 > **2026년 9월까지 무료.** Motif-3는 [Infron](https://infron.ai)에서 **Motif: Motif 3 (Free)** 로
 > 제공됩니다. 입력·출력 모두 100만 토큰당 $0, 262,144 토큰 컨텍스트 전체가 열려 있고,
 > 2026년 9월 말까지 무료 제공이 공지되어 있습니다. 계정과 API 키만 있으면 됩니다.
+> `npm install -g motifcode` 뒤에 `motif`를 실행하면 키를 물어봅니다.
 > [API 키 발급](#infron에서-api-키-발급하기)을 보세요. 조건은 바뀔 수 있으며,
 > [모델 페이지](https://infron.ai/models/motif/motif-3)가 기준입니다.
 
@@ -234,20 +236,39 @@ skill, task, mcp` — 이고, 서브에이전트는 그 *앞부분*만 받습니
 
 ## 설치
 
-**Node 20 이상**과 **pnpm**이 필요합니다. 아직 npm 배포판은 없으니 저장소에서 빌드합니다.
+**Node 20 이상**이 필요합니다. 패키지는 런타임 의존성이 없는 파일 하나입니다.
 
 ```bash
-git clone https://github.com/TaewoooPark/Motifcode.git
-cd Motifcode
-pnpm install
-pnpm build                    # CLI를 packages/cli/dist/motif.js 로 번들
-
-cd packages/cli && npm link   # `motif`를 PATH에 올림; 대신 `npm pack`으로 tarball을 만들 수도 있음
-motif --version
+npm install -g motifcode      # 설치 없이 바로 실행하려면: npx motifcode
+cd your-project
+motif
 ```
 
-링크 없이 `./packages/cli/dist/motif.js`를 바로 실행해도 되고, 번들에는 런타임
-의존성이 없습니다.
+첫 세션은 키를 물어보고, 키가 확인되는 즉시 열립니다.
+
+```
+
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ Paste your Infron API key to get started                                     │
+│ Get one at https://infron.ai/dashboard/apiKeys                               │
+│ Motif-3 is free there through September 2026.                                │
+│ The key is checked with the endpoint and saved to ~/.motif/.env,             │
+│ readable only by you and never shown to the model.                           │
+│                                                                              │
+│ key › •••••••••••••••••••••••••••••••••••••••••••••••••••                    │
+╰──────────────────────────────────────────────────────────────────────────────╯
+  enter to check and save · esc to skip for now
+```
+
+Enter를 누르면 엔드포인트에 토큰 하나짜리 요청을 보내 키를 확인하고 저장합니다.
+거절된 키는 서버가 알려 준 이유와 함께 다시 물어보고, Esc는 일단 건너뜁니다.
+소스에서 빌드하려면:
+
+```bash
+git clone https://github.com/TaewoooPark/Motifcode.git && cd Motifcode
+pnpm install && pnpm build    # CLI를 packages/cli/dist/motif.js 로 번들
+cd packages/cli && npm link   # `motif`(그리고 `motifcode`)를 PATH에 올림
+```
 
 ---
 
@@ -264,14 +285,12 @@ id, 키 세 가지입니다.
 
 1. **[infron.ai/login](https://infron.ai/login)** 에서 이메일이나 Google로 로그인합니다.
 2. **[Dashboard → API Keys](https://infron.ai/dashboard/apiKeys)** 를 열고 **Add new key** 를 누릅니다.
-3. `motif`가 읽는 자리에 키를 둡니다. 모든 프로젝트에서 쓰려면:
-
-   ```bash
-   mkdir -p ~/.motif && printf 'MOTIF_API_KEY=sk-...\n' > ~/.motif/.env && chmod 600 ~/.motif/.env
-   ```
-
-   한 프로젝트에서만 쓰려면 `cp .env.example .env` 뒤에 키를 채웁니다. 환경 변수도
-   되고, `--env-file <경로>`는 그 파일을 가장 먼저 읽게 합니다.
+3. `motif`를 실행하고, 물어볼 때 키를 붙여 넣습니다. 토큰 하나짜리 요청으로
+   엔드포인트에 확인한 뒤 `~/.motif/.env`에 저장되고(본인만 읽을 수 있는 권한),
+   모델에게는 절대 보여 주지 않습니다. 세션 밖에서는 `motif login`이 같은 일을
+   하고, 세션 안에서는 `/login`과 `/logout`이 있습니다. 환경 변수의
+   `MOTIF_API_KEY`나 프로젝트 옆의 `.env`도 되고, `--env-file <경로>`는 그 파일을
+   가장 먼저 읽게 합니다.
 4. 연결을 확인합니다.
 
    ```bash
@@ -312,6 +331,7 @@ Ctrl-C를 두 번 누르면 종료합니다.
 ```bash
 motif "fix the failing test in tests/" --cwd /path/to/repo
 motif "fix the failing test" --interactive       # 끝난 뒤 세션에 남는다
+motif login                                       # 세션 밖에서 키 입력; motif logout 은 저장된 키 삭제
 motif -p "what does packages/core/src/loop.ts do?" # 최종 답변만 출력
 motif sessions                                    # 기록된 세션 목록
 motif resume <file>                               # 중단된 세션 이어 가기
@@ -326,6 +346,7 @@ motif skills · motif agents · motif plugins · motif config · motif trust
 | `/status` (`/cost`) | 연결, 설정, 세션 누적치 |
 | `/config` | 유효한 설정과 각각의 출처, 설정 파일 |
 | `/doctor` | 엔드포인트 점검: 인증, 파서, 캐시, 채널 |
+| `/login`, `/logout` | Infron API 키를 붙여 넣어 확인 후 `~/.motif/.env`에 저장; 저장된 키 삭제 |
 | `/model [id]`, `/endpoint [url]` | 다음 작업에 쓸 모델 id나 엔드포인트를 보거나 바꿈 |
 | `/channel [toolcall\|object\|raw]` | 행동 채널을 보거나 바꿈; 바꾸면 대화가 새로 시작됨 |
 | `/max-turns [n]`, `/max-tokens [n\|off]`, `/seed [n\|off]` | 작업당 상한과 샘플링 시드 |
@@ -490,6 +511,13 @@ pnpm build
 pnpm test          # 단위, 통합, CLI end-to-end, 설치 스모크
 pnpm lint:tools    # 스키마 린터 — 느슨한 스키마가 있으면 빌드 실패
 ```
+
+**릴리스.** 두 `package.json`의 `version`과 `packages/cli/src/main.ts`의
+`VERSION`을 올리고(설치 테스트가 바이너리의 버전과 패키지 버전이 같은지 확인합니다),
+커밋한 뒤 태그를 푸시합니다: `git tag v0.3.0 && git push origin v0.3.0`. 릴리스
+워크플로가 테스트를 돌리고 npm의 trusted publishing으로 provenance를 붙여
+배포하므로 토큰을 어디에도 저장하지 않습니다. npmjs.com의 패키지 설정에 이
+저장소와 `release.yml`이 trusted publisher로 등록되어 있어야 합니다.
 
 Python 쪽은 프롬프트 골든에 jinja2만 있으면 되고, 가지치기 툴킷의 슬라이싱 테스트에는
 실제 텐서 백엔드가 필요합니다.

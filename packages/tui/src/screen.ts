@@ -90,6 +90,11 @@ export interface ComposerView {
    * shows, the draft is kept but not painted.
    */
   confirm?: { title: string; lines: string[]; choices: string[] };
+  /**
+   * A secret being typed — an API key. The title and lines sit above the
+   * input, the draft is painted as one `•` per character, and no menu opens.
+   */
+  secret?: { title: string; lines: string[]; prompt: string };
   /** The menu under the input: the matching items, which is selected, and their prefix (`/` or `@`). */
   menu?: { items: MenuItem[]; selected: number; prefix?: string };
 }
@@ -572,10 +577,13 @@ export class Screen {
   private composerRows(view: ComposerView, width: number): { rows: Row[]; cursorRow: number; cursorCol: number } {
     const inner = Math.max(4, width - 4);
     // The box takes four columns: its edges and a space inside each.
-    const render = renderComposer(view.draft, {
+    const draft = view.secret
+      ? { text: "•".repeat([...view.draft.text].length), cursor: view.draft.cursor }
+      : view.draft;
+    const render = renderComposer(draft, {
       width: inner,
-      prompt: "> ",
-      ...(view.placeholder !== undefined ? { placeholder: view.placeholder } : {}),
+      prompt: view.secret ? view.secret.prompt : "> ",
+      ...(view.placeholder !== undefined && !view.secret ? { placeholder: view.placeholder } : {}),
     });
     const border = (l: string, r: string): Row => ({
       text: paint(`${l}${"─".repeat(inner + 2)}${r}`, style.faint),
@@ -605,6 +613,23 @@ export class Screen {
       const selectedLine = view.confirm.choices.findIndex((c) => c.startsWith("❯"));
       return { rows, cursorRow: 1 + firstChoice + Math.max(0, selectedLine), cursorCol: 2 };
     }
+    let header = 0;
+    if (view.secret) {
+      const fit = (s: string): string => {
+        const t = truncateToWidth(s, inner);
+        return `${t}${" ".repeat(Math.max(0, inner - displayWidth(t)))}`;
+      };
+      // Wrapped, not truncated: a URL cut short cannot be typed into a browser.
+      const body: { text: string; title: boolean }[] = [];
+      for (const l of wrapToWidth(view.secret.title, inner)) body.push({ text: l, title: true });
+      for (const line of view.secret.lines) for (const l of wrapToWidth(line, inner)) body.push({ text: l, title: false });
+      body.push({ text: "", title: false });
+      for (const { text, title } of body) {
+        const painted = title ? paint(fit(text), style.bold) : paint(fit(text), style.faint);
+        rows.push({ text: `${paint("│ ", style.faint)}${painted}${paint(" │", style.faint)}`, width: inner + 4 });
+      }
+      header = body.length;
+    }
     for (const row of render.rows) {
       const body = render.placeholder ? paint(row.body, style.faint) : row.body;
       const plainWidth = displayWidth(row.prefix) + displayWidth(row.body);
@@ -614,11 +639,11 @@ export class Screen {
         width: inner + 4,
       });
     }
-    // +1 for the top border; +2 for the box's left edge.
-    const cursorRow = 1 + render.cursorRow;
+    // +1 for the top border, plus any header rows; +2 for the box's left edge.
+    const cursorRow = 1 + header + render.cursorRow;
     const cursorCol = Math.min(2 + render.cursorCol, Math.max(0, width - 1));
     rows.push(border("╰", "╯"));
-    if (view.menu && view.menu.items.length > 0) {
+    if (view.menu && view.menu.items.length > 0 && !view.secret) {
       const menu = renderMenu(view.menu.items, view.menu.selected, { width, ...(view.menu.prefix ? { prefix: view.menu.prefix } : {}) });
       menu.rows.forEach((row, i) => {
         const t = truncateToWidth(row, width);

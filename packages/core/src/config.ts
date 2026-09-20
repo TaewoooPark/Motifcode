@@ -20,9 +20,9 @@
  * files in order.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 /** The hosted endpoint Motif-3 is served from. The `/v1` is added per request. */
 export const DEFAULT_ENDPOINT = "https://llm.onerouter.pro";
@@ -159,4 +159,68 @@ export function resolveEndpointConfig(opts: ResolveOptions = {}): EndpointConfig
  */
 export function withholdSecrets(env: NodeJS.ProcessEnv): void {
   delete env[ENV_API_KEY];
+}
+
+/* ------------------------------------------------------------------ */
+/* writing the credential                                              */
+/* ------------------------------------------------------------------ */
+
+/** Where a key typed at the terminal is kept: `~/.motif/.env`. */
+export function defaultEnvPath(home = homedir()): string {
+  return join(home, ".motif", ".env");
+}
+
+function quoteDotenvValue(value: string): string {
+  return /[\s#"'\\]/.test(value) ? `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"` : value;
+}
+
+/**
+ * Set one key in a dotenv file's text and leave everything else as it was.
+ *
+ * The first uncommented `KEY=` line is replaced in place; a file without one
+ * gets the line appended. Comments and other keys are kept verbatim — the
+ * file is the person's, and a login must not rewrite their notes.
+ */
+export function upsertDotenv(text: string, key: string, value: string): string {
+  const line = `${key}=${quoteDotenvValue(value)}`;
+  const pattern = new RegExp(`^(?:export\\s+)?${key}\\s*=`);
+  const lines = text.split(/\r?\n/);
+  if (lines[lines.length - 1] === "") lines.pop();
+  const at = lines.findIndex((l) => pattern.test(l.trim()));
+  if (at !== -1) lines[at] = line;
+  else lines.push(line);
+  return lines.join("\n") + "\n";
+}
+
+/** Remove every uncommented `KEY=` line; the rest of the file is untouched. */
+export function removeDotenvKey(text: string, key: string): string {
+  const pattern = new RegExp(`^(?:export\\s+)?${key}\\s*=`);
+  const kept = text.split(/\r?\n/).filter((l) => !pattern.test(l.trim()));
+  const out = kept.join("\n").replace(/\n+$/, "");
+  return out === "" ? "" : out + "\n";
+}
+
+/**
+ * Write the API key to a dotenv file, creating `~/.motif` on the way.
+ *
+ * The directory is made 0700 and the file 0600: the key is the one thing in
+ * this harness that must not be readable by another account on the machine.
+ * An existing file keeps its other lines. Returns the path written.
+ */
+export function saveApiKey(apiKey: string, path = defaultEnvPath()): string {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const existing = existsSync(path) ? readFileSync(path, "utf8") : "";
+  writeFileSync(path, upsertDotenv(existing, ENV_API_KEY, apiKey), { encoding: "utf8", mode: 0o600 });
+  chmodSync(path, 0o600);
+  return path;
+}
+
+/** Remove the API key from the file; true when there was one to remove. */
+export function forgetApiKey(path = defaultEnvPath()): boolean {
+  if (!existsSync(path)) return false;
+  const existing = readFileSync(path, "utf8");
+  const next = removeDotenvKey(existing, ENV_API_KEY);
+  if (next === existing) return false;
+  writeFileSync(path, next, { encoding: "utf8", mode: 0o600 });
+  return true;
 }

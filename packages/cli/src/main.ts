@@ -16,9 +16,12 @@ import {
   DEFAULT_MODEL,
   HttpTransport,
   defaultDotenvPaths,
+  defaultEnvPath,
+  forgetApiKey,
   relaxNodeHttpTimeouts,
   resolveEndpointConfig,
   runLoop,
+  saveApiKey,
   withholdSecrets,
   type LoopEvent,
 } from "@motifcode/core";
@@ -62,12 +65,13 @@ import { Screen, applyTheme, themeNames } from "@motifcode/tui";
 import { Chat } from "./chat.js";
 import { describePlugins, loadPlugins, type LoadedPlugins } from "./plugins.js";
 import { loadSettings, saveUserSetting } from "./settings.js";
+import { KEY_PAGE, normaliseKeyInput, readSecret, verifyApiKey } from "./login.js";
 import { doctor, formatChecks, worstState } from "./doctor.js";
 import { ToolExecutor } from "./executor.js";
 import { policyForAgent } from "./policy.js";
 import { buildAgentPrompt, buildSystemPrompt } from "./prompt.js";
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 
 interface Args {
   command: string;
@@ -116,7 +120,7 @@ function parseArgs(argv: string[]): Args {
       else if (BOOLEAN_FLAGS.has(a.slice(2))) flags[a.slice(2)] = true;
       else if (argv[i + 1] && !argv[i + 1]!.startsWith("-")) flags[a.slice(2)] = argv[++i]!;
       else flags[a.slice(2)] = true;
-    } else if (rest.length === 0 && ["doctor", "sessions", "resume", "skills", "agents", "plugins", "config", "lint", "distil", "metrics", "trust", "redact", "corpus-spec", "corpus-render", "help", "version"].includes(a)) {
+    } else if (rest.length === 0 && ["doctor", "login", "logout", "sessions", "resume", "skills", "agents", "plugins", "config", "lint", "distil", "metrics", "trust", "redact", "corpus-spec", "corpus-render", "help", "version"].includes(a)) {
       command = a;
     } else {
       rest.push(a);
@@ -347,11 +351,13 @@ function toolsHash(names: readonly string[]): string {
 
 /* ------------------------------------------------------------------ */
 
-const HELP = `motif ${VERSION} — a coding agent built for Motif-3
+const HELP = `motif ${VERSION} — a coding agent built for Motif-3 (unofficial; not affiliated with Motif Technologies)
 
   motif                     open the interactive session (a terminal is required)
   motif "<task>"            run one task and exit; add --interactive to stay
   motif -p "<question>"     print only the final reply, for scripts and pipes (also --print)
+  motif login               paste an Infron API key; it is checked and saved to ~/.motif/.env
+  motif logout              remove the saved key
   motif doctor              check the endpoint, the credentials and what the server produces
   motif sessions            list recorded sessions
   motif resume <file>       resume an interrupted session
@@ -392,6 +398,8 @@ distil flags
   --include-children        also export subagent scopes
 
 Connection
+  The first session asks for an Infron API key, checks it against the endpoint
+  and saves it to ~/.motif/.env; 'motif login' does the same outside a session.
   MOTIF_API_KEY, MOTIF_ENDPOINT and MOTIF_MODEL are read from the environment,
   then from ./.env, then from ~/.motif/.env — MOTIF_* keys only, and never into
   the environment. The key is sent as a bearer token and is withheld from every
@@ -421,6 +429,40 @@ is what any comparable measurement requires; "adaptive" moves to a simpler
 channel after repeated parse failures, and that move restarts the conversation
 because the transcript formats are not interchangeable.
 `;
+
+/** The hosted endpoint refuses unauthenticated requests; a local server may not need a key at all. */
+function keyRequired(endpoint: string): boolean {
+  return endpoint === DEFAULT_ENDPOINT;
+}
+
+/**
+ * `motif login`, and the fallback for a one-shot task without a key: ask at
+ * the terminal, check with the endpoint, save. Returns the key, or null when
+ * none was entered or it was refused — with the reason already printed.
+ */
+async function loginAtTerminal(endpoint: string, model: string): Promise<string | null> {
+  const path = defaultEnvPath();
+  if (process.stdin.isTTY) {
+    process.stdout.write(
+      `Paste your Infron API key. Get one at ${KEY_PAGE} — Motif-3 is free there through September 2026.\n` +
+        `It is checked against ${endpoint}, then saved to ${path} (readable only by you).\n`,
+    );
+  }
+  const raw = await readSecret("key › ");
+  const key = raw === null ? "" : normaliseKeyInput(raw);
+  if (key === "") {
+    process.stderr.write("no key entered\n");
+    return null;
+  }
+  const result = await verifyApiKey({ endpoint, model, apiKey: key });
+  if (!result.ok) {
+    process.stderr.write(`${result.reason}\n`);
+    return null;
+  }
+  saveApiKey(key, path);
+  process.stdout.write(`signed in · the key is saved to ${path}\n`);
+  return key;
+}
 
 async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2));
@@ -565,6 +607,17 @@ async function main(): Promise<number> {
           ? `masked: ${hits.join(", ")}. Pattern matching is not exhaustive; check before sharing.\n`
           : "no recognised secrets. Pattern matching is not exhaustive; check before sharing.\n",
       );
+      return 0;
+    }
+
+    case "login": {
+      const key = await loginAtTerminal(endpoint, model);
+      return key === null ? 1 : 0;
+    }
+
+    case "logout": {
+      const path = defaultEnvPath();
+      process.stdout.write(forgetApiKey(path) ? `the key was removed from ${path}\n` : `no key in ${path}\n`);
       return 0;
     }
 
@@ -841,6 +894,8 @@ async function main(): Promise<number> {
       channelPolicy,
       ...(apiKey !== undefined ? { apiKey } : {}),
       ...(connection.sources.apiKey !== undefined ? { apiKeySource: connection.sources.apiKey } : {}),
+      requireKey: keyRequired(endpoint),
+      envPath: defaultEnvPath(),
       skills,
       agents,
       hooks,
@@ -859,10 +914,24 @@ async function main(): Promise<number> {
     return 2;
   }
 
+  // A one-shot task or a print against the hosted endpoint needs the key as
+  // much as the session does. With a terminal it is asked for here; in a
+  // pipe there is nobody to ask, and saying so beats a 401 later.
+  let sessionKey = apiKey;
+  if (sessionKey === undefined && keyRequired(endpoint)) {
+    if (!tty) {
+      process.stderr.write(`no API key: run 'motif login', or put MOTIF_API_KEY in ${defaultEnvPath()}\n`);
+      return 2;
+    }
+    const key = await loginAtTerminal(endpoint, model);
+    if (key === null) return 2;
+    sessionKey = key;
+  }
+
   if (printOnly) {
     // The conversational contract without the conversation: a reply ends
     // the task and is written to stdout, nothing else is. For pipes.
-    const transport = new HttpTransport({ endpoint, model, ...(apiKey !== undefined ? { apiKey } : {}) });
+    const transport = new HttpTransport({ endpoint, model, ...(sessionKey !== undefined ? { apiKey: sessionKey } : {}) });
     const executor = new ToolExecutor({
       cwd,
       hooks,
@@ -897,7 +966,7 @@ async function main(): Promise<number> {
     }
   }
 
-  const transport = new HttpTransport({ endpoint, model, ...(apiKey !== undefined ? { apiKey } : {}) });
+  const transport = new HttpTransport({ endpoint, model, ...(sessionKey !== undefined ? { apiKey: sessionKey } : {}) });
   const screen = new Screen({ showThinking, verbose: args.flags["verbose"] === true, cwd });
   const runId = new Date().toISOString().replace(/[:.]/g, "-");
   // `--journal` so a benchmark runner knows where the record went without

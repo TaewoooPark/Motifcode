@@ -6,16 +6,20 @@
  * being found, and being found by the wrong process.
  */
 
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_ENDPOINT,
   DEFAULT_MODEL,
+  forgetApiKey,
   normalizeEndpoint,
   parseDotenv,
+  removeDotenvKey,
   resolveEndpointConfig,
+  saveApiKey,
+  upsertDotenv,
   withholdSecrets,
 } from "../src/config.js";
 
@@ -111,5 +115,40 @@ describe("resolution", () => {
     const env: NodeJS.ProcessEnv = { MOTIF_API_KEY: "sk-secret", PATH: "/bin" };
     withholdSecrets(env);
     expect(env).toEqual({ PATH: "/bin" });
+  });
+});
+
+describe("writing the key", () => {
+  it("replaces the key line in place and keeps the rest of the file", () => {
+    const text = "# my notes\nMOTIF_ENDPOINT=https://x\nexport MOTIF_API_KEY=old\nOTHER=1\n";
+    expect(upsertDotenv(text, "MOTIF_API_KEY", "sk-new")).toBe("# my notes\nMOTIF_ENDPOINT=https://x\nMOTIF_API_KEY=sk-new\nOTHER=1\n");
+    expect(upsertDotenv("", "MOTIF_API_KEY", "sk-new")).toBe("MOTIF_API_KEY=sk-new\n");
+    expect(upsertDotenv("A=1", "MOTIF_API_KEY", "sk-new")).toBe("A=1\nMOTIF_API_KEY=sk-new\n");
+    // A commented-out line is a note, not the setting.
+    expect(upsertDotenv("# MOTIF_API_KEY=commented\n", "MOTIF_API_KEY", "sk-new")).toBe("# MOTIF_API_KEY=commented\nMOTIF_API_KEY=sk-new\n");
+  });
+
+  it("quotes a value that needs it, in a form parseDotenv reads back", () => {
+    const out = upsertDotenv("", "MOTIF_API_KEY", "has space#hash");
+    expect(parseDotenv(out)["MOTIF_API_KEY"]).toBe("has space#hash");
+  });
+
+  it("removes only the key", () => {
+    expect(removeDotenvKey("A=1\nMOTIF_API_KEY=x\nB=2\n", "MOTIF_API_KEY")).toBe("A=1\nB=2\n");
+    expect(removeDotenvKey("MOTIF_API_KEY=x\n", "MOTIF_API_KEY")).toBe("");
+    expect(removeDotenvKey("A=1\n", "MOTIF_API_KEY")).toBe("A=1\n");
+  });
+
+  it("saves the key to a file only its owner can read, and forgets it again", () => {
+    const home = mkdtempSync(join(tmpdir(), "motif-home-"));
+    const path = join(home, ".motif", ".env");
+    expect(saveApiKey("sk-1", path)).toBe(path);
+    expect(readFileSync(path, "utf8")).toBe("MOTIF_API_KEY=sk-1\n");
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(statSync(join(home, ".motif")).mode & 0o777).toBe(0o700);
+    expect(resolveEndpointConfig({ env: {}, dotenvPaths: [path] }).apiKey).toBe("sk-1");
+    expect(forgetApiKey(path)).toBe(true);
+    expect(forgetApiKey(path)).toBe(false);
+    expect(resolveEndpointConfig({ env: {}, dotenvPaths: [path] }).apiKey).toBeUndefined();
   });
 });

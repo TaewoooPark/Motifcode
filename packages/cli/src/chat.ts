@@ -28,7 +28,10 @@ import { AgentRegistry, AgentScheduler, concurrencyFor } from "@motifcode/agents
 import {
   HttpTransport,
   buildCompactedHistory,
+  defaultEnvPath,
+  forgetApiKey,
   runLoop,
+  saveApiKey,
   summarizeTranscript,
   type ChannelPolicy,
   type LoopEvent,
@@ -56,6 +59,7 @@ import {
   type MenuItem,
 } from "@motifcode/tui";
 import { expandMentions, forgetFiles, listFiles, matchFiles } from "./files.js";
+import { loginLines, normaliseKeyInput, verifyApiKey, type VerifyResult } from "./login.js";
 import { COMMANDS, findCommand, parseSlash, runSlash, type ChatSettings, type CommandContext, type PersistableKey } from "./commands.js";
 import type { LoadedSettings } from "./settings.js";
 import { doctor, formatChecks } from "./doctor.js";
@@ -98,6 +102,16 @@ export interface ChatOptions {
   notesPath?: string;
   /** A journal to continue from before the first prompt — `--continue`. */
   continueFrom?: string;
+  /**
+   * Ask for a key when none is configured — before the first prompt, and
+   * again before a task if it was skipped. On for the hosted endpoint, which
+   * refuses unauthenticated requests; off for a local server without auth.
+   */
+  requireKey?: boolean;
+  /** Where a key typed at the prompt is saved. Defaults to `~/.motif/.env`. */
+  envPath?: string;
+  /** Injected for tests; defaults to `GET /v1/models` with the key. */
+  verifyKey?: (apiKey: string) => Promise<VerifyResult>;
 }
 
 interface ActiveTask {
@@ -164,6 +178,11 @@ export class Chat {
   private shellBusy = false;
   /** A tool call waiting for the person's yes or no, and which of the three answers is selected. */
   private pendingConfirm: { call: ToolInvocation; resolve: (v: "allow" | "deny") => void; selected: number } | null = null;
+  /** A secret being typed in place of the prompt — the API key at login. */
+  private pendingSecret: { title: string; lines: string[]; prompt: string; cancelHint: string; resolve: (v: string | null) => void } | null = null;
+  /** The credential for this session. Starts as the caller's; `/login` replaces it, `/logout` drops it. */
+  private apiKey: string | undefined;
+  private apiKeySource: string | undefined;
   /** Tools the person allowed for the rest of the session with `a`. */
   private readonly alwaysAllowed = new Set<string>();
   private active: ActiveTask | null = null;
@@ -191,6 +210,8 @@ export class Chat {
     this.screen = opts.screen;
     this.settings = { ...opts.settings };
     this.projectNotes = opts.projectNotes;
+    this.apiKey = opts.apiKey;
+    this.apiKeySource = opts.apiKeySource;
     this.now = opts.now ?? (() => Date.now());
     this.scheduler = new AgentScheduler(concurrencyFor(this.settings.endpoint), (entry) =>
       this.screen.apply({ type: "queue", agent: entry.agent, state: entry.state === "failed" ? "done" : entry.state }),
@@ -234,27 +255,34 @@ export class Chat {
       }
       this.screen.setLabel(this.settings.model);
       this.screen.setTitle(`motif · ${this.settings.cwd.split("/").pop() ?? this.settings.cwd}`);
-      if (!this.opts.apiKey) {
+      if (this.apiKey === undefined && !this.opts.requireKey) {
         this.screen.append({
           kind: "notice",
           level: "warn",
-          text: "no API key is configured: set MOTIF_API_KEY in ~/.motif/.env or ./.env, then /doctor",
+          text: "no API key is configured: /login, or set MOTIF_API_KEY in ~/.motif/.env or ./.env, then /doctor",
         });
       }
       this.screen.attachInput(this.opts.stdin, (key) => this.onKey(key));
       this.refresh();
-      if (this.opts.continueFrom) {
-        void this.resume(this.opts.continueFrom)
-          .then((lines) => this.screen.append({ kind: "system", title: "continuing", lines }))
-          .catch((err: unknown) => this.screen.append({ kind: "notice", level: "error", text: err instanceof Error ? err.message : String(err) }))
-          .then(() => {
-            this.refresh();
-            if (this.opts.initialTask) void this.submit(this.opts.initialTask);
-          });
-      } else if (this.opts.initialTask) {
-        void this.submit(this.opts.initialTask);
-      }
+      void this.start();
     });
+  }
+
+  /** What happens before the first prompt is free: the login, the resumed conversation, the first task. */
+  private async start(): Promise<void> {
+    if (this.needsLogin) {
+      this.screen.append({ kind: "system", title: "login", lines: await this.login("startup") });
+      this.refresh();
+    }
+    if (this.opts.continueFrom) {
+      try {
+        this.screen.append({ kind: "system", title: "continuing", lines: await this.resume(this.opts.continueFrom) });
+      } catch (err) {
+        this.screen.append({ kind: "notice", level: "error", text: err instanceof Error ? err.message : String(err) });
+      }
+      this.refresh();
+    }
+    if (this.opts.initialTask) void this.submit(this.opts.initialTask);
   }
 
   /* ---------------------------------------------------------------- */
@@ -262,6 +290,10 @@ export class Chat {
   /* ---------------------------------------------------------------- */
 
   private onKey(key: Key): void {
+    if (this.pendingSecret) {
+      this.answerSecret(key);
+      return;
+    }
     if (this.pendingConfirm) {
       this.answerConfirm(key);
       return;
@@ -536,6 +568,152 @@ export class Chat {
     };
   }
 
+  /* ---------------------------------------------------------------- */
+  /* signing in                                                        */
+  /* ---------------------------------------------------------------- */
+
+  private get envPath(): string {
+    return this.opts.envPath ?? defaultEnvPath();
+  }
+
+  private get needsLogin(): boolean {
+    return this.opts.requireKey === true && this.apiKey === undefined;
+  }
+
+  /** Take over the prompt for one secret; resolves with the text, or null when given up. */
+  private askSecret(title: string, lines: string[], prompt: string, cancelHint: string): Promise<string | null> {
+    return new Promise((resolve) => {
+      this.composer.clear();
+      this.pendingSecret = { title, lines, prompt, cancelHint, resolve };
+      this.refresh();
+    });
+  }
+
+  /**
+   * Keys while a secret is being typed. Editing keys edit; Enter sends what
+   * is there; Esc, Ctrl-C and Ctrl-D give up. Nothing else does anything —
+   * no menu, no history, no shortcuts panel — and the text never reaches the
+   * composer's history or the history file, because it is never submitted.
+   */
+  private answerSecret(key: Key): void {
+    const pending = this.pendingSecret;
+    if (!pending) return;
+    const finish = (value: string | null): void => {
+      this.pendingSecret = null;
+      this.composer.clear();
+      pending.resolve(value);
+    };
+    switch (key.type) {
+      case "text":
+        this.composer.insert(key.text);
+        break;
+      case "paste":
+        // A key never contains a line break; the newline a copy carries would
+        // otherwise be sent as part of it.
+        this.composer.insert(key.text.replace(/[\r\n]+/g, ""));
+        break;
+      case "enter":
+        if (this.composer.text.trim() !== "") finish(this.composer.text);
+        break;
+      case "escape":
+        finish(null);
+        break;
+      case "backspace":
+        this.composer.backspace();
+        break;
+      case "delete":
+        this.composer.deleteForward();
+        break;
+      case "left":
+        this.composer.left();
+        break;
+      case "right":
+        this.composer.right();
+        break;
+      case "home":
+        this.composer.home();
+        break;
+      case "end":
+        this.composer.end();
+        break;
+      case "word-left":
+        this.composer.wordLeft();
+        break;
+      case "word-right":
+        this.composer.wordRight();
+        break;
+      case "delete-word":
+        this.composer.deleteWordBack();
+        break;
+      case "ctrl":
+        if (key.key === "c" || key.key === "d") finish(null);
+        else if (key.key === "u") this.composer.killToStart();
+        else if (key.key === "k") this.composer.killToEnd();
+        else if (key.key === "l") this.screen.redraw();
+        break;
+      default:
+        break;
+    }
+    this.refresh();
+  }
+
+  /**
+   * Ask for the key, check it, keep it.
+   *
+   * Before the first prompt when none was found, before a task if that was
+   * skipped, and on `/login`. A rejected key is asked for again with the
+   * endpoint's reason. Giving up leaves the session without a key: the next
+   * task asks once more, which is a better place to find out than a refusal
+   * to open at all.
+   */
+  private async login(reason: "startup" | "task" | "command"): Promise<string[]> {
+    const title =
+      reason === "command" ? "Paste your Infron API key" : reason === "task" ? "An API key is needed before the task can run" : "Paste your Infron API key to get started";
+    const cancelHint = reason === "command" ? "enter to check and save · esc to cancel" : "enter to check and save · esc to skip for now";
+    for (;;) {
+      const raw = await this.askSecret(title, loginLines(this.envPath), "key › ", cancelHint);
+      if (raw === null) {
+        return reason === "command"
+          ? ["login cancelled"]
+          : [`no key entered; /login when you have one, or put MOTIF_API_KEY in ${this.envPath}`];
+      }
+      const key = normaliseKeyInput(raw);
+      if (key === "") continue;
+      this.screen.setActivity("Checking the key…");
+      let result: VerifyResult;
+      try {
+        result = await (this.opts.verifyKey ?? ((k: string) => verifyApiKey({ endpoint: this.settings.endpoint, model: this.settings.model, apiKey: k })))(key);
+      } finally {
+        this.screen.setActivity(null);
+      }
+      if (!result.ok) {
+        this.screen.append({ kind: "notice", level: "error", text: `${result.reason} — try again, or press esc` });
+        continue;
+      }
+      this.apiKey = key;
+      try {
+        const path = saveApiKey(key, this.envPath);
+        this.apiKeySource = `${path} (MOTIF_API_KEY)`;
+      } catch (err) {
+        this.apiKeySource = "this session only";
+        return [`the key works, but ${this.envPath} could not be written: ${err instanceof Error ? err.message : String(err)}`, "it is kept for this session only"];
+      }
+      return [`signed in · the key is saved to ${this.envPath}`];
+    }
+  }
+
+  private logout(): string[] {
+    const source = this.apiKeySource;
+    const had = this.apiKey !== undefined;
+    const removed = forgetApiKey(this.envPath);
+    this.apiKey = undefined;
+    this.apiKeySource = undefined;
+    if (!had && !removed) return ["no key is set"];
+    const lines = removed ? [`the key was removed from ${this.envPath}`] : [`this session's key came from ${source ?? "the caller"}, which was left as it is`];
+    lines.push("the session no longer sends a key; the next task asks for one, or /login now");
+    return lines;
+  }
+
   private menuItems(): MenuItem[] {
     const items = this.mentionOpen() ? this.mentionItems() : menuItemsFor(this.composer.text, this.allMenuItems());
     // A new filter starts at the top; a longer or shorter one keeps whatever
@@ -555,7 +733,8 @@ export class Chat {
       draft: this.composer.snapshot(),
       placeholder: PLACEHOLDER,
       ...(this.pendingConfirm ? { confirm: this.confirmView(this.pendingConfirm.call, this.pendingConfirm.selected) } : {}),
-      ...(items.length > 0 && !this.pendingConfirm
+      ...(this.pendingSecret ? { secret: { title: this.pendingSecret.title, lines: this.pendingSecret.lines, prompt: this.pendingSecret.prompt } } : {}),
+      ...(items.length > 0 && !this.pendingConfirm && !this.pendingSecret
         ? { menu: { items, selected: clampSelection(this.menuSelected, items.length), prefix: this.mentionOpen() ? "@" : "/" } }
         : {}),
     };
@@ -564,6 +743,7 @@ export class Chat {
   }
 
   private hintText(): string {
+    if (this.pendingSecret) return this.pendingSecret.cancelHint;
     if (this.pendingConfirm) return "1 2 3 or ↑↓ enter · esc declines";
     if (this.ctrlCArmedAt > 0 && this.now() - this.ctrlCArmedAt <= CTRL_C_WINDOW_MS) return "ctrl-c again to quit";
     if (this.queued.length > 0) {
@@ -703,8 +883,13 @@ export class Chat {
    */
   private async runTask(task: string, display?: string): Promise<void> {
     this.screen.append({ kind: "user", text: display ?? task });
+    if (this.needsLogin) {
+      // Skipped at startup, or logged out since: the task waits for a key.
+      this.screen.append({ kind: "system", title: "login", lines: await this.login("task") });
+      this.refresh();
+    }
     this.tasks.push(task);
-    const transport = (this.opts.makeTransport ?? defaultTransport)(this.settings, this.opts.apiKey);
+    const transport = (this.opts.makeTransport ?? defaultTransport)(this.settings, this.apiKey);
     const runId = new Date(this.now()).toISOString().replace(/[:.]/g, "-") + `-${String(this.totals.tasks + 1).padStart(2, "0")}`;
     const journalPath = join(this.opts.journalDir, `${runId}.jsonl`);
     const scope: ScopeIdentity = { scopeId: "root", scopeKind: "root" };
@@ -919,7 +1104,7 @@ export class Chat {
   private async compactNow(focus = ""): Promise<string[]> {
     if (this.history.length === 0) return ["nothing to compact; the conversation is empty"];
     const before = this.totals.lastContext;
-    const transport = (this.opts.makeTransport ?? defaultTransport)(this.settings, this.opts.apiKey);
+    const transport = (this.opts.makeTransport ?? defaultTransport)(this.settings, this.apiKey);
     this.screen.setActivity("Compacting the conversation…");
     try {
       const summary = await summarizeTranscript({
@@ -1107,13 +1292,15 @@ export class Chat {
       },
       hooks: () => this.opts.hookLines ?? ["no hooks"],
       persist: (key, value) => (this.opts.persist ? this.opts.persist(key, value) : null),
+      login: () => this.login("command"),
+      logout: () => this.logout(),
       doctor: async () =>
         formatChecks(
           await doctor({
             endpoint: this.settings.endpoint,
             model: this.settings.model,
-            ...(this.opts.apiKey !== undefined ? { apiKey: this.opts.apiKey } : {}),
-            ...(this.opts.apiKeySource !== undefined ? { apiKeySource: this.opts.apiKeySource } : {}),
+            ...(this.apiKey !== undefined ? { apiKey: this.apiKey } : {}),
+            ...(this.apiKeySource !== undefined ? { apiKeySource: this.apiKeySource } : {}),
           }),
         ).split("\n"),
       skills: () => this.opts.skills.list().map((s) => `${s.name.padEnd(16)} ${s.description}  (${s.source})`),
@@ -1189,7 +1376,7 @@ export class Chat {
       `permissions ${s.permissions}${this.alwaysAllowed.size ? ` (always: ${[...this.alwaysAllowed].join(", ")})` : ""}`,
       `thinking    ${this.screen.thinkingShown ? "shown" : "hidden"}`,
       `compact-at  ${s.compactAt} of ${MAX_CONTEXT.toLocaleString("en-US")} tokens`,
-      `api key     ${this.opts.apiKey ? `present, from ${this.opts.apiKeySource ?? "the caller"}` : "none"}`,
+      `api key     ${this.apiKey ? `present, from ${this.apiKeySource ?? "the caller"}` : "none — /login"}`,
       `journal     ${this.lastJournalPath ?? `(none yet; ${this.opts.journalDir})`}`,
       `history     ${this.history.length} turn(s) in the conversation`,
       `tasks       ${t.tasks} run · ${t.done} done · ${t.interrupted} interrupted`,

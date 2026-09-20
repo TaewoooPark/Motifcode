@@ -1,14 +1,36 @@
 {
   "name": "motifcode",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
-  "description": "The motif command line — a coding agent harness built for Motif-3",
+  "description": "Unofficial coding agent harness built for Motif-3: a Claude Code-style terminal session over the hosted endpoint",
+  "keywords": [
+    "motif",
+    "motif-3",
+    "coding-agent",
+    "agent",
+    "cli",
+    "terminal",
+    "harness",
+    "llm",
+    "infron"
+  ],
+  "homepage": "https://github.com/TaewoooPark/Motifcode#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TaewoooPark/Motifcode.git",
+    "directory": "packages/cli"
+  },
+  "bugs": {
+    "url": "https://github.com/TaewoooPark/Motifcode/issues"
+  },
+  "author": "Taewoo Park",
   "license": "Apache-2.0",
   "engines": {
     "node": ">=20"
   },
   "bin": {
-    "motif": "./dist/motif.js"
+    "motif": "./dist/motif.js",
+    "motifcode": "./dist/motif.js"
   },
   "main": "./src/index.ts",
   "exports": {
@@ -18,6 +40,9 @@
     "dist/motif.js",
     "dist/build-info.json"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {},
   "devDependencies": {
     "@motifcode/agents": "workspace:*",

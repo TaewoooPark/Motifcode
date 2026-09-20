@@ -1,0 +1,46 @@
+# Publish the CLI to npm when a version tag is pushed.
+#
+# No token is stored anywhere: the job authenticates to npm with the
+# workflow's OIDC identity (npm "trusted publishing"), which the package's
+# settings on npmjs.com must name — this repository, this workflow file. The
+# first release of a package cannot use it, which is why 0.2.0 was published
+# from a laptop; every later one goes through here, with provenance attached.
+#
+#   git tag v0.3.0 && git push origin v0.3.0
+#
+# The tag must match packages/cli/package.json, or the job stops before it
+# publishes anything.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: "https://registry.npmjs.org"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm build
+      - run: pnpm test
+      - run: pnpm lint:tools
+      - name: the tag names the version in package.json
+        run: |
+          version="$(node -p 'require("./packages/cli/package.json").version')"
+          test "v${version}" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} but package.json says ${version}"; exit 1; }
+      # Trusted publishing needs npm 11.5 or later.
+      - run: npm install -g npm@latest
+      - run: npm publish --provenance --access public
+        working-directory: packages/cli

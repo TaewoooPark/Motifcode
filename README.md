@@ -11,6 +11,7 @@
 </p>
 
 <p align="center">
+  <img src="https://img.shields.io/npm/v/motifcode?style=flat-square&labelColor=000000&color=333333" alt="npm">
   <img src="https://img.shields.io/github/last-commit/TaewoooPark/Motifcode?style=flat-square&labelColor=000000&color=333333" alt="Last commit">
   <img src="https://img.shields.io/github/actions/workflow/status/TaewoooPark/Motifcode/ci.yml?branch=main&style=flat-square&labelColor=000000&color=333333" alt="CI">
   <img src="https://img.shields.io/badge/license-Apache--2.0-000000?style=flat-square&labelColor=000000&color=333333" alt="Apache-2.0">
@@ -28,7 +29,8 @@
 > **Free through September 2026.** Motif-3 is served by [Infron](https://infron.ai) as
 > **Motif: Motif 3 (Free)** — $0 per million tokens in and out, the full 262,144-token
 > window — and free access has been announced through the end of September 2026.
-> An account and an API key are all it takes; see [Get an API key](#get-an-api-key-from-infron).
+> An account and an API key are all it takes: `npm install -g motifcode`, then `motif` asks for the key.
+> See [Get an API key](#get-an-api-key-from-infron).
 > Terms can change, and the [model page](https://infron.ai/models/motif/motif-3) is the source of truth.
 
 > **Not an official Motif project.** Motifcode is an independent open-source project.
@@ -249,21 +251,39 @@ full 262,144-token window advertised.
 
 ## Install
 
-Needs **Node 20+** and **pnpm**. There is no npm release yet; build from the
-repository:
+Needs **Node 20+**. The package is one file with no runtime dependencies.
 
 ```bash
-git clone https://github.com/TaewoooPark/Motifcode.git
-cd Motifcode
-pnpm install
-pnpm build                    # bundles the CLI to packages/cli/dist/motif.js
-
-cd packages/cli && npm link   # puts `motif` on your PATH; `npm pack` makes a tarball instead
-motif --version
+npm install -g motifcode      # or, without installing anything: npx motifcode
+cd your-project
+motif
 ```
 
-`./packages/cli/dist/motif.js` runs without the link, and the bundle has no
-runtime dependencies.
+The first session asks for the key and opens as soon as it is accepted:
+
+```
+
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ Paste your Infron API key to get started                                     │
+│ Get one at https://infron.ai/dashboard/apiKeys                               │
+│ Motif-3 is free there through September 2026.                                │
+│ The key is checked with the endpoint and saved to ~/.motif/.env,             │
+│ readable only by you and never shown to the model.                           │
+│                                                                              │
+│ key › •••••••••••••••••••••••••••••••••••••••••••••••••••                    │
+╰──────────────────────────────────────────────────────────────────────────────╯
+  enter to check and save · esc to skip for now
+```
+
+Enter checks the key with a one-token request to the endpoint and saves it;
+a rejected key is asked for again with the server's reason, and Esc skips for
+now. From source instead:
+
+```bash
+git clone https://github.com/TaewoooPark/Motifcode.git && cd Motifcode
+pnpm install && pnpm build    # bundles the CLI to packages/cli/dist/motif.js
+cd packages/cli && npm link   # puts `motif` (and `motifcode`) on your PATH
+```
 
 ---
 
@@ -280,14 +300,12 @@ configuration is a base URL, a model id and a key:
 
 1. Sign in at **[infron.ai/login](https://infron.ai/login)** (email or Google).
 2. Open **[Dashboard → API Keys](https://infron.ai/dashboard/apiKeys)** and click **Add new key**.
-3. Put the key where `motif` reads it — for every project:
-
-   ```bash
-   mkdir -p ~/.motif && printf 'MOTIF_API_KEY=sk-...\n' > ~/.motif/.env && chmod 600 ~/.motif/.env
-   ```
-
-   or for one project, `cp .env.example .env` and fill in the key. The
-   environment variable works too, and `--env-file <path>` puts a file first.
+3. Run `motif` and paste the key when asked. It is checked against the
+   endpoint with a one-token request, saved to `~/.motif/.env` (readable only
+   by you), and never shown to the model. `motif login` does the same outside
+   a session, and `/login` and `/logout` inside one. A `MOTIF_API_KEY` in the
+   environment or in a `.env` next to the project works too; `--env-file
+   <path>` puts a file first.
 4. Check the connection:
 
    ```bash
@@ -332,6 +350,7 @@ twice quits.
 ```bash
 motif "fix the failing test in tests/" --cwd /path/to/repo
 motif "fix the failing test" --interactive       # stay in the session afterwards
+motif login                                       # paste a key outside a session; motif logout removes it
 motif -p "what does packages/core/src/loop.ts do?" # print only the final reply
 motif sessions                                    # recorded sessions
 motif resume <file>                               # resume an interrupted one
@@ -346,6 +365,7 @@ motif skills · motif agents · motif plugins · motif config · motif trust
 | `/status` (`/cost`) | connection, settings and session totals |
 | `/config` | effective settings, where each came from, and the files |
 | `/doctor` | probe the endpoint: auth, parsers, cache, channels |
+| `/login`, `/logout` | paste an Infron API key, checked and saved to `~/.motif/.env`; remove the saved key |
 | `/model [id]`, `/endpoint [url]` | show or set the model id or endpoint for the next task |
 | `/channel [toolcall\|object\|raw]` | show or set the action channel; changing it restarts the conversation |
 | `/max-turns [n]`, `/max-tokens [n\|off]`, `/seed [n\|off]` | per-task ceilings and the sampling seed |
@@ -517,6 +537,14 @@ pnpm build
 pnpm test          # unit, integration, CLI end-to-end, and an install smoke
 pnpm lint:tools    # schema linter — fails the build on loose schemas
 ```
+
+**Releasing.** Bump `version` in both `package.json` files and `VERSION` in
+`packages/cli/src/main.ts` (the install test checks the binary reports the
+packed version), commit, then tag: `git tag v0.3.0 && git push origin v0.3.0`.
+The release workflow runs the suite and publishes to npm with provenance
+through npm's trusted publishing, so no token is stored anywhere; the
+package's settings on npmjs.com name this repository and `release.yml` as the
+trusted publisher.
 
 The Python side needs only jinja2 for the prompt goldens, and a real tensor
 backend for the pruning toolkit's slicing tests:
