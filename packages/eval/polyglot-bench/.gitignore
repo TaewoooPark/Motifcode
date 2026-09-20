@@ -1,0 +1,14 @@
+# campaign outputs and regenerable inputs; the kit itself is what is versioned
+polyglot-benchmark/
+js-deps/node_modules/
+suite-*/
+work/
+logs/
+results/
+verify/
+manifests/
+chunks/
+instances.json
+corpus-spec.json
+REPORT.md
+report.html

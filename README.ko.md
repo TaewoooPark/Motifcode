@@ -298,7 +298,8 @@ Motif-3는 총 314B 매개변수에 토큰당 13.2B가 활성화되는 mixture-o
 않고, Codex는 스트림 유휴 타임아웃을 올린 채(스톡 300초는 이 엔드포인트의 긴 추론
 스텝에서 스트림을 끊었음), OpenCode는 웹 도구를 막은 채 돌았습니다. 방법, 언어별
 결과, 전체 행, 사건 기록은 [`packages/eval/REPORT.md`](packages/eval/REPORT.md)에
-있습니다.
+있고, 자기 키로 같은 실행을 반복할 수 있는 어댑터와 스크립트는
+[`packages/eval/polyglot-bench/`](packages/eval/polyglot-bench/)에 있습니다.
 
 ---
 
@@ -315,7 +316,7 @@ packages/agents/     서브에이전트 정의와 로컬 스케줄러
 packages/hooks/      생명주기 셸 훅
 packages/journal/    추가 전용 세션 로그, 재개, 궤적 내보내기
 packages/cli/        `motif` 명령, 대화형 세션, 로그인, doctor, 플러그인
-packages/eval/       폴리글랏 스위트, 캠페인 러너, 워크트리 채점기, REPORT.md (위 벤치마크)
+packages/eval/       폴리글랏 스위트, 캠페인 러너, 워크트리 채점기, REPORT.md와 polyglot-bench/ 키트 (위 벤치마크)
 toolkit/             프롬프트 골든(jinja2), 전문가 가지치기 수술, 캠페인 점수표
 corpus/              벤더 템플릿 + 생성된 골든
 docs/                로고, 스크린샷, 벤치마크 그림, 모델 가이드

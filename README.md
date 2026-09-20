@@ -310,7 +310,9 @@ router's repetition abort and 18 on the cap; Motifcode ended 22 on the cap and
 idle timeout raised (stock 300 s dropped the stream on this endpoint's long
 reasoning steps), OpenCode with web tools denied. Method, per-language results,
 every row and the incident log are in
-[`packages/eval/REPORT.md`](packages/eval/REPORT.md).
+[`packages/eval/REPORT.md`](packages/eval/REPORT.md); the adapters and scripts
+to repeat the run with your own key are in
+[`packages/eval/polyglot-bench/`](packages/eval/polyglot-bench/).
 
 ---
 
@@ -327,7 +329,7 @@ packages/agents/     subagent definitions and the local scheduler
 packages/hooks/      lifecycle shell hooks
 packages/journal/    append-only session log, resume, trajectory export
 packages/cli/        the `motif` command, the interactive session, login, doctor, plugins
-packages/eval/       polyglot suite, campaign runner, worktree grader, REPORT.md (the benchmark above)
+packages/eval/       polyglot suite, campaign runner, worktree grader, REPORT.md and the polyglot-bench/ kit (the benchmark above)
 toolkit/             prompt goldens (jinja2), expert-pruning surgery, campaign score table
 corpus/              vendored template + generated goldens
 docs/                logo, screenshots, benchmark figure, model guide

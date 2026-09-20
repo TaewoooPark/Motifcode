@@ -1,0 +1,26 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "infron/motif/motif-3",
+  "provider": {
+    "infron": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Infron (Motif-3)",
+      "options": {
+        "baseURL": "https://llm.onerouter.pro/v1",
+        "apiKey": "{env:MOTIF_API_KEY}"
+      },
+      "models": {
+        "motif/motif-3": {
+          "name": "Motif-3",
+          "limit": { "context": 262144, "output": 16384 },
+          "tool_call": true,
+          "reasoning": true
+        }
+      }
+    }
+  },
+  "permission": {
+    "webfetch": "deny",
+    "websearch": "deny"
+  }
+}

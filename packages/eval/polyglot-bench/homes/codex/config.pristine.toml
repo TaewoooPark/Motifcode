@@ -1,0 +1,17 @@
+# Pristine Codex config, copied into a per-row CODEX_HOME by adapters/codex.sh.
+model = "motif/motif-3"
+model_provider = "infron"
+model_context_window = 262144
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+
+[model_providers.infron]
+name = "Infron (Motif-3)"
+base_url = "https://llm.onerouter.pro/v1"
+env_key = "MOTIF_API_KEY"
+wire_api = "responses"
+# Stock Codex drops a stream after 300 s without an SSE event. Motif-3's long reasoning steps on this
+# endpoint run 200-300 s and the responses route sends nothing until they finish, so two codex rows died
+# reconnecting until the 900 s wall cap. This is the same accommodation motifcode makes for itself
+# (it disables Node's 300 s header timeout and waits up to 30 minutes per request).
+stream_idle_timeout_ms = 1800000
