@@ -1,4 +1,5 @@
-# Publish the CLI to npm when a version tag is pushed.
+# Release on a version tag: publish the CLI to npm, then create the GitHub
+# release for the tag.
 #
 # No token is stored anywhere: the job authenticates to npm with the
 # workflow's OIDC identity (npm "trusted publishing"), which the package's
@@ -9,7 +10,9 @@
 #   git tag v0.3.0 && git push origin v0.3.0
 #
 # The tag must match packages/cli/package.json, or the job stops before it
-# publishes anything.
+# publishes anything. A version already on the registry is not published
+# again, and a release that already exists is left alone, so a tag pushed
+# after a hand publish only fills in what is missing.
 name: release
 
 on:
@@ -17,7 +20,7 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 jobs:
@@ -37,10 +40,27 @@ jobs:
       - run: pnpm test
       - run: pnpm lint:tools
       - name: the tag names the version in package.json
+        id: version
         run: |
           version="$(node -p 'require("./packages/cli/package.json").version')"
           test "v${version}" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} but package.json says ${version}"; exit 1; }
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          if npm view "motifcode@${version}" version >/dev/null 2>&1; then
+            echo "motifcode@${version} is already on the registry; not publishing again"
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          fi
       # Trusted publishing needs npm 11.5 or later.
       - run: npm install -g npm@latest
+        if: steps.version.outputs.published != 'true'
       - run: npm publish --provenance --access public
+        if: steps.version.outputs.published != 'true'
         working-directory: packages/cli
+      - name: the GitHub release for the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "release ${GITHUB_REF_NAME} already exists"
+          else
+            gh release create "${GITHUB_REF_NAME}" --title "${{ steps.version.outputs.version }}" --generate-notes
+          fi
