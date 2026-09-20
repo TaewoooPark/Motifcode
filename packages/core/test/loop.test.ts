@@ -789,6 +789,41 @@ describe("continuing a conversation", () => {
   });
 });
 
+describe("the conversational ending", () => {
+  it("ends on a reply with no action when asked to, with the prose as the summary", async () => {
+    // A greeting gets a greeting. Off, the same turn is handed back.
+    const { emit } = collect();
+    const transport = new ScriptedTransport(["</think>안녕하세요! 무엇을 도와드릴까요?"]);
+    const r = await runLoop({ ...base, transport, executor: okExecutor, emit, replyEnds: true });
+    expect(r.reason).toBe("done");
+    expect(r.summary).toBe("안녕하세요! 무엇을 도와드릴까요?");
+    expect(r.transcript.map((m) => m.role)).toEqual(["system", "user", "assistant"]);
+    expect(transport.seen).toHaveLength(1);
+  });
+
+  it("still hands back a turn whose action syntax leaked, even in a conversation", async () => {
+    const { events, emit } = collect();
+    const transport = new ScriptedTransport([
+      '</think><tool_call>{"name": "bash", "arguments": {"command": "ls',
+      doneBody("d"),
+    ]);
+    const r = await runLoop({ ...base, transport, executor: okExecutor, emit, replyEnds: true, confirmDone: false });
+    expect(r.reason).toBe("done");
+    expect(transport.seen).toHaveLength(2);
+    expect(kinds(events, "repair").length).toBeGreaterThan(0);
+  });
+
+  it("takes the first done as final when confirmation is off", async () => {
+    const { emit } = collect();
+    const transport = new ScriptedTransport([doneBody("finished")]);
+    const r = await runLoop({ ...base, transport, executor: okExecutor, emit, confirmDone: false });
+    expect(r.reason).toBe("done");
+    expect(r.summary).toBe("finished");
+    const last = r.transcript[r.transcript.length - 1]!;
+    expect(last.tool_calls?.[0]?.function).toEqual({ name: "done", arguments: { summary: "finished" } });
+  });
+});
+
 describe("server-extracted tool calls", () => {
   it("uses tool_calls the server lifted out of the body", async () => {
     // A server running a tool-call parser — which is what

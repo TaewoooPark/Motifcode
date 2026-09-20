@@ -92,6 +92,26 @@ export function fmtBytes(bytes: number): string {
   return `${bytes}B`;
 }
 
+/**
+ * The short form for the line under the prompt: only what changes as a
+ * conversation goes on, and only when there is a number to show. The full
+ * panel is a `/status` away.
+ */
+export function compactReadings(inst: Instruments): Reading[] {
+  const out: Reading[] = [];
+  if (inst.channel !== "toolcall") out.push(channelReading(inst));
+  if (inst.parseFailures > 0) out.push(parseReading(inst));
+  if (inst.contextTokensMeasured && inst.contextTokens > 0) {
+    const ctx = contextReading(inst);
+    out.push({ ...ctx, value: `${fmtTokens(inst.contextTokens)}/${fmtTokens(inst.maxTokens)}` });
+  }
+  if (inst.cachedTokens !== undefined && inst.contextTokensMeasured && inst.contextTokens > 0) {
+    const prefix = prefixReading(inst);
+    out.push({ label: "cached", value: `${Math.round((inst.cachedTokens / inst.contextTokens) * 100)}%`, severity: prefix.severity });
+  }
+  return out;
+}
+
 /** Plain-text status line. The ANSI writer colours it by severity. */
 export function statusLine(inst: Instruments): string {
   return readings(inst)

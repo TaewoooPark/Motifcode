@@ -47,6 +47,17 @@ describe("system prompt", () => {
     expect(prompt.indexOf("PROJECT-RULE")).toBeGreaterThan(prompt.indexOf("Skills"));
   });
 
+  it("has a conversational form that lets a reply end the turn", () => {
+    const task = buildSystemPrompt(opts);
+    const chat = buildSystemPrompt({ ...opts, mode: "chat" });
+    expect(task).toContain("Finish by calling `done`");
+    expect(chat).not.toContain("Finish by calling `done`");
+    expect(chat).toContain("A reply with no tool call ends your turn");
+    expect(chat).toContain("Do not go looking for a task you were not given");
+    // Still a pure function of its inputs.
+    expect(buildSystemPrompt({ ...opts, mode: "chat" })).toBe(chat);
+  });
+
   it("changes with the channel, and only there", () => {
     const a = buildSystemPrompt(opts);
     const b = buildSystemPrompt({ ...opts, channel: "raw" });

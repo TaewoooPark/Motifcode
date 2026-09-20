@@ -56,18 +56,33 @@ export interface MenuRenderOptions {
 
 const DEFAULT_ROWS = 8;
 
-/** One row per visible item. The selected row starts with the marker. */
-export function renderMenu(items: readonly MenuItem[], selected: number, opts: MenuRenderOptions): string[] {
-  if (items.length === 0) return [];
+export interface MenuRender {
+  /** One row per visible item; the window follows the selection. */
+  rows: string[];
+  /** Index of the selected row within `rows`, so a highlight lands on the marked row. */
+  selectedRow: number;
+}
+
+/**
+ * The visible window of the menu.
+ *
+ * The marker and the highlight have to agree, and they used to drift: the
+ * marker was placed by the selection's index in the whole list, the highlight
+ * by that same index inside the window — right until the list scrolled.
+ * Both now come from here, as one number.
+ */
+export function renderMenu(items: readonly MenuItem[], selected: number, opts: MenuRenderOptions): MenuRender {
+  if (items.length === 0) return { rows: [], selectedRow: -1 };
   const maxRows = opts.maxRows ?? DEFAULT_ROWS;
   const sel = clampSelection(selected, items.length);
   const start = Math.max(0, Math.min(sel - Math.floor(maxRows / 2), items.length - maxRows));
   const window = items.slice(start, start + maxRows);
   const nameWidth = Math.max(...items.map((i) => displayWidth(`/${i.name}${i.usage ? ` ${i.usage}` : ""}`)));
   const room = Math.max(8, opts.width - 4 - nameWidth - 2);
-  return window.map((item, i) => {
+  const rows = window.map((item, i) => {
     const marker = start + i === sel ? "❯ " : "  ";
     const name = padToWidth(`/${item.name}${item.usage ? ` ${item.usage}` : ""}`, nameWidth);
     return `  ${marker}${name}  ${truncateToWidth(item.description, room)}`;
   });
+  return { rows, selectedRow: sel - start };
 }

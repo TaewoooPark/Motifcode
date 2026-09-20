@@ -99,12 +99,18 @@ function session(transport: Transport, extra: Partial<ConstructorParameters<type
   return { chat, type, screen, finished, tick: (ms: number) => (now += ms), cwd };
 }
 
-const done = (s: string) => [doneBody(s), doneBody(s, { confirm: true })];
+// In a conversation the first `done` is final: the person is the confirmation.
+const done = (s: string) => [doneBody(s)];
+/** A turn that is words, not work: ends the task on its own. */
+const reply = (s: string) => [`</think>${s}`];
 
 describe("interactive session", () => {
   const open: { finished: Promise<number>; type: (s: string) => void }[] = [];
   afterEach(async () => {
     for (const s of open) {
+      // Interrupt anything running, clear any draft, then quit on the empty prompt.
+      s.type(ESC);
+      s.type(ESC);
       s.type("\x04");
       await s.finished;
     }
@@ -119,16 +125,33 @@ describe("interactive session", () => {
     await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
     expect(t.seen[0]!.messages.map((m) => m.role)).toEqual(["system", "user"]);
     expect(t.seen[0]!.messages[1]!.content).toBe("fix the parser");
+    expect(String(t.seen[0]!.messages[0]!.content)).toContain("A reply with no tool call ends your turn");
 
     s.type("now the tests\r");
     await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(2));
-    const roles = t.seen[2]!.messages.map((m) => m.role);
-    // system, the first task, its done proposal, the challenge, the
-    // confirmation, then the new task — the model sees what it did before.
-    expect(roles).toEqual(["system", "user", "assistant", "user", "assistant", "user"]);
-    expect(t.seen[2]!.messages[5]!.content).toBe("now the tests");
-    expect(s.screen()).toContain("──  user");
-    expect(s.screen()).toContain("──  end");
+    const roles = t.seen[1]!.messages.map((m) => m.role);
+    // system, the first task, its `done`, then the new task — the model sees
+    // what it did before.
+    expect(roles).toEqual(["system", "user", "assistant", "user"]);
+    expect(t.seen[1]!.messages[3]!.content).toBe("now the tests");
+    expect(s.screen()).toContain("> fix the parser");
+    // The `done` summary stands in for the reply; there is no end banner.
+    expect(s.screen()).toContain("⏺ first");
+    expect(s.screen()).not.toContain("Interrupted");
+  });
+
+  it("treats a reply with no tool call as the end of the turn", async () => {
+    // A greeting gets a greeting. The benchmark loop would hand this turn
+    // back as a lost one and the model would go looking for a task.
+    const t = new GateTransport([...reply("안녕하세요! 무엇을 도와드릴까요?")]);
+    const s = session(t);
+    open.push(s);
+    s.type("안녕?\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    expect(t.seen).toHaveLength(1);
+    expect(s.screen()).toContain("⏺ 안녕하세요! 무엇을 도와드릴까요?");
+    expect(s.chat.transcript.map((m) => m.role)).toEqual(["user", "assistant"]);
+    expect(s.chat.transcript[1]!.content).toBe("안녕하세요! 무엇을 도와드릴까요?");
   });
 
   it("runs the command the menu has selected", async () => {
@@ -136,7 +159,9 @@ describe("interactive session", () => {
     const s = session(t);
     open.push(s);
     s.type("/sta");
+    // The draft shows what was typed; the menu row marks the completion.
     await vi.waitFor(() => expect(s.screen()).toContain("❯ /status"));
+    expect(s.screen()).toContain("> /sta");
     s.type("\r");
     await vi.waitFor(() => expect(s.screen()).toContain("──  /status"));
     expect(s.screen()).toContain("model       motif/motif-3");
@@ -171,7 +196,7 @@ describe("interactive session", () => {
     s.type(ESC);
     await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
     expect(s.chat.running).toBe(false);
-    expect(s.screen()).toContain("aborted");
+    expect(s.screen()).toContain("Interrupted");
     // The conversation keeps what happened; the next task follows it.
     expect(s.chat.transcript.map((m) => m.role)).toEqual(["user"]);
   });
@@ -189,7 +214,7 @@ describe("interactive session", () => {
     await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(2));
     const tasks = t.seen.map((r) => r.messages[r.messages.length - 1]!.content);
     expect(tasks[0]).toBe("first");
-    expect(tasks[2]).toContain("second");
+    expect(tasks[1]).toContain("second");
   });
 
   it("turns a trailing backslash into a line break", async () => {
@@ -212,7 +237,21 @@ describe("interactive session", () => {
     await vi.waitFor(() => expect(s.chat.transcript).toHaveLength(0));
     s.type("second\r");
     await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(2));
-    expect(t.seen[2]!.messages.map((m) => m.role)).toEqual(["system", "user"]);
+    expect(t.seen[1]!.messages.map((m) => m.role)).toEqual(["system", "user"]);
+  });
+
+  it("opens the shortcuts panel on ? and shows the spinner while the model works", async () => {
+    const t = new GateTransport([...reply("ok")]);
+    t.gated = true;
+    const s = session(t);
+    open.push(s);
+    s.type("?");
+    await vi.waitFor(() => expect(s.screen()).toContain("ctrl-c twice quit"));
+    s.type("?");
+    s.type("do it\r");
+    await vi.waitFor(() => expect(s.screen()).toContain("Thinking… (esc to interrupt"));
+    t.open();
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
   });
 
   it("quits on ctrl-c twice, but not once", async () => {

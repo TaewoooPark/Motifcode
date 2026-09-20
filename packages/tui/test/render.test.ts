@@ -95,31 +95,64 @@ describe("transcript", () => {
     expect(out.join("\n")).toMatchSnapshot();
   });
 
-  it("collapses reasoning by default and expands on request", () => {
-    // This model opens a thinking block on every generation, so expanded-by-
-    // default would bury the session under reasoning.
+  it("hides reasoning by default and shows it in full on request", () => {
+    // This model opens a thinking block on every generation. Shown by default
+    // it would bury the conversation; shown on request it is the debugging
+    // view, and then nothing of it is cut.
     const state = fold(SESSION.slice(0, 5));
-    const collapsed = renderTranscript(state, OPTS).join("\n");
-    const expanded = renderTranscript(state, { ...OPTS, expandThinking: true }).join("\n");
-    expect(collapsed.split("\n").length).toBeLessThan(expanded.split("\n").length + 1);
-    expect(expanded).toContain("forward/reverse");
+    const hidden = renderTranscript(state, OPTS).join("\n");
+    const shown = renderTranscript(state, { ...OPTS, showThinking: true }).join("\n");
+    expect(hidden).not.toContain("forward/reverse");
+    expect(hidden).not.toContain("Thought");
+    expect(shown).toContain("✻ Thought for 12.4s");
+    expect(shown).toContain("forward/reverse");
   });
 
-  it("only advertises [tab] when something is listening for it", () => {
-    // The hint was printed on every reasoning cell and no handler was ever
-    // attached, so the one interaction the UI offered did nothing. A promise
-    // the program does not keep reads as a broken tool, not as decoration.
-    const state = fold(SESSION.slice(0, 5));
-    expect(renderTranscript(state, OPTS).join("\n")).not.toContain("[tab]");
-    expect(renderTranscript(state, { ...OPTS, showShortcuts: true }).join("\n")).toContain("[tab]");
+  it("echoes the user's line after a prompt mark and the model's behind a bullet", () => {
+    const state = pushUser(initialState(), "안녕?");
+    const out = renderTranscript(fold([{ type: "content_delta", text: "안녕하세요!\n무엇을 도와드릴까요?" }], state), OPTS);
+    expect(out[0]).toBe("> 안녕?");
+    expect(out).toContain("⏺ 안녕하세요!");
+    expect(out).toContain("  무엇을 도와드릴까요?");
   });
 
-  it("gives the repair turn its own visible cell", () => {
+  it("shows a tool as its title, its argument, and what came back under a corner", () => {
+    const state = fold([
+      { type: "tool_start", call: { id: "x", name: "bash", arguments: { command: "ls -la" }, repaired: false, validated: true } },
+      { type: "tool_end", id: "x", ok: true, output: "total 8\na.txt", ms: 5 },
+    ]);
+    const out = renderTranscript(state, OPTS);
+    expect(out[0]).toBe("⏺ Bash(ls -la)");
+    expect(out[1]).toBe("  ⎿  total 8");
+    expect(out[2]).toBe("     a.txt");
+  });
+
+  it("summarises a read as a line count and a failure as an error", () => {
+    // The model read it; the person does not need it dumped again.
+    const read = fold([
+      { type: "tool_start", call: { id: "r", name: "read", arguments: { path: "calc.py" }, repaired: false, validated: true } },
+      { type: "tool_end", id: "r", ok: true, output: "1\tdef add():\n2\t    pass\n", ms: 1 },
+    ]);
+    expect(renderTranscript(read, OPTS).join("\n")).toContain("⎿  Read 2 lines");
+    const failed = fold([
+      { type: "tool_start", call: { id: "f", name: "bash", arguments: { command: "python x" }, repaired: false, validated: true } },
+      { type: "tool_end", id: "f", ok: false, output: "/bin/sh: python: command not found", ms: 1 },
+    ]);
+    expect(renderTranscript(failed, OPTS).join("\n")).toContain("⎿  Error: /bin/sh: python: command not found");
+  });
+
+  it("gives the repair turn its own visible line", () => {
     // Without this the loop reads as flailing; with it, a designed recovery is
     // visibly running — which matters more when the model has been pruned.
     const out = renderTranscript(fold(SESSION), OPTS).join("\n");
-    expect(out).toContain("↻ repair");
-    expect(out).toContain("attempt 1/2");
+    expect(out).toContain("↻ repair 1/2");
+  });
+
+  it("ends a done session with its summary and any other ending with why", () => {
+    const done = renderTranscript(fold([{ type: "session_end", reason: "done", summary: "all green" }]), OPTS);
+    expect(done[0]).toBe("⏺ all green");
+    const aborted = renderTranscript(fold([{ type: "session_end", reason: "aborted" }]), OPTS);
+    expect(aborted[0]).toBe("  ⎿  Interrupted");
   });
 
   it("marks a repaired tool call", () => {
@@ -140,7 +173,7 @@ describe("transcript", () => {
       { type: "tool_end", id: "x", ok: true, output: long, ms: 5 },
     ]);
     const out = renderTranscript(state, OPTS).join("\n");
-    expect(out).toContain("more lines");
+    expect(out).toMatch(/\+\d+ lines/);
     expect(out.split("\n").length).toBeLessThan(20);
   });
 });
@@ -313,12 +346,11 @@ describe("display width — Hangul and CJK", () => {
     }
   });
 
-  it("keeps a Korean reasoning preview inside the terminal", () => {
+  it("keeps a Korean reasoning ticker inside the terminal", () => {
     const state = fold([
       { type: "reasoning_delta", text: "역방향 스윕에서 배경 제거가 동작하지 않는 문제를 자세히 살펴보는 중입니다" },
-      { type: "reasoning_end", chars: 40, ms: 1000 },
     ]);
-    for (const line of renderTranscript(state, { width: 60 })) {
+    for (const line of renderTail(state, { width: 60 })) {
       expect(displayWidth(line), line).toBeLessThanOrEqual(60);
     }
   });
@@ -334,7 +366,8 @@ describe("scrollback safety", () => {
     ]);
     expect(settledCount(started)).toBe(0);
     expect(renderSettled(started, OPTS)).toHaveLength(0);
-    expect(renderPending(started, OPTS).join("\n")).toContain("bash");
+    expect(renderPending(started, OPTS).join("\n")).toContain("Bash");
+    expect(renderPending(started, OPTS).join("\n")).toContain("Running…");
 
     const finished = fold([{ type: "tool_end", id: "t", ok: true, output: "a.ts", ms: 4 }], started);
     expect(settledCount(finished)).toBe(1);

@@ -273,6 +273,7 @@ Flags
   --cwd <path>              working directory
   --journal <path>          write the session record here instead of .motif/sessions
   --interactive             open the prompt after the task, or with no task at all
+  --thinking                show the model's reasoning in the transcript
   --no-hero                 skip the splash
 
 distil flags
@@ -649,7 +650,7 @@ async function main(): Promise<number> {
   }
   if ((wantsChat || !task) && tty && !resumeFrom) {
     const chat = new Chat({
-      screen: new Screen(),
+      screen: new Screen({ showThinking: args.flags["thinking"] === true }),
       stdin: process.stdin,
       settings: {
         model,
@@ -682,7 +683,7 @@ async function main(): Promise<number> {
   }
 
   const transport = new HttpTransport({ endpoint, model, ...(apiKey !== undefined ? { apiKey } : {}) });
-  const screen = new Screen();
+  const screen = new Screen({ showThinking: args.flags["thinking"] === true });
   const runId = new Date().toISOString().replace(/[:.]/g, "-");
   // `--journal` so a benchmark runner knows where the record went without
   // scraping a directory for the newest file. Two rows finishing in the same

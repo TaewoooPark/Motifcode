@@ -124,6 +124,25 @@ export interface LoopOptions {
   noActionLimit?: number;
   /** Retries for a server that died or rate-limited mid-session. */
   maxServerRetries?: number;
+  /**
+   * A reply is an answer.
+   *
+   * The interactive session's rule, and off for everything else. A turn with
+   * no action and no broken action syntax ends the task as `done`, with the
+   * prose as its summary — the way a chat turn ends when the model stops
+   * calling tools. In a benchmark run the same turn is a lost turn and gets
+   * handed back, because there nobody is present to read the reply and a
+   * dropped tool call looks the same from the outside.
+   */
+  replyEnds?: boolean;
+  /**
+   * Challenge the first `done` and require a confirming second one.
+   *
+   * On by default: a hallucinated completion then costs one turn instead of
+   * the task. The interactive session turns it off, since the person it is
+   * talking to is the confirmation.
+   */
+  confirmDone?: boolean;
   /** Output cap per model step. Sent on the wire, not merely assumed. */
   maxOutputTokens?: number;
   temperature?: number;
@@ -280,6 +299,8 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
     maxRepairs = 2,
     noActionLimit = 4,
     maxServerRetries = 3,
+    replyEnds = false,
+    confirmDone = true,
     signal,
   } = opts;
 
@@ -546,14 +567,21 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
           : { id: nextId(), name: a.name, arguments: a.arguments },
       );
 
-    // No actions: either the model leaked broken syntax, or it tried to answer
-    // in prose. Both are non-terminal here.
+    // No actions: either the model leaked broken syntax, or it answered in
+    // prose. In a benchmark run both are non-terminal; in a conversation the
+    // prose is the answer.
     if (parsed.actions.length === 0) {
       const leaked =
         parsed.unrecoverable.length > 0 ||
         parsed.truncated ||
         (parsed.invalidArguments?.length ?? 0) > 0 ||
         (channel === "toolcall" && looksLikeLeakedToolCall(parseToolCalls(split.content, ctx)));
+      if (replyEnds && !leaked && response.finishReason !== "length") {
+        session.appendAll(codec.serializeAssistant(split.content, split.reasoning, parsed));
+        checkpoint();
+        const reply = split.content.trim();
+        return finish("done", reply === "" ? undefined : reply);
+      }
       if (leaked && parsed.unrecoverable.length === 0 && !parsed.truncated) {
         emit({ type: "parse_failure", kind: "leaked", sample: parsed.content.slice(0, 200) });
       }
@@ -689,6 +717,11 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
     const doneAction = doneActions[0];
     if (doneAction) {
       const doneCalls = callsOf([doneAction]);
+      if (!confirmDone) {
+        session.appendAll(codec.serializeAssistant(split.content, split.reasoning, parsed, doneCalls));
+        checkpoint();
+        return finish("done", doneAction.summary);
+      }
       if (pendingDone === null) {
         pendingDone = normalizeSummary(doneAction.summary);
         handBack(confirmationChallenge(doneAction.summary, channel), doneCalls);

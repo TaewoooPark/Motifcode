@@ -104,3 +104,30 @@ export function padToWidth(s: string, columns: number, fill = " "): string {
   const gap = columns - displayWidth(s);
   return gap > 0 ? s + fill.repeat(gap) : s;
 }
+
+/**
+ * Split into rows of at most `columns` columns, never inside a character.
+ *
+ * For the footer, where every printed row has to be exactly one terminal row:
+ * the footer is cleared by counting rows upward, and a line the terminal
+ * wrapped on its own is two rows the count does not know about — which is how
+ * a long command left its first half behind on every repaint.
+ */
+export function wrapToWidth(s: string, columns: number): string[] {
+  const width = Math.max(1, columns);
+  const rows: string[] = [];
+  let row = "";
+  let used = 0;
+  for (const ch of s) {
+    const w = displayWidth(ch);
+    if (used + w > width && used > 0) {
+      rows.push(row);
+      row = "";
+      used = 0;
+    }
+    row += ch;
+    used += w;
+  }
+  rows.push(row);
+  return rows;
+}

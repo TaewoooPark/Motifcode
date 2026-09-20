@@ -97,7 +97,8 @@ interface Totals {
 }
 
 const PLACEHOLDER = "type a task, / for commands";
-const IDLE_HINT = "/ commands · esc clears · ctrl-c twice quits";
+/** Empty: the screen shows `? for shortcuts` in its place. */
+const IDLE_HINT = "";
 const RUNNING_HINT = "esc to interrupt";
 const CTRL_C_WINDOW_MS = 2000;
 
@@ -135,7 +136,6 @@ export class Chat {
   private quitting = false;
   private ctrlCArmedAt = 0;
   private lastJournalPath: string | undefined;
-  private lastSessionCell: { model: string; endpoint: string; channel: string } | null = null;
   private executor: ToolExecutor;
   private readonly scheduler: AgentScheduler;
   private readonly totals: Totals = {
@@ -190,16 +190,11 @@ export class Chat {
           endpoint: this.settings.endpoint,
           channel: this.settings.channel,
           maxTokens: 262_144,
+          version: this.opts.version,
+          cwd: this.settings.cwd,
         });
       }
-      this.screen.append({
-        kind: "system",
-        title: "motif",
-        lines: [
-          "Type a task and press enter. The conversation continues across tasks;",
-          "/help lists the commands, esc interrupts a running task, ctrl-c twice quits.",
-        ],
-      });
+      this.screen.setLabel(this.settings.model);
       this.screen.attachInput(this.opts.stdin, (key) => this.onKey(key));
       this.refresh();
       if (this.opts.initialTask) void this.submit(this.opts.initialTask);
@@ -214,7 +209,10 @@ export class Chat {
     const menu = this.menuItems();
     switch (key.type) {
       case "text":
-        this.composer.insert(key.text);
+        // `?` on an empty prompt opens the shortcuts panel, as in Claude Code;
+        // anywhere else it is a character.
+        if (key.text === "?" && this.composer.empty) this.screen.toggleShortcuts();
+        else this.composer.insert(key.text);
         break;
       case "paste":
         this.composer.insert(key.text);
@@ -341,19 +339,11 @@ export class Chat {
   private refresh(): void {
     const width = this.screen.width;
     const items = this.menuItems();
+    // The box takes four columns: its edges and a space inside each.
+    const menu = items.length > 0 ? renderMenu(items, this.menuSelected, { width }) : null;
     const view: ComposerView = {
-      render: renderComposer(this.composer.snapshot(), { width, placeholder: PLACEHOLDER }),
-      ...(items.length > 0
-        ? {
-            menu: {
-              rows: renderMenu(items, this.menuSelected, { width }),
-              selected: Math.min(
-                clampSelection(this.menuSelected, items.length),
-                renderMenu(items, this.menuSelected, { width }).length - 1,
-              ),
-            },
-          }
-        : {}),
+      render: renderComposer(this.composer.snapshot(), { width: width - 4, prompt: "> ", placeholder: PLACEHOLDER }),
+      ...(menu ? { menu: { rows: menu.rows, selected: menu.selectedRow } } : {}),
     };
     this.screen.setHint(this.hintText());
     this.screen.setComposer(view);
@@ -443,25 +433,45 @@ export class Chat {
     this.refresh();
 
     const sink = journal.sinkFor(scope);
+    let contentThisTurn = false;
     const emit = (e: LoopEvent): void => {
       sink(e);
-      if (e.type === "session_start") {
-        // One session cell per connection, not per task: the model, endpoint
-        // and channel are the same from one task to the next, and repeating
-        // them is noise in a conversation.
-        const same =
-          this.lastSessionCell !== null &&
-          this.lastSessionCell.model === e.model &&
-          this.lastSessionCell.endpoint === e.endpoint &&
-          this.lastSessionCell.channel === e.channel;
-        this.lastSessionCell = { model: e.model, endpoint: e.endpoint, channel: e.channel };
-        if (same) return;
-      }
-      if (e.type === "usage") {
-        this.totals.promptTokens += e.promptTokens ?? 0;
-        this.totals.completionTokens += e.completionTokens ?? 0;
-        this.totals.cachedTokens += e.cachedTokens ?? 0;
-        if (e.promptTokens !== undefined) this.totals.lastContext = e.promptTokens;
+      switch (e.type) {
+        case "session_start":
+          // The welcome card already says which model and endpoint this is;
+          // a line per task saying it again is noise in a conversation. The
+          // instruments still need the channel, so the event is folded
+          // without its cell.
+          this.screen.setLabel(this.settings.model);
+          return;
+        case "turn_start":
+          contentThisTurn = false;
+          this.screen.setActivity("Thinking…");
+          break;
+        case "reasoning_end":
+        case "content_delta":
+        case "tool_start":
+          if (e.type === "content_delta") contentThisTurn = true;
+          this.screen.setActivity(null);
+          break;
+        case "usage":
+          this.totals.promptTokens += e.promptTokens ?? 0;
+          this.totals.completionTokens += e.completionTokens ?? 0;
+          this.totals.cachedTokens += e.cachedTokens ?? 0;
+          if (e.promptTokens !== undefined) this.totals.lastContext = e.promptTokens;
+          break;
+        case "session_end":
+          this.screen.setActivity(null);
+          if (e.reason === "done") {
+            // A turn that ended in prose already shows it; one that ended in
+            // `done` shows the summary as the reply it stands for. Either way
+            // there is no banner: the prompt coming back is the ending.
+            if (e.summary && !contentThisTurn) this.screen.append({ kind: "assistant", text: e.summary });
+            return;
+          }
+          break;
+        default:
+          break;
       }
       this.screen.apply(e);
     };
@@ -492,6 +502,10 @@ export class Chat {
         maxTurns: this.settings.maxTurns,
         ...(this.settings.maxOutputTokens !== undefined ? { maxOutputTokens: this.settings.maxOutputTokens } : {}),
         ...(this.settings.seed !== undefined ? { seed: this.settings.seed } : {}),
+        // A conversation: a reply is an answer, and the person is the
+        // confirmation a `done` would otherwise need.
+        replyEnds: true,
+        confirmDone: false,
         signal: abort.signal,
       });
       journal.record(scope, {
@@ -512,6 +526,7 @@ export class Chat {
       this.screen.append({ kind: "notice", level: "error", text: err instanceof Error ? err.message : String(err) });
     } finally {
       this.active = null;
+      this.screen.setActivity(null);
       this.totals.tasks += 1;
       this.refresh();
     }
@@ -555,6 +570,7 @@ export class Chat {
 
   private systemFor(channel: ChannelId): string {
     return buildSystemPrompt({
+      mode: "chat",
       channel,
       tools: this.opts.tools,
       skills: this.opts.skills,
@@ -700,7 +716,7 @@ export class Chat {
       setCwd: (path) => this.setCwd(path),
       toggleThinking: () => {
         this.screen.toggleThinking();
-        return this.screen.thinkingExpanded;
+        return this.screen.thinkingShown;
       },
       quit: () => this.quit(),
     };
@@ -718,7 +734,7 @@ export class Chat {
       `max-turns   ${s.maxTurns}`,
       `max-tokens  ${s.maxOutputTokens === undefined ? "off (server default)" : s.maxOutputTokens}`,
       `seed        ${s.seed === undefined ? "off" : s.seed}`,
-      `thinking    ${this.screen.thinkingExpanded ? "expanded" : "folded"}`,
+      `thinking    ${this.screen.thinkingShown ? "shown" : "hidden"}`,
       `api key     ${this.opts.apiKey ? `present, from ${this.opts.apiKeySource ?? "the caller"}` : "none"}`,
       `journal     ${this.lastJournalPath ?? `(none yet; ${this.opts.journalDir})`}`,
       `history     ${this.history.length} turn(s) in the conversation`,

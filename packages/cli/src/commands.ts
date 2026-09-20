@@ -70,7 +70,7 @@ const KEYS: readonly [string, string][] = [
   ["\\ then enter", "insert a newline instead of sending"],
   ["esc", "interrupt the running task, or clear the draft"],
   ["ctrl-c", "interrupt; twice on an empty prompt to quit (ctrl-d too)"],
-  ["tab", "complete the selected command; on an empty prompt, fold or unfold reasoning"],
+  ["tab", "complete the selected command; on an empty prompt, show or hide reasoning"],
   ["up / down", "browse earlier tasks, or move within a multi-line draft"],
   ["ctrl-a / ctrl-e", "start / end of the line;  ctrl-u / ctrl-k delete to either end;  ctrl-w delete a word"],
 ];
@@ -207,8 +207,8 @@ export const COMMANDS: readonly SlashCommand[] = [
   },
   {
     name: "thinking",
-    description: "fold or unfold the model's reasoning",
-    run: (ctx) => ok("/thinking", [ctx.toggleThinking() ? "reasoning expanded" : "reasoning folded"]),
+    description: "show or hide the model's reasoning",
+    run: (ctx) => ok("/thinking", [ctx.toggleThinking() ? "reasoning shown" : "reasoning hidden"]),
   },
   {
     name: "cwd",

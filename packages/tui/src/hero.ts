@@ -27,6 +27,8 @@ export const HERO_SHADED = String.raw`
 █   ▓ █ ▓  ▓░  ▓░ ▓▀  ▓░  █ ▓ █ ▓ ▓▀
 ▀   ▀ ▀▀▀  ▀  ▀▀▀ ▀   ▀▀▀ ▀▀▀ ▀▀  ▀▀▀`.slice(1);
 
+import { padToWidth, truncateToWidth } from "./width.js";
+
 export const HERO_WIDTH = { large: 111, small: 36, shaded: 37 } as const;
 
 export type HeroVariant = "large" | "small" | "shaded" | "none";
@@ -72,4 +74,36 @@ export function heroSubtitle(ctx: HeroContext): string[] {
 export function fmtTokens(n: number): string {
   if (n >= 1000) return `${Math.round(n / 1000)}K`;
   return String(n);
+}
+
+export interface WelcomeContext {
+  version: string;
+  model: string;
+  cwd: string;
+}
+
+/**
+ * The box under the hero when a session opens.
+ *
+ * Claude Code greets with a small bordered card — what to type for help, and
+ * where it is working — and that is the right amount: the hero says what this
+ * is, the card says what to do next.
+ */
+export function welcomeLines(ctx: WelcomeContext, width: number): string[] {
+  const inner = Math.max(24, Math.min(width, 78) - 4);
+  const fit = (s: string): string => padToWidth(truncateToWidth(s, inner), inner);
+  const body = [
+    `✻ Welcome to motif ${ctx.version}`,
+    "",
+    "  /help for commands · /status for your setup",
+    "  esc interrupts a task · ctrl-c twice quits",
+    "",
+    `  model  ${ctx.model}`,
+    `  cwd    ${ctx.cwd}`,
+  ];
+  return [
+    `╭${"─".repeat(inner + 2)}╮`,
+    ...body.map((l) => `│ ${fit(l)} │`),
+    `╰${"─".repeat(inner + 2)}╯`,
+  ];
 }

@@ -32,18 +32,25 @@ describe("slash menu", () => {
   });
 
   it("renders aligned rows with the selection marked", () => {
-    const rows = renderMenu(menuItemsFor("/m", ITEMS), 1, { width: 60 });
+    const { rows, selectedRow } = renderMenu(menuItemsFor("/m", ITEMS), 1, { width: 60 });
     expect(rows).toHaveLength(3);
+    expect(selectedRow).toBe(1);
     expect(rows[1]).toMatch(/^ {2}❯ \/max-tokens \[n\|off\] {2}output cap$/);
     // Names pad to the widest (`/max-tokens [n|off]`, 19 columns), then two
     // spaces separate the description.
     expect(rows[0]).toMatch(/^ {4}\/model \[id\] {10}show or set/);
   });
 
-  it("windows a long list around the selection", () => {
+  it("windows a long list around the selection, and says which visible row is selected", () => {
+    // The marker and the highlight drifted apart once the list scrolled: the
+    // highlight used the selection's index in the whole list as an index into
+    // the window. Both now come from one number.
     const many = Array.from({ length: 20 }, (_, i) => ({ name: `c${String(i).padStart(2, "0")}`, description: "d" }));
-    const rows = renderMenu(many, 15, { width: 40, maxRows: 5 });
+    const { rows, selectedRow } = renderMenu(many, 15, { width: 40, maxRows: 5 });
     expect(rows).toHaveLength(5);
-    expect(rows.some((r) => r.includes("❯ /c15"))).toBe(true);
+    expect(rows[selectedRow]).toContain("❯ /c15");
+    const last = renderMenu(many, 19, { width: 40, maxRows: 5 });
+    expect(last.rows[last.selectedRow]).toContain("❯ /c19");
+    expect(last.selectedRow).toBe(4);
   });
 });

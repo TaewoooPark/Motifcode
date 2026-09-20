@@ -17,6 +17,11 @@ import type { SkillRegistry } from "@motifcode/skills";
 export interface PromptOptions {
   channel: ChannelId;
   tools: Tool[];
+  /**
+   * `task`: one job, ended only by `done`, the benchmark contract.
+   * `chat`: a conversation, where a reply with no tool call ends the turn.
+   */
+  mode?: "task" | "chat";
   skills?: SkillRegistry;
   agents?: AgentRegistry;
   /** Contents of AGENTS.md or similar. Project rules outrank ours. */
@@ -41,10 +46,43 @@ const CORE = [
   "If you skipped part of the task, say which part and why.",
 ].join("\n");
 
-export function buildSystemPrompt(opts: PromptOptions): string {
-  const parts: string[] = [CORE];
+/**
+ * The conversational contract.
+ *
+ * The difference from `CORE` is the ending. In a conversation a reply is an
+ * answer: a greeting gets a greeting, a question gets an answer, and a turn
+ * with no tool call ends there and hands the prompt back. `done` still exists
+ * for a task that ends in work rather than words. What stays the same is how
+ * to work: read first, run the thing, batch the calls.
+ */
+const CHAT_CORE = [
+  "You are motifcode, a coding agent, in a conversation with the person whose",
+  "working directory this is.",
+  "",
+  "Work like an engineer, not a search engine. Read before you write. Run the",
+  "thing rather than assuming it works. Match the code that is already there.",
+  "",
+  "Reply in prose when the message needs words — a greeting, a question, an",
+  "explanation. A reply with no tool call ends your turn, and the person reads",
+  "it and answers. Use tools when the message asks for work, and when the work",
+  "is finished either say so in prose or call `done` with a summary; either",
+  "ends the turn. Do not go looking for a task you were not given.",
+  "",
+  "Prefer fewer, larger actions. One `rg -n` beats five file reads. Every call",
+  "is a chance for a malformed argument, so batching is safer as well as faster.",
+  "",
+  "Say what you actually did. If a test still fails, say so and show the output.",
+  "If you skipped part of the task, say which part and why.",
+].join("\n");
 
-  const channelText = getChannel(opts.channel).promptFragment(opts.tools).trim();
+export function buildSystemPrompt(opts: PromptOptions): string {
+  const chat = opts.mode === "chat";
+  const parts: string[] = [chat ? CHAT_CORE : CORE];
+
+  let channelText = getChannel(opts.channel).promptFragment(opts.tools).trim();
+  // The native channel's fragment insists on `done`; in a conversation a
+  // bare reply is the ordinary way a turn ends.
+  if (chat) channelText = channelText.replace(/\n?Finish by calling `done`[^\n]*/, "").trim();
   if (channelText) parts.push(channelText);
 
   const skillIndex = opts.skills?.index().trim();
