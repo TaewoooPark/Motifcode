@@ -120,6 +120,12 @@ export type LoopEvent =
    * model will read in its place from now on.
    */
   | { type: "compaction"; beforeTokens: number; summaryChars: number; summary: string }
+  /**
+   * A piece of the response as it streams in. Display only: the events that
+   * describe the turn — reasoning_end, content_delta, tool_start — follow
+   * once the whole response is in, and the journal does not keep these.
+   */
+  | { type: "stream"; reasoning?: string; content?: string; tool?: string }
   | { type: "notice"; level: "info" | "warn" | "error"; text: string }
   | { type: "session_end"; reason: SessionEndReason; summary?: string };
 

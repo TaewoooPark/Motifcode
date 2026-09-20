@@ -30,6 +30,24 @@ export interface CompletionRequest {
   seed?: number;
   stop?: string[];
   signal?: AbortSignal;
+  /**
+   * Called with each piece of the response as it arrives.
+   *
+   * Display only. The response is still assembled whole before anything is
+   * parsed — a `<tool_call>` cut off by a token cap can only be reasoned
+   * about with the whole body in hand — so a transport that streams shows
+   * the text early and returns the same `CompletionResponse` it would have
+   * without streaming. A transport that cannot stream may ignore this.
+   */
+  onDelta?: (delta: StreamDelta) => void;
+}
+
+/** One piece of a streamed response. */
+export interface StreamDelta {
+  reasoning?: string;
+  content?: string;
+  /** The name of a tool call being assembled, when the server sends calls structured. */
+  tool?: string;
 }
 
 export interface CompletionResponse {

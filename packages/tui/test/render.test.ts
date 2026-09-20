@@ -179,14 +179,33 @@ describe("transcript", () => {
 });
 
 describe("live tail", () => {
-  it("shows only the newest reasoning line", () => {
+  it("shows only the newest reasoning line, and only when reasoning is shown", () => {
     const state = fold([
       { type: "reasoning_delta", text: "first line\nsecond line\nthird line" },
     ]);
-    const tail = renderTail(state, OPTS);
+    expect(renderTail(state, OPTS)).toHaveLength(0);
+    const tail = renderTail(state, { ...OPTS, showThinking: true });
     expect(tail).toHaveLength(1);
     expect(tail[0]).toContain("third line");
     expect(tail[0]).not.toContain("first line");
+  });
+
+  it("shows the reply as it streams, and hands it over to the cell when it lands", () => {
+    const streaming = fold([
+      { type: "turn_start", turn: 1 },
+      { type: "stream", content: "Hello " },
+      { type: "stream", content: "there\nsecond" },
+    ]);
+    expect(renderTail(streaming, OPTS)).toEqual(["⏺ Hello there", "  second"]);
+    const landed = fold([{ type: "content_delta", text: "Hello there\nsecond" }], streaming);
+    expect(renderTail(landed, OPTS)).toEqual([]);
+    expect(renderTranscript(landed, OPTS)).toContain("⏺ Hello there");
+  });
+
+  it("keeps streamed reasoning out of the tail when reasoning is hidden", () => {
+    const state = fold([{ type: "stream", reasoning: "secret plan" }]);
+    expect(renderTail(state, OPTS)).toEqual([]);
+    expect(renderTail(state, { ...OPTS, showThinking: true })[0]).toContain("secret plan");
   });
 
   it("is empty once reasoning closes", () => {
@@ -350,7 +369,7 @@ describe("display width — Hangul and CJK", () => {
     const state = fold([
       { type: "reasoning_delta", text: "역방향 스윕에서 배경 제거가 동작하지 않는 문제를 자세히 살펴보는 중입니다" },
     ]);
-    for (const line of renderTail(state, { width: 60 })) {
+    for (const line of renderTail(state, { width: 60, showThinking: true })) {
       expect(displayWidth(line), line).toBeLessThanOrEqual(60);
     }
   });

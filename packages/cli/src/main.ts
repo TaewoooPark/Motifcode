@@ -854,7 +854,7 @@ async function main(): Promise<number> {
 
   const rootSink = journal.sinkFor(rootScope);
   const emit = (e: LoopEvent) => {
-    rootSink(e);
+    if (e.type !== "stream") rootSink(e);
     screen.apply(e);
   };
 
@@ -984,6 +984,9 @@ async function main(): Promise<number> {
       ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
       ...(seed !== undefined ? { seed } : {}),
       ...(resumeFrom?.checkpoint ? { resume: resumeFrom.checkpoint } : {}),
+      // Streaming shows the reply as it arrives; a pipe gets the same events
+      // and the screen ignores them there.
+      stream: Boolean(process.stdout.isTTY),
     });
     journal.record(rootScope, {
       t: "scope_end",

@@ -155,6 +155,13 @@ export interface LoopOptions {
    * their results are never split.
    */
   compaction?: { limitTokens: number; userTurns?: readonly string[] };
+  /**
+   * Show the response as it arrives, as `stream` events.
+   *
+   * The turn is still parsed from the whole response; the stream is what
+   * the person watches while that arrives.
+   */
+  stream?: boolean;
   /** Output cap per model step. Sent on the wire, not merely assumed. */
   maxOutputTokens?: number;
   temperature?: number;
@@ -503,7 +510,20 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
     turn++;
     emit({ type: "turn_start", turn });
 
-    const request: CompletionRequest = codec.buildRequest(session, tools, requestOptions);
+    const request: CompletionRequest = {
+      ...codec.buildRequest(session, tools, requestOptions),
+      ...(opts.stream
+        ? {
+            onDelta: (d) =>
+              emit({
+                type: "stream",
+                ...(d.reasoning !== undefined ? { reasoning: d.reasoning } : {}),
+                ...(d.content !== undefined ? { content: d.content } : {}),
+                ...(d.tool !== undefined ? { tool: d.tool } : {}),
+              }),
+          }
+        : {}),
+    };
     const { sharedChars, totalChars } = session.observePrefix(request.prompt ?? session.render());
     emit({ type: "prefix", sharedChars, totalChars });
 

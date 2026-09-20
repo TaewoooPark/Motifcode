@@ -94,7 +94,10 @@ function headArg(name: string, args: Record<string, unknown>): string {
     return `${agent}${prompt ? `: ${prompt}` : ""}`;
   }
   const first = entries[0]!;
-  const v = typeof first[1] === "string" ? first[1] : JSON.stringify(first[1]);
+  let v = typeof first[1] === "string" ? first[1] : JSON.stringify(first[1]);
+  // The model likes to prefix every command with `cd <cwd> &&`, which is
+  // all a narrow head line would show. The command is what matters.
+  if (name === "bash") v = v.replace(/^cd\s+\S+\s*&&\s*/, "");
   const [firstLine, ...rest] = v.split("\n");
   return rest.length > 0 ? `${firstLine}…` : (firstLine ?? "");
 }
@@ -309,10 +312,28 @@ export function renderPendingStyled(state: ViewState, opts: RenderOptions): Styl
   return lines;
 }
 
-/** The live tail: reasoning still arriving, shown as a single ticker line. */
+/**
+ * The live tail: what is still arriving.
+ *
+ * Reasoning shows as one ticker line, and only when reasoning is shown at
+ * all — hidden means hidden, not hidden once it has finished. The reply
+ * shows in full as it streams, behind the same bullet it will keep.
+ */
 export function renderTail(state: ViewState, opts: RenderOptions): string[] {
-  if (state.pendingThink === "") return [];
-  const last = state.pendingThink.split("\n").filter((l) => l.trim() !== "").pop() ?? "";
-  const room = Math.max(10, opts.width - 4);
-  return [sanitize(`${THINK} ${truncateEndToWidth(last, room)}`)];
+  return renderTailStyled(state, opts).map((l) => l.text);
+}
+
+export function renderTailStyled(state: ViewState, opts: RenderOptions): StyledLine[] {
+  const out: StyledLine[] = [];
+  if (state.pendingThink !== "" && opts.showThinking) {
+    const last = state.pendingThink.split("\n").filter((l) => l.trim() !== "").pop() ?? "";
+    const room = Math.max(10, opts.width - 4);
+    out.push({ text: sanitize(`${THINK} ${truncateEndToWidth(last, room)}`), tone: "dim" });
+  }
+  if (state.pendingContent !== "") {
+    const [first, ...rest] = state.pendingContent.split("\n");
+    out.push({ text: sanitize(`${BULLET} ${first ?? ""}`), tone: "bullet" });
+    for (const l of rest) out.push({ text: sanitize(`  ${l}`), tone: "plain" });
+  }
+  return out;
 }

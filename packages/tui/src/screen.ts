@@ -37,7 +37,7 @@ import {
   BULLET,
   renderPendingStyled,
   renderSettledStyled,
-  renderTail,
+  renderTailStyled,
   type RenderOptions,
   type StyledLine,
   type Tone,
@@ -117,6 +117,7 @@ export class Screen {
   private readonly columns: () => number;
   private readonly rowCount: () => number;
   private resizeTimer: NodeJS.Timeout | null = null;
+  private streamTimer: NodeJS.Timeout | null = null;
   private showThinking: boolean;
   private readonly shadedHero: boolean;
   private readonly interactive: boolean;
@@ -176,6 +177,21 @@ export class Screen {
   /** Fold an event and repaint. */
   apply(event: LoopEvent): void {
     this.state = reduce(this.state, event);
+    if (event.type === "stream") {
+      // Tokens arrive faster than a footer is worth repainting; one paint per
+      // frame or so keeps the text moving without the flicker.
+      if (this.streamTimer) return;
+      this.streamTimer = setTimeout(() => {
+        this.streamTimer = null;
+        this.paint();
+      }, 40);
+      this.streamTimer.unref?.();
+      return;
+    }
+    if (this.streamTimer) {
+      clearTimeout(this.streamTimer);
+      this.streamTimer = null;
+    }
     this.paint();
   }
 
@@ -414,7 +430,7 @@ export class Screen {
     for (const l of renderPendingStyled(this.state, opts)) {
       rows.push(...this.rows(l.text, (t) => this.colour({ ...l, text: t })));
     }
-    for (const l of renderTail(this.state, opts)) rows.push(...this.rows(l, (t) => paint(t, style.faint)));
+    for (const l of renderTailStyled(this.state, opts)) rows.push(...this.rows(l.text, (t) => this.colour({ ...l, text: t })));
 
     if (this.activity) {
       const glyph = SPINNER[this.tick % SPINNER.length]!;

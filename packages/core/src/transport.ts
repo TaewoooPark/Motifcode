@@ -13,11 +13,13 @@
  *             tool calls and would be mistranslated by a server that assumed
  *             they were.
  *
- * The tool path runs **non-streaming** on purpose. A `<tool_call>` whose closer
- * never arrives — a length-capped response — can be reasoned about when you
- * have the whole body and cannot be mid-stream, because the repairs are not
- * append-only and streaming a fragment early would contradict the repaired
- * result. Streaming is for the reasoning display, not for actions.
+ * Actions are parsed **from the whole body** on purpose. A `<tool_call>`
+ * whose closer never arrives — a length-capped response — can be reasoned
+ * about when you have the whole body and cannot be mid-stream, because the
+ * repairs are not append-only and acting on a fragment early would contradict
+ * the repaired result. So the wire may stream — and does, when the caller
+ * asks to see the text as it arrives — but the response handed back is the
+ * assembled whole, the same object the non-streaming path returns.
  *
  * Failure is a first-class shape here rather than an exception that escapes.
  * A hosted endpoint rate-limits, a gateway times out, a local engine falls
@@ -32,6 +34,7 @@ import {
   type CompletionRequest,
   type CompletionResponse,
   type Message,
+  type StreamDelta,
   type ToolCall,
 } from "@motifcode/protocol";
 import { normalizeEndpoint } from "./config.js";
@@ -266,13 +269,16 @@ function normaliseToolCalls(raw: WireToolCall[] | null | undefined): ToolCall[] 
 
 /** Build the exact JSON body a request becomes. Shared with the recorder. */
 export function requestBody(req: CompletionRequest, model: string): Record<string, unknown> {
+  const streaming = req.onDelta !== undefined;
   const body: Record<string, unknown> = {
     model,
     // Motif's own evaluations run here. Near-greedy settings, which most coding
     // harnesses default to, are not this model's published regime.
     temperature: req.temperature ?? 1.0,
     top_p: req.topP ?? 0.95,
-    stream: false,
+    stream: streaming,
+    // The token counts arrive in the final chunk only when asked for.
+    ...(streaming ? { stream_options: { include_usage: true } } : {}),
   };
   if (req.maxTokens !== undefined) body["max_tokens"] = req.maxTokens;
   if (req.seed !== undefined) body["seed"] = req.seed;
@@ -390,13 +396,26 @@ export class HttpTransport implements Transport {
       choices?: ChatChoice[];
       usage?: Record<string, unknown> & { prompt_tokens_details?: { cached_tokens?: number } };
     };
-    try {
-      json = (await res.json()) as typeof json;
-    } catch (err) {
-      throw new TransportError("server returned a 2xx that was not JSON", {
-        kind: "protocol",
-        cause: err,
-      });
+    // A server — or a proxy in front of one — may answer a streaming request
+    // with a plain JSON body. The content type says which arrived.
+    const streamed = /text\/event-stream/i.test(res.headers.get("content-type") ?? "");
+    if (req.onDelta && streamed) {
+      try {
+        json = await readStream(res, req.onDelta, req.signal);
+      } catch (err) {
+        if (TransportError.is(err)) throw err;
+        if (req.signal?.aborted || isAbort(err)) throw new TransportError("request aborted", { kind: "aborted", cause: err });
+        throw new TransportError(`stream from ${url} failed: ${describe(err)}`, { kind: "network", cause: err });
+      }
+    } else {
+      try {
+        json = (await res.json()) as typeof json;
+      } catch (err) {
+        throw new TransportError("server returned a 2xx that was not JSON", {
+          kind: "protocol",
+          cause: err,
+        });
+      }
     }
     if (!Array.isArray(json.choices) || json.choices.length === 0) {
       // Reaching into `undefined` here used to produce an empty completion,
@@ -414,6 +433,13 @@ export class HttpTransport implements Transport {
       throw new TransportError("choice content was not a string", { kind: "protocol" });
     }
     const reasoning = choice.message?.reasoning_content ?? choice.message?.reasoning ?? undefined;
+    if (req.onDelta && !streamed) {
+      // Whole, and late, but the same shape the watcher expects.
+      req.onDelta({
+        ...(typeof reasoning === "string" && reasoning !== "" ? { reasoning } : {}),
+        ...(content !== "" ? { content } : {}),
+      });
+    }
     const toolCalls = normaliseToolCalls(choice.message?.tool_calls);
     // The hosted endpoint reports how much of the prompt it served from its
     // prefix cache. That is the first direct measurement this harness has had
@@ -437,6 +463,124 @@ export class HttpTransport implements Transport {
 
 function numberOr(v: unknown): number | undefined {
   return typeof v === "number" ? v : undefined;
+}
+
+interface StreamChunk {
+  choices?: {
+    delta?: {
+      content?: string | null;
+      reasoning?: string | null;
+      reasoning_content?: string | null;
+      tool_calls?: { index?: number; id?: string; type?: string; function?: { name?: string; arguments?: string } }[];
+    };
+    text?: string;
+    finish_reason?: string | null;
+  }[];
+  usage?: Record<string, unknown> | null;
+}
+
+/**
+ * Assemble a streamed response into the shape the non-streaming path returns.
+ *
+ * Server-sent events, one `data:` line per chunk, `[DONE]` at the end. Each
+ * delta's text is handed to `onDelta` as it arrives and appended to the
+ * whole; tool calls arrive in pieces keyed by index and are joined by index.
+ * Usage is taken from whichever chunk carries it last — with
+ * `include_usage`, that is the final one.
+ */
+async function readStream(
+  res: Response,
+  onDelta: (d: StreamDelta) => void,
+  signal: AbortSignal | undefined,
+): Promise<{ choices?: ChatChoice[]; usage?: Record<string, unknown> & { prompt_tokens_details?: { cached_tokens?: number } } }> {
+  if (!res.body) throw new TransportError("server sent no body to stream", { kind: "protocol" });
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let content = "";
+  let reasoning = "";
+  let sawReasoning = false;
+  let finish: string | undefined;
+  let usage: Record<string, unknown> | undefined;
+  const calls = new Map<number, { id?: string; name: string; arguments: string }>();
+
+  const handle = (line: string): boolean => {
+    if (!line.startsWith("data:")) return false;
+    const payload = line.slice(5).trim();
+    if (payload === "[DONE]") return true;
+    let chunk: StreamChunk;
+    try {
+      chunk = JSON.parse(payload) as StreamChunk;
+    } catch {
+      // A torn line is dropped rather than fatal; the whole is still checked
+      // for shape by the caller.
+      return false;
+    }
+    if (chunk.usage) usage = chunk.usage;
+    const choice = chunk.choices?.[0];
+    if (!choice) return false;
+    if (choice.finish_reason) finish = choice.finish_reason;
+    const delta: StreamDelta = {};
+    const think = choice.delta?.reasoning ?? choice.delta?.reasoning_content;
+    if (typeof think === "string" && think !== "") {
+      reasoning += think;
+      sawReasoning = true;
+      delta.reasoning = think;
+    }
+    const text = choice.delta?.content ?? choice.text;
+    if (typeof text === "string" && text !== "") {
+      content += text;
+      delta.content = text;
+    }
+    for (const tc of choice.delta?.tool_calls ?? []) {
+      const index = tc.index ?? 0;
+      const entry = calls.get(index) ?? { name: "", arguments: "" };
+      if (tc.id) entry.id = tc.id;
+      if (tc.function?.name) entry.name += tc.function.name;
+      if (tc.function?.arguments) entry.arguments += tc.function.arguments;
+      calls.set(index, entry);
+      if (entry.name) delta.tool = entry.name;
+    }
+    if (delta.reasoning !== undefined || delta.content !== undefined || delta.tool !== undefined) onDelta(delta);
+    return false;
+  };
+
+  for (;;) {
+    if (signal?.aborted) {
+      await reader.cancel().catch(() => undefined);
+      throw new TransportError("request aborted", { kind: "aborted" });
+    }
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let nl = buffer.indexOf("\n");
+    let finished = false;
+    while (nl !== -1) {
+      const line = buffer.slice(0, nl).replace(/\r$/, "");
+      buffer = buffer.slice(nl + 1);
+      if (handle(line)) finished = true;
+      nl = buffer.indexOf("\n");
+    }
+    if (finished) break;
+  }
+  if (buffer.trim() !== "") handle(buffer.trim());
+
+  const toolCalls = [...calls.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, c]) => ({ ...(c.id ? { id: c.id } : {}), type: "function", function: { name: c.name, arguments: c.arguments } }));
+  return {
+    choices: [
+      {
+        message: {
+          content,
+          ...(sawReasoning ? { reasoning } : {}),
+          ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+        },
+        ...(finish !== undefined ? { finish_reason: finish } : {}),
+      },
+    ],
+    ...(usage ? { usage: usage as Record<string, unknown> & { prompt_tokens_details?: { cached_tokens?: number } } } : {}),
+  };
 }
 
 function describe(err: unknown): string {

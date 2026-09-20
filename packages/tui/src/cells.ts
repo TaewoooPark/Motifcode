@@ -78,6 +78,10 @@ export interface ViewState {
   instruments: Instruments;
   /** Reasoning still arriving; lives in the mutable tail, never in scrollback. */
   pendingThink: string;
+  /** The reply still arriving, likewise. */
+  pendingContent: string;
+  /** A tool call the server is still sending, by name. */
+  pendingTool?: string;
 }
 
 export function initialState(): ViewState {
@@ -98,6 +102,7 @@ export function initialState(): ViewState {
       turn: 0,
     },
     pendingThink: "",
+    pendingContent: "",
   };
 }
 
@@ -114,6 +119,8 @@ export function reduce(state: ViewState, event: LoopEvent): ViewState {
   const cells = [...state.cells];
   const inst = { ...state.instruments };
   let pendingThink = state.pendingThink;
+  let pendingContent = state.pendingContent;
+  let pendingTool = state.pendingTool;
 
   /** Replace the last cell matching `pick` with a modified copy. */
   const replaceLast = <K extends Cell["kind"]>(
@@ -149,8 +156,15 @@ export function reduce(state: ViewState, event: LoopEvent): ViewState {
       inst.parseAttempts += 1;
       break;
 
+    case "stream":
+      if (event.reasoning !== undefined) pendingThink += event.reasoning;
+      if (event.content !== undefined) pendingContent += event.content;
+      if (event.tool !== undefined) pendingTool = event.tool;
+      break;
+
     case "reasoning_delta":
-      pendingThink += event.text;
+      // The whole reasoning, after any stream of it: replace, never append.
+      pendingThink = event.text;
       break;
 
     case "reasoning_end":
@@ -163,10 +177,15 @@ export function reduce(state: ViewState, event: LoopEvent): ViewState {
       break;
 
     case "content_delta":
+      // The whole reply; what streamed is superseded.
       cells.push({ kind: "assistant", text: event.text });
+      pendingContent = "";
+      pendingTool = undefined;
       break;
 
     case "tool_start":
+      pendingContent = "";
+      pendingTool = undefined;
       cells.push({
         kind: "tool",
         id: event.call.id,
@@ -249,13 +268,15 @@ export function reduce(state: ViewState, event: LoopEvent): ViewState {
 
     case "session_end":
       cells.push({ kind: "end", reason: event.reason, summary: event.summary });
+      pendingContent = "";
+      pendingTool = undefined;
       break;
 
     default:
       break;
   }
 
-  return { cells, instruments: inst, pendingThink };
+  return { cells, instruments: inst, pendingThink, pendingContent, ...(pendingTool !== undefined ? { pendingTool } : {}) };
 }
 
 export function pushUser(state: ViewState, text: string): ViewState {

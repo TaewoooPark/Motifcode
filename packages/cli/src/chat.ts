@@ -604,8 +604,15 @@ export class Chat {
     const sink = journal.sinkFor(scope);
     let contentThisTurn = false;
     const emit = (e: LoopEvent): void => {
-      sink(e);
+      // Stream pieces are for the screen; the journal keeps the whole turn.
+      if (e.type !== "stream") sink(e);
       switch (e.type) {
+        case "stream":
+          // Once words arrive the words are the progress; while a tool call
+          // is still being sent, say which.
+          if (e.content) this.screen.setActivity(null);
+          else if (e.tool) this.screen.setActivity(`Calling ${e.tool}…`);
+          break;
         case "session_start":
           // The welcome card already says which model and endpoint this is;
           // a line per task saying it again is noise in a conversation. The
@@ -676,6 +683,7 @@ export class Chat {
         replyEnds: true,
         confirmDone: false,
         compaction: { limitTokens: this.compactLimit(), userTurns: this.tasks.slice(0, -1) },
+        stream: true,
         signal: abort.signal,
       });
       journal.record(scope, {
