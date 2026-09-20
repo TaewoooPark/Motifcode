@@ -29,7 +29,7 @@
 > **2026년 9월까지 무료.** Motif-3는 [Infron](https://infron.ai)에서 **Motif: Motif 3 (Free)** 로
 > 제공됩니다. 입력·출력 모두 100만 토큰당 $0, 262,144 토큰 컨텍스트 전체가 열려 있고,
 > 2026년 9월 말까지 무료 제공이 공지되어 있습니다. 계정과 API 키만 있으면 됩니다.
-> `npm install -g motifcode` 뒤에 `motif`를 실행하면 키를 물어봅니다.
+> `npx motifcode`가 키를 물어본 뒤 `motif` 명령까지 설치해 줍니다.
 > [API 키 발급](#infron에서-api-키-발급하기)을 보세요. 조건은 바뀔 수 있으며,
 > [모델 페이지](https://infron.ai/models/motif/motif-3)가 기준입니다.
 
@@ -239,13 +239,14 @@ skill, task, mcp` — 이고, 서브에이전트는 그 *앞부분*만 받습니
 **Node 20 이상**이 필요합니다. 패키지는 런타임 의존성이 없는 파일 하나입니다.
 
 ```bash
-npm install -g motifcode      # `motif`와 `motifcode` 명령이 PATH에 생깁니다
 cd your-project
-motif                         # motifcode 도 같은 명령; 이 폴더에서 세션을 엽니다
+npx motifcode                 # 첫 실행: 키를 물어본 뒤 `motif` 명령 설치까지 해 줍니다
 ```
 
-첫 세션에서 Infron API 키를 한 번만 물어봅니다. `~/.motif/.env`에 저장되므로
-그다음부터는 `motif`만 치면 바로 시작합니다.
+첫 세션에서 Infron API 키를 한 번만 물어보고 `~/.motif/.env`에 저장합니다. `npx`는
+명령을 남기지 않으므로 이어서 `npm install -g motifcode`를 대신 실행해 줄지
+물어봅니다. 예라고 하면 그다음부터는 어느 폴더에서든 `motif`(또는 `motifcode`)로
+세션을 엽니다. 처음부터 `npm install -g motifcode`를 직접 해도 같은 결과입니다.
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮

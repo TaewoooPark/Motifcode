@@ -1,6 +1,6 @@
 {
   "name": "motifcode",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "A coding agent harness built specifically for Motif-3",
   "type": "module",

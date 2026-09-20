@@ -29,7 +29,7 @@
 > **Free through September 2026.** Motif-3 is served by [Infron](https://infron.ai) as
 > **Motif: Motif 3 (Free)** — $0 per million tokens in and out, the full 262,144-token
 > window — and free access has been announced through the end of September 2026.
-> An account and an API key are all it takes: `npm install -g motifcode`, then `motif` asks for the key.
+> An account and an API key are all it takes: `npx motifcode` asks for the key, then installs the `motif` command.
 > See [Get an API key](#get-an-api-key-from-infron).
 > Terms can change, and the [model page](https://infron.ai/models/motif/motif-3) is the source of truth.
 
@@ -254,13 +254,15 @@ full 262,144-token window advertised.
 Needs **Node 20+**. The package is one file with no runtime dependencies.
 
 ```bash
-npm install -g motifcode      # puts `motif` and `motifcode` on your PATH
 cd your-project
-motif                         # or motifcode; either opens the session here
+npx motifcode                 # first run: asks for your key, then installs the `motif` command
 ```
 
-The first session asks for your Infron API key, once. It is saved to
-`~/.motif/.env`, and every later `motif` starts straight away:
+The first session asks for your Infron API key, once, and saves it to
+`~/.motif/.env`. Because `npx` leaves no command behind, it then offers to
+run `npm install -g motifcode` for you; say yes and `motif` (or `motifcode`)
+opens the session from any folder from then on. `npm install -g motifcode`
+directly does the same without the question.
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮

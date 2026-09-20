@@ -13,10 +13,12 @@ failure handling follow from what is measurably true about Motif-3.
 > Technologies or by Infron. *Motif* and *Motif-3* are their names; this package is a client of the model.
 
 ```bash
-npm install -g motifcode     # puts `motif` and `motifcode` on your PATH
 cd your-project
-motif                        # the first session asks for your Infron API key, once, and saves it to ~/.motif/.env
+npx motifcode                # asks for your Infron API key once, then offers to install the `motif` command
 ```
+
+Or `npm install -g motifcode` directly; either way `motif` (or `motifcode`) opens the session
+from any folder afterwards, with the key saved in `~/.motif/.env`.
 
 1. Sign in at [infron.ai/login](https://infron.ai/login), open [Dashboard → API Keys](https://infron.ai/dashboard/apiKeys), click **Add new key**.
 2. Run `motif` and paste the key when asked. It is checked against the endpoint, saved to

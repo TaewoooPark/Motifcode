@@ -130,6 +130,7 @@ export async function runHooks(config: HookConfig, ctx: HookContext): Promise<Ho
 }
 
 export { runShell } from "./spawn.js";
+export type { RunOptions, RunResult } from "./spawn.js";
 export * from "./trust.js";
 
 export function wasBlocked(outcomes: readonly HookOutcome[]): boolean {

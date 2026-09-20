@@ -65,13 +65,14 @@ import { Screen, applyTheme, themeNames } from "@motifcode/tui";
 import { Chat } from "./chat.js";
 import { describePlugins, loadPlugins, type LoadedPlugins } from "./plugins.js";
 import { loadSettings, saveUserSetting } from "./settings.js";
+import { commandOnPath, ranFromNpx } from "./install.js";
 import { KEY_PAGE, normaliseKeyInput, readSecret, verifyApiKey } from "./login.js";
 import { doctor, formatChecks, worstState } from "./doctor.js";
 import { ToolExecutor } from "./executor.js";
 import { policyForAgent } from "./policy.js";
 import { buildAgentPrompt, buildSystemPrompt } from "./prompt.js";
 
-const VERSION = "0.2.0";
+const VERSION = "0.2.1";
 
 interface Args {
   command: string;
@@ -896,6 +897,7 @@ async function main(): Promise<number> {
       ...(connection.sources.apiKey !== undefined ? { apiKeySource: connection.sources.apiKey } : {}),
       requireKey: keyRequired(endpoint),
       envPath: defaultEnvPath(),
+      offerInstall: ranFromNpx(process.argv[1]) && !commandOnPath("motif"),
       skills,
       agents,
       hooks,

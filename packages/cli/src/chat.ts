@@ -39,7 +39,7 @@ import {
   type ToolInvocation,
   type Transport,
 } from "@motifcode/core";
-import { runHooks, runShell, type HookConfig } from "@motifcode/hooks";
+import { runHooks, runShell, type HookConfig, type RunResult } from "@motifcode/hooks";
 import { Journal, listSessions, loadResume, newHeader, type ScopeIdentity } from "@motifcode/journal";
 import { MAX_CONTEXT, SAMPLING_DEFAULTS, systemPromptHash, toolSchemaHash, type ChannelId, type Message, type Tool } from "@motifcode/protocol";
 import type { SkillRegistry } from "@motifcode/skills";
@@ -59,6 +59,7 @@ import {
   type MenuItem,
 } from "@motifcode/tui";
 import { expandMentions, forgetFiles, listFiles, matchFiles } from "./files.js";
+import { installCommand } from "./install.js";
 import { loginLines, normaliseKeyInput, verifyApiKey, type VerifyResult } from "./login.js";
 import { COMMANDS, findCommand, parseSlash, runSlash, type ChatSettings, type CommandContext, type PersistableKey } from "./commands.js";
 import type { LoadedSettings } from "./settings.js";
@@ -110,8 +111,15 @@ export interface ChatOptions {
   requireKey?: boolean;
   /** Where a key typed at the prompt is saved. Defaults to `~/.motif/.env`. */
   envPath?: string;
-  /** Injected for tests; defaults to `GET /v1/models` with the key. */
+  /** Injected for tests; defaults to a one-token completion with the key. */
   verifyKey?: (apiKey: string) => Promise<VerifyResult>;
+  /**
+   * Offer to install the `motif` command before the first prompt. Set when
+   * this run came from `npx` and no `motif` is on the PATH.
+   */
+  offerInstall?: boolean;
+  /** Injected for tests; defaults to running `npm install -g motifcode@<version>`. */
+  installGlobal?: (command: string) => Promise<RunResult>;
 }
 
 interface ActiveTask {
@@ -178,6 +186,8 @@ export class Chat {
   private shellBusy = false;
   /** A tool call waiting for the person's yes or no, and which of the three answers is selected. */
   private pendingConfirm: { call: ToolInvocation; resolve: (v: "allow" | "deny") => void; selected: number } | null = null;
+  /** A question with numbered answers in place of the prompt, and which one is selected. */
+  private pendingChoice: { title: string; lines: string[]; options: string[]; selected: number; resolve: (v: number | null) => void } | null = null;
   /** A secret being typed in place of the prompt — the API key at login. */
   private pendingSecret: { title: string; lines: string[]; prompt: string; cancelHint: string; resolve: (v: string | null) => void } | null = null;
   /** The credential for this session. Starts as the caller's; `/login` replaces it, `/logout` drops it. */
@@ -274,6 +284,7 @@ export class Chat {
       this.screen.append({ kind: "system", title: "login", lines: await this.login("startup") });
       this.refresh();
     }
+    if (this.opts.offerInstall) await this.offerInstall();
     if (this.opts.continueFrom) {
       try {
         this.screen.append({ kind: "system", title: "continuing", lines: await this.resume(this.opts.continueFrom) });
@@ -292,6 +303,10 @@ export class Chat {
   private onKey(key: Key): void {
     if (this.pendingSecret) {
       this.answerSecret(key);
+      return;
+    }
+    if (this.pendingChoice) {
+      this.answerChoice(key);
       return;
     }
     if (this.pendingConfirm) {
@@ -580,6 +595,62 @@ export class Chat {
     return this.opts.requireKey === true && this.apiKey === undefined;
   }
 
+  /** Take over the prompt for one question; resolves with the index chosen, or null on esc. */
+  private askChoice(title: string, lines: string[], options: string[]): Promise<number | null> {
+    return new Promise((resolve) => {
+      this.pendingChoice = { title, lines, options, selected: 0, resolve };
+      this.refresh();
+    });
+  }
+
+  /** A number, or ↑↓ and Enter, picks an answer; Esc (and Ctrl-C, Ctrl-D) declines. Nothing else does anything. */
+  private answerChoice(key: Key): void {
+    const pending = this.pendingChoice;
+    if (!pending) return;
+    const n = pending.options.length;
+    let choice: number | null | undefined;
+    if (key.type === "enter") choice = pending.selected;
+    else if (key.type === "escape" || (key.type === "ctrl" && (key.key === "c" || key.key === "d"))) choice = null;
+    else if (key.type === "up") pending.selected = (pending.selected + n - 1) % n;
+    else if (key.type === "down") pending.selected = (pending.selected + 1) % n;
+    else if (key.type === "text" && /^[1-9]$/.test(key.text) && Number(key.text) <= n) choice = Number(key.text) - 1;
+    if (choice !== undefined) {
+      this.pendingChoice = null;
+      pending.resolve(choice);
+    }
+    this.refresh();
+  }
+
+  /**
+   * `npx motifcode` runs the package without leaving a command behind, and
+   * the first person to try it typed `motif` afterwards and found nothing.
+   * So a run from npx, on a machine without `motif`, is offered the global
+   * install once — npm's own, of exactly the version that is running — and
+   * the session carries on either way.
+   */
+  private async offerInstall(): Promise<void> {
+    const command = installCommand(this.opts.version);
+    const choice = await this.askChoice(
+      "Install the motif command?",
+      ["This run came from npx, which leaves no command behind.", `${command} puts motif and motifcode on your PATH.`],
+      ["1. Yes, install it now", "2. Not now — npx motifcode keeps working"],
+    );
+    if (choice !== 0) return;
+    const id = `install-${++this.shellSequence}`;
+    this.screen.append({ kind: "tool", id, name: "bash", args: { command }, repaired: false, hooks: [] });
+    this.refresh();
+    const r = await (this.opts.installGlobal ?? ((c: string) => runShell(c, { cwd: this.settings.cwd, timeoutMs: 180_000, outputCap: 20_000 })))(command);
+    const ok = r.code === 0 && !r.timedOut;
+    const output = r.timedOut ? `${r.output.trim()}\n(killed after ${Math.round(r.ms / 1000)}s)`.trim() : r.output.trim() || `(exit ${r.code})`;
+    this.screen.apply({ type: "tool_end", id, ok, output, ms: r.ms });
+    this.screen.append(
+      ok
+        ? { kind: "notice", level: "info", text: "installed: from now on `motif` (or `motifcode`) opens this from any folder; this session carries on" }
+        : { kind: "notice", level: "warn", text: `the install did not finish; run \`${command}\` yourself (with sudo if npm's global folder is not yours), or keep using npx motifcode` },
+    );
+    this.refresh();
+  }
+
   /** Take over the prompt for one secret; resolves with the text, or null when given up. */
   private askSecret(title: string, lines: string[], prompt: string, cancelHint: string): Promise<string | null> {
     return new Promise((resolve) => {
@@ -733,8 +804,11 @@ export class Chat {
       draft: this.composer.snapshot(),
       placeholder: PLACEHOLDER,
       ...(this.pendingConfirm ? { confirm: this.confirmView(this.pendingConfirm.call, this.pendingConfirm.selected) } : {}),
+      ...(this.pendingChoice
+        ? { confirm: { title: this.pendingChoice.title, lines: this.pendingChoice.lines, choices: this.pendingChoice.options.map((o, i) => `${i === this.pendingChoice!.selected ? "❯" : " "} ${o}`) } }
+        : {}),
       ...(this.pendingSecret ? { secret: { title: this.pendingSecret.title, lines: this.pendingSecret.lines, prompt: this.pendingSecret.prompt } } : {}),
-      ...(items.length > 0 && !this.pendingConfirm && !this.pendingSecret
+      ...(items.length > 0 && !this.pendingConfirm && !this.pendingSecret && !this.pendingChoice
         ? { menu: { items, selected: clampSelection(this.menuSelected, items.length), prefix: this.mentionOpen() ? "@" : "/" } }
         : {}),
     };
@@ -744,6 +818,7 @@ export class Chat {
 
   private hintText(): string {
     if (this.pendingSecret) return this.pendingSecret.cancelHint;
+    if (this.pendingChoice) return "1 2 or ↑↓ enter · esc leaves it";
     if (this.pendingConfirm) return "1 2 3 or ↑↓ enter · esc declines";
     if (this.ctrlCArmedAt > 0 && this.now() - this.ctrlCArmedAt <= CTRL_C_WINDOW_MS) return "ctrl-c again to quit";
     if (this.queued.length > 0) {

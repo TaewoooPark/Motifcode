@@ -618,4 +618,61 @@ describe("interactive session", () => {
       expect(readFileSync(envPath, "utf8")).toBe("MOTIF_ENDPOINT=https://llm.onerouter.pro\nMOTIF_API_KEY=sk-good\n");
     });
   });
+
+  describe("the install offer", () => {
+    it("offers to install the command, runs npm on yes, and carries on", async () => {
+      const t = new GateTransport([...done("ok")]);
+      const ran: string[] = [];
+      const s = session(t, {
+        offerInstall: true,
+        version: "0.2.1",
+        installGlobal: async (command) => {
+          ran.push(command);
+          return { code: 0, output: "added 1 package in 700ms", timedOut: false, aborted: false, ms: 700 };
+        },
+      });
+      open.push(s);
+      await vi.waitFor(() => expect(s.screen()).toContain("Install the motif command?"));
+      expect(s.screen()).toContain("❯ 1. Yes, install it now");
+      s.type("1");
+      await vi.waitFor(() => expect(s.screen()).toContain("installed: from now on `motif`"));
+      expect(ran).toEqual(["npm install -g motifcode@0.2.1"]);
+      expect(s.screen()).toContain("added 1 package");
+      s.type("hello\r");
+      await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    });
+
+    it("takes no for an answer, and esc too", async () => {
+      const t = new GateTransport([...done("ok")]);
+      const ran: string[] = [];
+      const s = session(t, {
+        offerInstall: true,
+        installGlobal: async (command) => {
+          ran.push(command);
+          return { code: 0, output: "", timedOut: false, aborted: false, ms: 1 };
+        },
+      });
+      open.push(s);
+      await vi.waitFor(() => expect(s.screen()).toContain("Install the motif command?"));
+      s.type("\x1b[B");
+      await vi.waitFor(() => expect(s.screen()).toContain("❯ 2. Not now"));
+      s.type("\r");
+      s.type("hello\r");
+      await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+      expect(ran).toEqual([]);
+    });
+
+    it("says what to do when the install fails", async () => {
+      const t = new GateTransport([]);
+      const s = session(t, {
+        offerInstall: true,
+        installGlobal: async () => ({ code: 243, output: "npm error EACCES: permission denied", timedOut: false, aborted: false, ms: 5 }),
+      });
+      open.push(s);
+      await vi.waitFor(() => expect(s.screen()).toContain("Install the motif command?"));
+      s.type("\r");
+      await vi.waitFor(() => expect(s.screen()).toContain("the install did not finish"));
+      expect(s.screen()).toContain("with sudo if npm's global folder is not yours");
+    });
+  });
 });
