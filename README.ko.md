@@ -75,17 +75,28 @@ Motifcode는 Claude Code의 모양을 한 터미널 코딩 에이전트입니다
 
 ## 어떻게 생겼는가
 
-<p align="center">
-  <img src="docs/screen-large.jpg" alt="넓은 터미널의 motif: 히어로, 환영 카드, 프롬프트" width="900">
-</p>
-
-<p align="center">
-  <img src="docs/screen-small.jpg" alt="좁은 터미널의 motif: 작은 히어로" width="900">
-</p>
-
-<p align="center">
-  <img src="docs/screen-login.jpg" alt="첫 실행: 프롬프트 자리에서 API 키를 물어본다" width="900">
-</p>
+<table>
+  <tr>
+    <td width="50%" align="center" valign="top">
+      <img src="docs/screen-large.jpg" alt="넓은 터미널의 motif" width="100%"><br>
+      <sub><b>넓은 창.</b> 히어로, 환영 카드, 프롬프트.</sub>
+    </td>
+    <td width="50%" align="center" valign="top">
+      <img src="docs/screen-small.jpg" alt="좁은 터미널의 motif" width="100%"><br>
+      <sub><b>좁은 창.</b> 히어로는 창에 맞는 크기로 바뀌고, 세션은 같습니다.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center" valign="top">
+      <img src="docs/screen-login.jpg" alt="첫 실행에서 API 키를 묻는 화면" width="100%"><br>
+      <sub><b>첫 실행.</b> 프롬프트 자리에서 Infron API 키를 물어보고, 확인한 뒤 한 번만 저장합니다.</sub>
+    </td>
+    <td width="50%" align="center" valign="top">
+      <img src="docs/screen-skills.jpg" alt="/skills 목록" width="100%"><br>
+      <sub><b><code>/skills</code>.</b> 내장 스킬 열다섯 개. 각각 <code>/commit fix the parser</code>처럼 명령으로도 실행됩니다.</sub>
+    </td>
+  </tr>
+</table>
 
 히어로는 창 너비에 맞춰 바뀌고, 환영 카드는 무엇을 치면 되는지 알려 주며, 첫 실행은
 프롬프트 자리에서 키를 물어봅니다. 세션 안에서 내가 친 줄은 `>` 뒤에, 모델의 말과

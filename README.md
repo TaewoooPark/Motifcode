@@ -81,17 +81,28 @@ session checked feature by feature against Claude Code's.
 
 ## What it looks like
 
-<p align="center">
-  <img src="docs/screen-large.jpg" alt="motif in a wide terminal: the hero, the welcome card and the prompt" width="900">
-</p>
-
-<p align="center">
-  <img src="docs/screen-small.jpg" alt="motif in a narrow terminal: the small hero" width="900">
-</p>
-
-<p align="center">
-  <img src="docs/screen-login.jpg" alt="the first run: the API key is asked for in place of the prompt" width="900">
-</p>
+<table>
+  <tr>
+    <td width="50%" align="center" valign="top">
+      <img src="docs/screen-large.jpg" alt="motif in a wide terminal" width="100%"><br>
+      <sub><b>Wide window.</b> The hero, the welcome card and the prompt.</sub>
+    </td>
+    <td width="50%" align="center" valign="top">
+      <img src="docs/screen-small.jpg" alt="motif in a narrow terminal" width="100%"><br>
+      <sub><b>Narrow window.</b> The hero picks the size that fits; the session is the same.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center" valign="top">
+      <img src="docs/screen-login.jpg" alt="the first run asks for the API key" width="100%"><br>
+      <sub><b>First run.</b> The Infron API key is asked for in place of the prompt, checked, and saved once.</sub>
+    </td>
+    <td width="50%" align="center" valign="top">
+      <img src="docs/screen-skills.jpg" alt="the /skills list" width="100%"><br>
+      <sub><b><code>/skills</code>.</b> The fifteen built-in skills, each of them also a command: <code>/commit fix the parser</code>.</sub>
+    </td>
+  </tr>
+</table>
 
 The hero fits the window; the welcome card says what to type; the first run
 asks for the key in place of the prompt. In a session, your line follows `>`,
