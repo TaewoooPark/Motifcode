@@ -200,7 +200,10 @@ its output. `#note` appends a line to `.motif/NOTES.md`, which every task
 reads. `/` opens the command menu: `/help`, `/status`, `/config`, `/doctor`, `/model`,
 `/endpoint`, `/channel`, `/max-turns`, `/max-tokens`, `/seed`, `/theme`,
 `/thinking`, `/compact`, `/compact-at`, `/cwd`, `/skills`, `/agents`,
-`/plugins`, `/new`, `/sessions`, `/resume`, `/quit`. Skills are commands too:
+`/plugins`, `/new`, `/sessions`, `/resume` (a numbered list, or a number, or a file), `/quit`;
+`motif --continue` opens the prompt with the latest conversation here loaded.
+The reply streams in as the model writes it; Ctrl-O shows tool output in
+full; Ctrl-L redraws. Skills are commands too:
 `/commit fix the parser` runs the `commit` skill with that input. A setting changed at the
 prompt is saved to `~/.motif/settings.json`. Esc interrupts a running task; a
 message sent while one runs is queued; `?` lists the keys; Ctrl-C twice quits.

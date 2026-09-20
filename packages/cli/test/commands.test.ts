@@ -165,12 +165,13 @@ describe("commands", () => {
     expect((await runSlash("/config", ctx)).lines).toEqual(["config line"]);
   });
 
-  it("reports an unknown command and a missing argument as errors", async () => {
-    const { ctx } = fakeContext();
+  it("reports an unknown command as an error, and lists on a bare /resume", async () => {
+    const { ctx, calls } = fakeContext();
     const unknown = await runSlash("/frobnicate", ctx);
     expect(unknown.error).toBe(true);
     expect(unknown.lines[0]).toContain("/help");
-    expect((await runSlash("/resume", ctx)).error).toBe(true);
+    expect((await runSlash("/resume", ctx)).lines).toEqual(["continuing"]);
+    expect(calls).toContain("resume ");
   });
 
   it("turns a throwing command into an error line rather than a crash", async () => {

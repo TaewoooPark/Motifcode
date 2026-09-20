@@ -95,6 +95,8 @@ const KEYS: readonly [string, string][] = [
   ["ctrl-c", "interrupt; twice on an empty prompt to quit (ctrl-d too)"],
   ["tab", "complete the selected command; on an empty prompt, show or hide reasoning"],
   ["?", "on an empty prompt, show or hide the key list"],
+  ["ctrl-o", "show tool output in full, or clipped again"],
+  ["ctrl-l", "redraw the screen"],
   ["@path", "attach a file or directory to the message; @skill:name attaches a skill's instructions"],
   ["!command", "run a shell command here and put its output in the conversation"],
   ["#note", "append a line to .motif/NOTES.md, which every session reads"],
@@ -322,12 +324,9 @@ export const COMMANDS: readonly SlashCommand[] = [
   },
   {
     name: "resume",
-    description: "continue the conversation from a recorded session",
-    usage: "<file>",
-    run: async (ctx, args) => {
-      if (args === "") return fail("/resume", "resume needs a journal file — see /sessions");
-      return ok("/resume", await ctx.resume(args));
-    },
+    description: "continue from a recorded session: a number from the list, or a file",
+    usage: "[n|file]",
+    run: async (ctx, args) => ok("/resume", await ctx.resume(args)),
   },
   {
     name: "quit",

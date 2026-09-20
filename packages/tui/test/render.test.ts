@@ -116,6 +116,30 @@ describe("transcript", () => {
     expect(out).toContain("  무엇을 도와드릴까요?");
   });
 
+  it("renders the little Markdown a terminal can show", () => {
+    const text = "# Plan\nDo these:\n- first\n- second\n```py\nprint(1)\n```\ndone";
+    const state = fold([{ type: "content_delta", text }]);
+    const out = renderTranscript(state, OPTS);
+    expect(out[0]).toBe("⏺ Plan");
+    expect(out).toContain("  • first");
+    expect(out).toContain("  ```py");
+    expect(out).toContain("  print(1)");
+    expect(out).toContain("  done");
+  });
+
+  it("shows a patch as a diff, whatever it did", () => {
+    const patch = "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-old\n+new\n";
+    const state = fold([
+      { type: "tool_start", call: { id: "p", name: "apply_patch", arguments: { patch }, repaired: false, validated: true } },
+      { type: "tool_end", id: "p", ok: true, output: "applied", ms: 3 },
+    ]);
+    const out = renderTranscript(state, OPTS);
+    expect(out[0]).toBe("⏺ Patch(--- a/x.py…)");
+    expect(out).toContain("     -old");
+    expect(out).toContain("     +new");
+    expect(out).toContain("  ⎿  applied");
+  });
+
   it("shows a tool as its title, its argument, and what came back under a corner", () => {
     const state = fold([
       { type: "tool_start", call: { id: "x", name: "bash", arguments: { command: "ls -la" }, repaired: false, validated: true } },

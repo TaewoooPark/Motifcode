@@ -22,6 +22,8 @@ exports[`transcript > renders a full session 1`] = `
   ⎿  hallbar/backend/ohe_subtraction.py:41  def ohe_subtract(rxy, field, ...)
 
 ⏺ Patch(--- a/ohe_subtraction.py…) · repaired
+     --- a/ohe_subtraction.py
+     +++ b/ohe_subtraction.py
   ⎿  Error: test_ohe.py: 2 failed
      hook fmt ✓
 

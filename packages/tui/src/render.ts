@@ -42,7 +42,7 @@ export interface RenderOptions {
 }
 
 /** How the writer should colour a line. */
-export type Tone = "plain" | "dim" | "warn" | "bad" | "user" | "bullet" | "rule";
+export type Tone = "plain" | "dim" | "warn" | "bad" | "ok" | "user" | "bullet" | "rule" | "code" | "heading";
 
 export interface StyledLine {
   text: string;
@@ -117,6 +117,57 @@ function results(lines: string[]): string[] {
 }
 
 /**
+ * The model's prose, with the little Markdown a terminal can show.
+ *
+ * Fenced code keeps its fences and goes dim as a block; a heading loses its
+ * hashes and goes bold; a bullet becomes a bullet. Inline emphasis is the
+ * writer's job, since it needs escape codes inside a line. Nothing is
+ * removed that carries meaning — a table, a link, a numbered list all pass
+ * through as written.
+ */
+export function proseLines(text: string, firstPrefix: string, restPrefix = "  "): StyledLine[] {
+  const out: StyledLine[] = [];
+  let inFence = false;
+  const lines = text.split("\n");
+  lines.forEach((raw, i) => {
+    const prefix = i === 0 ? firstPrefix : restPrefix;
+    if (/^\s*(```|~~~)/.test(raw)) {
+      inFence = !inFence;
+      out.push(line(`${prefix}${raw}`, "code"));
+      return;
+    }
+    if (inFence) {
+      out.push(line(`${prefix}${raw}`, "code"));
+      return;
+    }
+    const heading = /^(#{1,6})\s+(.*)$/.exec(raw);
+    if (heading) {
+      out.push(line(`${prefix}${heading[2]}`, "heading"));
+      return;
+    }
+    const bullet = /^(\s*)[-*]\s+(.*)$/.exec(raw);
+    if (bullet) {
+      out.push(line(`${prefix}${bullet[1]}• ${bullet[2]}`, i === 0 ? "bullet" : "plain"));
+      return;
+    }
+    out.push(line(`${prefix}${raw}`, i === 0 ? "bullet" : "plain"));
+  });
+  return out;
+}
+
+/** A unified diff's lines, toned: additions, removals, hunk headers. */
+function diffLines(patch: string, max: number): StyledLine[] {
+  const all = patch.replace(/\s+$/, "").split("\n");
+  const shown = all.slice(0, max);
+  const out = shown.map((l) => {
+    const tone: Tone = l.startsWith("+++") || l.startsWith("---") ? "dim" : l.startsWith("+") ? "ok" : l.startsWith("-") ? "bad" : l.startsWith("@@") ? "dim" : "plain";
+    return line(`     ${l}`, tone);
+  });
+  if (all.length > max) out.push(line(`     … +${all.length - max} lines`, "dim"));
+  return out;
+}
+
+/**
  * Cells to lines, with every byte made safe to print.
  *
  * The sanitiser runs on the finished lines rather than on each untrusted field,
@@ -177,13 +228,15 @@ function renderCellRaw(cell: Cell, opts: RenderOptions): StyledLine[] {
       return out;
     }
 
-    case "assistant": {
-      const [first, ...rest] = cell.text.split("\n");
-      return [line(`${BULLET} ${first ?? ""}`, "bullet"), ...rest.map((l) => line(`  ${l}`)), blank];
-    }
+    case "assistant":
+      return [...proseLines(cell.text, `${BULLET} `), blank];
 
     case "tool": {
       const out: StyledLine[] = [line(toolHead(cell, width), "bullet")];
+      // A patch is worth seeing as a diff, whatever it did.
+      if (cell.name === "apply_patch" && typeof cell.args["patch"] === "string") {
+        out.push(...diffLines(cell.args["patch"], Math.max(outputLines, 12)));
+      }
       if (cell.ok === undefined) {
         out.push(line(`  ${RESULT}  Running…`, "dim"));
       } else if (!cell.ok) {
@@ -236,8 +289,7 @@ function renderCellRaw(cell: Cell, opts: RenderOptions): StyledLine[] {
     case "end": {
       if (cell.reason === "done") {
         if (!cell.summary) return [];
-        const [first, ...rest] = cell.summary.split("\n");
-        return [line(`${BULLET} ${first ?? ""}`, "bullet"), ...rest.map((l) => line(`  ${l}`)), blank];
+        return [...proseLines(cell.summary, `${BULLET} `), blank];
       }
       const label: Record<string, string> = {
         aborted: "Interrupted",
@@ -331,9 +383,7 @@ export function renderTailStyled(state: ViewState, opts: RenderOptions): StyledL
     out.push({ text: sanitize(`${THINK} ${truncateEndToWidth(last, room)}`), tone: "dim" });
   }
   if (state.pendingContent !== "") {
-    const [first, ...rest] = state.pendingContent.split("\n");
-    out.push({ text: sanitize(`${BULLET} ${first ?? ""}`), tone: "bullet" });
-    for (const l of rest) out.push({ text: sanitize(`  ${l}`), tone: "plain" });
+    for (const l of proseLines(state.pendingContent, `${BULLET} `)) out.push({ text: sanitize(l.text), tone: l.tone });
   }
   return out;
 }

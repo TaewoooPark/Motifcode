@@ -92,6 +92,8 @@ export interface ChatOptions {
   pluginLines?: string[];
   /** Where `#` notes go; also what the system prompt reads as project notes. */
   notesPath?: string;
+  /** A journal to continue from before the first prompt — `--continue`. */
+  continueFrom?: string;
 }
 
 interface ActiveTask {
@@ -224,7 +226,17 @@ export class Chat {
       this.screen.setLabel(this.settings.model);
       this.screen.attachInput(this.opts.stdin, (key) => this.onKey(key));
       this.refresh();
-      if (this.opts.initialTask) void this.submit(this.opts.initialTask);
+      if (this.opts.continueFrom) {
+        void this.resume(this.opts.continueFrom)
+          .then((lines) => this.screen.append({ kind: "system", title: "continuing", lines }))
+          .catch((err: unknown) => this.screen.append({ kind: "notice", level: "error", text: err instanceof Error ? err.message : String(err) }))
+          .then(() => {
+            this.refresh();
+            if (this.opts.initialTask) void this.submit(this.opts.initialTask);
+          });
+      } else if (this.opts.initialTask) {
+        void this.submit(this.opts.initialTask);
+      }
     });
   }
 
@@ -349,6 +361,12 @@ export class Chat {
         break;
       case "k":
         this.composer.killToEnd();
+        break;
+      case "o":
+        this.screen.toggleVerbose();
+        break;
+      case "l":
+        this.screen.redraw();
         break;
       default:
         break;
@@ -1000,7 +1018,32 @@ export class Chat {
     ];
   }
 
-  private async resume(file: string): Promise<string[]> {
+  /**
+   * `/resume`: with nothing, the recent sessions numbered; with a number,
+   * that one; with a path, that file.
+   */
+  private async resume(arg: string): Promise<string[]> {
+    const sessions = listSessions(this.opts.journalDir);
+    if (arg === "") {
+      if (sessions.length === 0) return [`no sessions in ${this.opts.journalDir}`];
+      const lines = sessions.slice(0, 10).map((s, i) => {
+        let task = "";
+        try {
+          task = loadResume(s.path).task ?? "";
+        } catch {
+          // An unreadable journal is still listed, by its path.
+        }
+        return `${String(i + 1).padStart(2)}  ${s.header.startedAt.slice(0, 16).replace("T", " ")}  ${s.outcome.padEnd(12)} ${task ? task.split("\n")[0]!.slice(0, 60) : s.path}`;
+      });
+      lines.push("", "/resume <n> continues from one of these; /resume <file> from any journal");
+      return lines;
+    }
+    let file = arg;
+    if (/^\d+$/.test(arg)) {
+      const picked = sessions[Number(arg) - 1];
+      if (!picked) throw new Error(`no session ${arg}; /resume lists ${Math.min(sessions.length, 10)}`);
+      file = picked.path;
+    }
     const path = resolve(this.settings.cwd, file);
     if (!existsSync(path)) throw new Error(`${path} does not exist`);
     const state = loadResume(path);

@@ -330,6 +330,7 @@ Flags
   --cwd <path>              working directory
   --journal <path>          write the session record here instead of .motif/sessions
   --interactive             open the prompt after the task, or with no task at all
+  --continue                open the prompt with the most recent conversation here loaded
   --thinking                show the model's reasoning in the transcript
   --theme <name>            colour theme (motif, claude, mono, solarized, dracula)
   --no-hero                 skip the splash
@@ -753,7 +754,7 @@ async function main(): Promise<number> {
   // No task and a terminal on both ends means a conversation, not a usage
   // error. Without a terminal the old answer stands: a pipe cannot host a
   // prompt, and printing help is the honest response to an empty command.
-  const wantsChat = args.flags["interactive"] === true || args.flags["chat"] === true;
+  const wantsChat = args.flags["interactive"] === true || args.flags["chat"] === true || args.flags["continue"] === true;
   const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
   if (wantsChat && !tty) {
     throw new UsageError("--interactive needs a terminal on stdin and stdout");
@@ -778,6 +779,9 @@ async function main(): Promise<number> {
       historyPath: join(cwd, CONFIG_DIR, "history.jsonl"),
       pluginLines: describePlugins(plugins(cwd)),
       notesPath: join(cwd, CONFIG_DIR, "NOTES.md"),
+      ...(args.flags["continue"] === true
+        ? { continueFrom: listSessions(join(cwd, CONFIG_DIR, "sessions"))[0]?.path ?? "" }
+        : {}),
       channelPolicy,
       ...(apiKey !== undefined ? { apiKey } : {}),
       ...(connection.sources.apiKey !== undefined ? { apiKeySource: connection.sources.apiKey } : {}),

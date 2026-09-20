@@ -366,6 +366,41 @@ describe("interactive session", () => {
     expect(String(t.seen[0]!.messages[0]!.content)).toContain("always run pnpm test before committing");
   });
 
+  it("lists sessions on /resume, picks one by number, and continues it", async () => {
+    const t = new GateTransport([...reply("one done"), ...reply("two done")]);
+    const s = session(t);
+    open.push(s);
+    s.type("first task\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    s.type("/new\r");
+    await vi.waitFor(() => expect(s.chat.transcript).toHaveLength(0));
+    s.type("/resume\r");
+    await vi.waitFor(() => expect(s.screen()).toContain("/resume <n> continues"));
+    expect(s.screen()).toContain(" 1  ");
+    expect(s.screen()).toContain("first task");
+    s.type("/resume 1\r");
+    await vi.waitFor(() => expect(s.screen()).toContain("continuing from"));
+    expect(s.chat.transcript.map((m) => m.role)).toEqual(["user", "assistant"]);
+    s.type("second task\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(2));
+    expect(t.seen[1]!.messages.map((m) => m.role)).toEqual(["system", "user", "assistant", "user"]);
+    s.type("/resume 9\r");
+    await vi.waitFor(() => expect(s.screen()).toContain("no session 9"));
+  });
+
+  it("shows tool output in full on ctrl-o and clips it again", async () => {
+    const long = Array.from({ length: 30 }, (_, i) => `line ${i}`).join("\\n");
+    const t = new GateTransport([toolCallBody("bash", { command: `printf '${long}'` }), ...reply("ok")]);
+    const s = session(t);
+    open.push(s);
+    s.type("go\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    expect(s.screen()).toContain("… +24 lines");
+    expect(s.chat.transcript.length).toBeGreaterThan(0);
+    s.type("\x0f");
+    await vi.waitFor(() => expect(s.screen()).toContain("line 29"));
+  });
+
   it("opens the shortcuts panel on ? and shows the spinner while the model works", async () => {
     const t = new GateTransport([...reply("ok")]);
     t.gated = true;

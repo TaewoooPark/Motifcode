@@ -94,8 +94,23 @@ const SPINNER = ["✻", "✼", "✽", "✾"];
 /** The keys, for the panel `?` opens. */
 const SHORTCUTS = [
   "enter send · \\ + enter newline · esc interrupt or clear · ctrl-c twice quit · ctrl-d quit",
-  "↑ ↓ history · tab show or hide reasoning on an empty prompt · / commands · ? hide this",
+  "↑ ↓ history · tab show or hide reasoning · ctrl-o full tool output · ctrl-l redraw · / commands · ? hide this",
 ];
+
+/**
+ * `**bold**` and `` `code` `` inside a line of prose.
+ *
+ * Only these two: they are what the model writes most, and both survive a
+ * terminal that shows them raw. Anything more — links, italics with a lone
+ * underscore — is left as written, since a mis-rendered `_` in an identifier
+ * is worse than an un-rendered emphasis.
+ */
+function inlineMarkup(text: string): string {
+  if (NO_COLOR) return text;
+  return text
+    .replace(/`([^`\n]+)`/g, (_m, code: string) => paint(code, style.accent))
+    .replace(/\*\*([^*\n]+)\*\*/g, (_m, bold: string) => `${style.bold}${bold}${style.reset}`);
+}
 
 export class Screen {
   private state: ViewState = initialState();
@@ -119,6 +134,7 @@ export class Screen {
   private resizeTimer: NodeJS.Timeout | null = null;
   private streamTimer: NodeJS.Timeout | null = null;
   private showThinking: boolean;
+  private verbose = false;
   private readonly shadedHero: boolean;
   private readonly interactive: boolean;
   private readonly now: () => number;
@@ -154,6 +170,7 @@ export class Screen {
     return {
       width: this.columns(),
       showThinking: this.showThinking,
+      ...(this.verbose ? { outputLines: 1000 } : {}),
       // Only advertise the key when something is listening for it.
       showShortcuts: this.detachInput !== null,
     };
@@ -343,28 +360,51 @@ export class Screen {
     switch (t) {
       case "dim":
       case "rule":
+      case "code":
         return style.faint;
       case "warn":
         return style.warn;
       case "bad":
         return style.bad;
+      case "ok":
+        return style.ok;
+      case "heading":
+        return style.bold;
       default:
         return null;
     }
   }
 
-  /** Colour one rendered line by its tone. */
+  /** Colour one rendered line by its tone, with inline emphasis in prose. */
   private colour(l: StyledLine): string {
     if (NO_COLOR) return l.text;
     if (l.tone === "user") {
       // The echo of what was typed: a dim prompt mark, the words as typed.
       return paint(l.text.slice(0, 2), style.faint) + l.text.slice(2);
     }
-    if (l.tone === "bullet") {
-      return l.text.startsWith(BULLET) ? paint(BULLET, style.accent) + l.text.slice(BULLET.length) : l.text;
+    if (l.tone === "bullet" || l.tone === "plain") {
+      const body = inlineMarkup(l.text);
+      return l.tone === "bullet" && body.startsWith(BULLET) ? paint(BULLET, style.accent) + body.slice(BULLET.length) : body;
     }
     const code = this.tone(l.tone);
     return code ? paint(l.text, code) : l.text;
+  }
+
+  /** Show tool output whole, or clipped to a few lines. Ctrl-O in the session. */
+  toggleVerbose(): void {
+    this.verbose = !this.verbose;
+    this.commits.reset();
+    this.clearFooter();
+    this.paint();
+  }
+
+  get verboseOutput(): boolean {
+    return this.verbose;
+  }
+
+  /** Erase and rebuild the visible screen. Ctrl-L in the session. */
+  redraw(): void {
+    this.repaintAll();
   }
 
   private paint(): void {
