@@ -43,6 +43,8 @@ Motifcode는 Claude Code의 모양을 한 터미널 코딩 에이전트입니다
 참인 사실들의 결과**이고, 그 대부분은 가정이 아니라 측정으로 얻은 것입니다. 범용
 하네스에 base URL만 바꿔 끼운 것이 아닙니다.
 
+<br>
+
 <p align="center">
   <img src="docs/benchmark.svg" alt="Aider polyglot 벤치마크의 Motif-3: 213개 인스턴스 통과율 Motifcode 92.0%, OpenCode 83.1%, Codex 79.8%, 언어별 결과 포함" width="912">
 </p>

@@ -44,6 +44,8 @@ failure handling are **consequences of things that are specifically true about
 measured rather than assumed. It is not a general harness pointed at a
 different base URL.
 
+<br>
+
 <p align="center">
   <img src="docs/benchmark.svg" alt="Motif-3 on the Aider polyglot benchmark: Motifcode 92.0%, OpenCode 83.1%, Codex 79.8% pass rate over 213 instances, with per-language results" width="912">
 </p>
