@@ -35,7 +35,7 @@ import {
   type LoopResult,
   type Transport,
 } from "@motifcode/core";
-import { runHooks, type HookConfig } from "@motifcode/hooks";
+import { runHooks, runShell, type HookConfig } from "@motifcode/hooks";
 import { Journal, listSessions, loadResume, newHeader, type ScopeIdentity } from "@motifcode/journal";
 import { MAX_CONTEXT, SAMPLING_DEFAULTS, systemPromptHash, toolSchemaHash, type ChannelId, type Message, type Tool } from "@motifcode/protocol";
 import type { SkillRegistry } from "@motifcode/skills";
@@ -46,11 +46,14 @@ import {
   THEMES,
   applyTheme,
   clampSelection,
+  mentionAt,
+  mentionsIn,
   menuItemsFor,
   type ComposerView,
   type Key,
   type MenuItem,
 } from "@motifcode/tui";
+import { expandMentions, forgetFiles, listFiles, matchFiles } from "./files.js";
 import { COMMANDS, findCommand, parseSlash, runSlash, type ChatSettings, type CommandContext, type PersistableKey } from "./commands.js";
 import type { LoadedSettings } from "./settings.js";
 import { doctor, formatChecks } from "./doctor.js";
@@ -85,6 +88,10 @@ export interface ChatOptions {
   persist?: (key: PersistableKey, value: unknown) => string | null;
   /** Where the composer's history is kept between sessions. */
   historyPath?: string;
+  /** Lines for `/plugins`. */
+  pluginLines?: string[];
+  /** Where `#` notes go; also what the system prompt reads as project notes. */
+  notesPath?: string;
 }
 
 interface ActiveTask {
@@ -145,6 +152,10 @@ export class Chat {
   private history: Message[] = [];
   /** Every task sent in this conversation, verbatim, for compaction to keep. */
   private tasks: string[] = [];
+  private projectNotes: string | undefined;
+  private shellSequence = 0;
+  /** A `!command` in flight; tasks sent meanwhile wait behind it. */
+  private shellBusy = false;
   private active: ActiveTask | null = null;
   private queued: string | null = null;
   private quitting = false;
@@ -168,6 +179,7 @@ export class Chat {
   constructor(private readonly opts: ChatOptions) {
     this.screen = opts.screen;
     this.settings = { ...opts.settings };
+    this.projectNotes = opts.projectNotes;
     this.now = opts.now ?? (() => Date.now());
     this.scheduler = new AgentScheduler(concurrencyFor(this.settings.endpoint), (entry) =>
       this.screen.apply({ type: "queue", agent: entry.agent, state: entry.state === "failed" ? "done" : entry.state }),
@@ -236,7 +248,9 @@ export class Chat {
         this.composer.insert("\n");
         break;
       case "enter":
-        if (menu.length > 0) {
+        if (menu.length > 0 && this.mentionOpen()) {
+          this.completeMention(menu[clampSelection(this.menuSelected, menu.length)]!);
+        } else if (menu.length > 0) {
           // The menu's selection is the command, whatever fragment was typed.
           const item = menu[clampSelection(this.menuSelected, menu.length)]!;
           this.composer.clear();
@@ -251,7 +265,9 @@ export class Chat {
         }
         break;
       case "tab":
-        if (menu.length > 0) {
+        if (menu.length > 0 && this.mentionOpen()) {
+          this.completeMention(menu[clampSelection(this.menuSelected, menu.length)]!);
+        } else if (menu.length > 0) {
           const item = menu[clampSelection(this.menuSelected, menu.length)]!;
           this.composer.clear();
           this.composer.insert(`/${item.name}${item.usage ? " " : ""}`);
@@ -348,12 +364,51 @@ export class Chat {
     return [...MENU_ITEMS, ...skills];
   }
 
+  /** True when the cursor sits in an `@` token, which opens the file picker. */
+  private mentionOpen(): boolean {
+    return mentionAt(this.composer.text, this.composer.cursor) !== null;
+  }
+
+  /** Files and skills matching the `@` token under the cursor. */
+  private mentionItems(): MenuItem[] {
+    const m = mentionAt(this.composer.text, this.composer.cursor);
+    if (!m) return [];
+    const q = m.query;
+    const skills: MenuItem[] = this.opts.skills
+      .list()
+      .filter((s) => q === "" || `skill:${s.name}`.includes(q.toLowerCase()) || s.name.startsWith(q.toLowerCase()))
+      .map((s) => ({ name: `skill:${s.name}`, description: `skill · ${s.description}` }));
+    const files: MenuItem[] = matchFiles(listFiles(this.settings.cwd), q).map((f) => ({
+      name: f.path,
+      description: f.kind === "dir" ? "directory" : "file",
+    }));
+    // Files first unless the query says skill; either way, at most a screenful.
+    const ordered = q.startsWith("s") && "skill:".startsWith(q.slice(0, 6)) ? [...skills, ...files] : [...files, ...skills];
+    return ordered.slice(0, 10);
+  }
+
+  /** Replace the `@` token under the cursor with the chosen mention. */
+  private completeMention(item: MenuItem): void {
+    const m = mentionAt(this.composer.text, this.composer.cursor);
+    if (!m) return;
+    const chars = [...this.composer.text];
+    const before = chars.slice(0, m.start).join("");
+    const after = chars.slice(m.end).join("");
+    const trailing = item.name.endsWith("/") ? "" : " ";
+    const next = `${before}@${item.name}${trailing}`;
+    this.composer.clear();
+    this.composer.insert(next);
+    this.composer.insert(after);
+    for (let i = 0; i < [...after].length; i++) this.composer.left();
+  }
+
   private menuItems(): MenuItem[] {
-    const items = menuItemsFor(this.composer.text, this.allMenuItems());
+    const items = this.mentionOpen() ? this.mentionItems() : menuItemsFor(this.composer.text, this.allMenuItems());
     // A new filter starts at the top; a longer or shorter one keeps whatever
     // was selected when it still exists.
-    if (this.composer.text !== this.menuFilter) {
-      this.menuFilter = this.composer.text;
+    const filter = `${this.composer.text}#${this.mentionOpen() ? this.composer.cursor : ""}`;
+    if (filter !== this.menuFilter) {
+      this.menuFilter = filter;
       this.menuSelected = 0;
     }
     return items;
@@ -365,7 +420,9 @@ export class Chat {
     const view: ComposerView = {
       draft: this.composer.snapshot(),
       placeholder: PLACEHOLDER,
-      ...(items.length > 0 ? { menu: { items, selected: clampSelection(this.menuSelected, items.length) } } : {}),
+      ...(items.length > 0
+        ? { menu: { items, selected: clampSelection(this.menuSelected, items.length), prefix: this.mentionOpen() ? "@" : "/" } }
+        : {}),
     };
     this.screen.setHint(this.hintText());
     this.screen.setComposer(view);
@@ -385,6 +442,22 @@ export class Chat {
   private async submit(text: string): Promise<void> {
     if (text.trim() === "") return;
     if (this.opts.historyPath) appendHistory(this.opts.historyPath, text);
+    if (this.shellBusy) {
+      this.queued = text;
+      this.refresh();
+      return;
+    }
+    if (text.startsWith("!") && text.length > 1) {
+      await this.runShellLine(text.slice(1).trim());
+      const next = this.queued;
+      this.queued = null;
+      if (next !== null) await this.submit(next);
+      return;
+    }
+    if (text.startsWith("#") && text.length > 1) {
+      this.addNote(text.slice(1).trim());
+      return;
+    }
     const slash = parseSlash(text);
     if (slash && !findCommand(slash.name) && this.opts.skills.get(slash.name)) {
       // A skill as a command, the way Claude Code runs one: its instructions
@@ -424,7 +497,63 @@ export class Chat {
       this.refresh();
       return;
     }
-    await this.runTask(text);
+    const { task, attached } = expandMentions(text, mentionsIn(text), {
+      cwd: this.settings.cwd,
+      renderSkill: (name) => (this.opts.skills.get(name) ? this.opts.skills.render(name) : undefined),
+    });
+    if (attached.length > 0) {
+      this.screen.append({ kind: "notice", level: "info", text: `attached ${attached.map((a) => `@${a}`).join(", ")}` });
+    }
+    await this.runTask(task, text);
+  }
+
+  /**
+   * `!command`: run it here, now, and let the model see what it printed.
+   *
+   * Claude Code's shortcut for the thing people otherwise do in a second
+   * terminal. The command runs in the working directory with a fresh shell,
+   * shows as a tool call would, and goes into the transcript as a user turn
+   * — it is something the person did, and the model should know.
+   */
+  private async runShellLine(command: string): Promise<void> {
+    if (command === "") return;
+    const id = `shell-${++this.shellSequence}`;
+    this.shellBusy = true;
+    this.screen.append({ kind: "tool", id, name: "bash", args: { command }, repaired: false, hooks: [] });
+    let r;
+    try {
+      r = await runShell(command, { cwd: this.settings.cwd, timeoutMs: 120_000, outputCap: 20_000 });
+    } finally {
+      this.shellBusy = false;
+    }
+    const output = r.timedOut ? `${r.output.trim()}\n(killed after ${Math.round(r.ms / 1000)}s)`.trim() : r.output.trim() || `(exit ${r.code})`;
+    this.screen.apply({ type: "tool_end", id, ok: r.code === 0 && !r.timedOut, output, ms: r.ms });
+    this.history.push({
+      role: "user",
+      content: `I ran this in the shell myself:\n$ ${command}\n\n\`\`\`\n${output.slice(0, 8000)}\n\`\`\`\n(exit ${r.code ?? "?"})`,
+    });
+    forgetFiles();
+    this.refresh();
+  }
+
+  /**
+   * `#note`: a line for the project notes, which every session reads into
+   * its system prompt. Applies from the next task, because the system turn
+   * is built per task.
+   */
+  private addNote(note: string): void {
+    const path = this.opts.notesPath ?? join(this.settings.cwd, ".motif", "NOTES.md");
+    try {
+      mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+      const existing = existsSync(path) ? readFileSync(path, "utf8") : "";
+      const sep = existing === "" || existing.endsWith("\n") ? "" : "\n";
+      appendFileSync(path, `${sep}- ${note}\n`, "utf8");
+      this.projectNotes = readFileSync(path, "utf8");
+      this.screen.append({ kind: "notice", level: "info", text: `noted in ${path}; the next task reads it` });
+    } catch (err) {
+      this.screen.append({ kind: "notice", level: "error", text: `could not write ${path}: ${err instanceof Error ? err.message : String(err)}` });
+    }
+    this.refresh();
   }
 
   /**
@@ -569,6 +698,7 @@ export class Chat {
       this.active = null;
       this.screen.setActivity(null);
       this.totals.tasks += 1;
+      forgetFiles();
       this.refresh();
     }
 
@@ -654,7 +784,7 @@ export class Chat {
       tools: this.opts.tools,
       skills: this.opts.skills,
       agents: this.opts.agents,
-      ...(this.opts.projectNotes !== undefined ? { projectNotes: this.opts.projectNotes } : {}),
+      ...(this.projectNotes !== undefined ? { projectNotes: this.projectNotes } : {}),
       cwd: this.settings.cwd,
     });
   }
@@ -789,6 +919,7 @@ export class Chat {
           const tools = CORE_TOOL_NAMES.slice(0, a.toolCount).join(" ");
           return `${a.name.padEnd(12)} ${a.description}  ·  tools: ${tools}`;
         }),
+      plugins: () => this.opts.pluginLines ?? ["no plugins"],
       sessions: () => {
         const sessions = listSessions(this.opts.journalDir);
         if (sessions.length === 0) return [`no sessions in ${this.opts.journalDir}`];

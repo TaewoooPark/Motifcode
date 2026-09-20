@@ -40,6 +40,7 @@ function fakeContext(overrides: Partial<CommandContext> = {}) {
     doctor: async () => ["✓ endpoint ok"],
     skills: () => ["explore"],
     agents: () => ["explorer"],
+    plugins: () => ["no plugins"],
     sessions: () => ["no sessions"],
     resume: async (file) => {
       calls.push(`resume ${file}`);
@@ -130,6 +131,7 @@ describe("commands", () => {
     expect((await runSlash("/doctor", ctx)).lines).toEqual(["✓ endpoint ok"]);
     expect((await runSlash("/skills", ctx)).lines).toEqual(["explore"]);
     expect((await runSlash("/agents", ctx)).lines).toEqual(["explorer"]);
+    expect((await runSlash("/plugins", ctx)).lines).toEqual(["no plugins"]);
     expect((await runSlash("/sessions", ctx)).lines).toEqual(["no sessions"]);
     await runSlash("/resume a.jsonl", ctx);
     await runSlash("/cwd ../other", ctx);

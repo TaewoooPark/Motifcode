@@ -8,7 +8,8 @@
  * request runs in-process.
  */
 
-import { mkdtempSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -305,6 +306,64 @@ describe("interactive session", () => {
     await vi.waitFor(() => expect(s.screen()).toContain("theme set to claude"));
     s.type("/theme neon\r");
     await vi.waitFor(() => expect(s.screen()).toContain("no theme named neon"));
+  });
+
+  it("opens a file picker on @, completes with tab, and attaches the file on send", async () => {
+    const t = new GateTransport([...reply("read it")]);
+    const s = session(t);
+    open.push(s);
+    writeFileSync(join(s.cwd, "alpha.txt"), "ALPHA CONTENT\n");
+    execFileSync("git", ["init", "-q"], { cwd: s.cwd });
+    s.type("look at @alp");
+    await vi.waitFor(() => expect(s.screen()).toContain("❯ @alpha.txt"));
+    s.type("\t");
+    await vi.waitFor(() => expect(s.screen()).toContain("> look at @alpha.txt"));
+    s.type("please\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    const sent = String(t.seen[0]!.messages[1]!.content);
+    expect(sent.startsWith("look at @alpha.txt please")).toBe(true);
+    expect(sent).toContain('<file path="alpha.txt">\nALPHA CONTENT');
+    expect(s.screen()).toContain("attached @alpha.txt");
+    // The transcript shows what was typed, not the attachment.
+    expect(s.screen()).not.toContain("> look at @alpha.txt please\n\n<file");
+  });
+
+  it("offers skills in the picker as @skill:name", async () => {
+    const t = new GateTransport([]);
+    const s = session(t);
+    open.push(s);
+    s.type("@skill:com");
+    await vi.waitFor(() => expect(s.screen()).toContain("❯ @skill:commit"));
+  });
+
+  it("runs !commands here and tells the model what they printed", async () => {
+    const t = new GateTransport([...reply("noted")]);
+    const s = session(t);
+    open.push(s);
+    s.type("!echo hello-from-shell\r");
+    // The result line, not the head line: the head is painted before the
+    // command has run.
+    await vi.waitFor(() => expect(s.screen()).toContain("⎿  hello-from-shell"));
+    expect(s.screen()).toContain("⏺ Bash(echo hello-from-shell)");
+    expect(t.seen).toHaveLength(0);
+    s.type("what did that print?\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    const roles = t.seen[0]!.messages.map((m) => m.role);
+    expect(roles).toEqual(["system", "user", "user"]);
+    expect(String(t.seen[0]!.messages[1]!.content)).toContain("$ echo hello-from-shell");
+    expect(String(t.seen[0]!.messages[1]!.content)).toContain("hello-from-shell");
+  });
+
+  it("appends #notes to the project notes, which the next task reads", async () => {
+    const t = new GateTransport([...reply("ok")]);
+    const s = session(t);
+    open.push(s);
+    s.type("#always run pnpm test before committing\r");
+    await vi.waitFor(() => expect(s.screen()).toContain("noted in"));
+    expect(readFileSync(join(s.cwd, ".motif", "NOTES.md"), "utf8")).toBe("- always run pnpm test before committing\n");
+    s.type("go\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    expect(String(t.seen[0]!.messages[0]!.content)).toContain("always run pnpm test before committing");
   });
 
   it("opens the shortcuts panel on ? and shows the spinner while the model works", async () => {

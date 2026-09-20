@@ -193,11 +193,15 @@ everything the model did about it — and is compacted the way Codex does it
 when it grows past `compactAt` of the window: the model writes a handoff
 summary, your own messages are kept verbatim ahead of it, and the rest goes.
 
-`/` opens the command menu: `/help`, `/status`, `/config`, `/doctor`, `/model`,
+`@` opens a file picker as you type; `@path` attaches the file (or a
+directory's listing) to the message, `@skill:name` attaches a skill's
+instructions. `!command` runs a shell command right there and shows the model
+its output. `#note` appends a line to `.motif/NOTES.md`, which every task
+reads. `/` opens the command menu: `/help`, `/status`, `/config`, `/doctor`, `/model`,
 `/endpoint`, `/channel`, `/max-turns`, `/max-tokens`, `/seed`, `/theme`,
-`/thinking`, `/compact`, `/compact-at`, `/cwd`, `/skills`, `/agents`, `/new`,
-`/sessions`, `/resume`, `/quit`. Skills are commands too: `/commit fix the
-parser` runs the `commit` skill with that input. A setting changed at the
+`/thinking`, `/compact`, `/compact-at`, `/cwd`, `/skills`, `/agents`,
+`/plugins`, `/new`, `/sessions`, `/resume`, `/quit`. Skills are commands too:
+`/commit fix the parser` runs the `commit` skill with that input. A setting changed at the
 prompt is saved to `~/.motif/settings.json`. Esc interrupts a running task; a
 message sent while one runs is queued; `?` lists the keys; Ctrl-C twice quits.
 Each task writes its own journal, and each journal's last checkpoint holds the
@@ -212,6 +216,7 @@ The `.motif` directory is the backend, laid out the way Claude Code lays out
 ~/.motif/skills/<n>/SKILL.md, ~/.motif/agents/<n>.md      yours, on every project
 <repo>/.motif/settings.json the project's settings and hooks — applied once `motif trust` approves it
 <repo>/.motif/skills/, agents/, NOTES.md                    the project's
+~/.motif/plugins/<n>/, <repo>/.motif/plugins/<n>/          plugin.json + skills/ + agents/, Claude Code's layout
 <repo>/.motif/sessions/*.jsonl                              one journal per task
 <repo>/.motif/history.jsonl                                 what you typed, for ↑
 ```
@@ -236,9 +241,11 @@ pip install -r toolkit/requirements-dev.txt
 MOTIF_REQUIRE_TORCH=1 python -m unittest discover -s toolkit/prune -p 'test_*.py'
 ```
 
-Built-in skills: `explore`, `code-review`, `test-fix`, `debug`, `commit`,
-`pr-body`, `skill-creator`, plus `motif-endpoint` (the endpoint is the most
-common cause of bad output here, and `doctor` measures it) and `korean`. Built-in subagents:
+Built-in skills: `explore`, `plan`, `explain`, `code-review`,
+`security-review`, `test-fix`, `debug`, `refactor`, `commit`, `pr-body`,
+`docs`, `init` (writes the project notes), `skill-creator`, plus
+`motif-endpoint` (the endpoint is the most common cause of bad output here,
+and `doctor` measures it) and `korean`. Built-in subagents:
 `explorer`, `reviewer`, `tester`, `planner`, `patcher` — each taking a
 canonical-order **prefix** of the tool list, which is also why none of them can
 spawn another.

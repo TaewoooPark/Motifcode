@@ -41,6 +41,13 @@ describe("slash menu", () => {
     expect(rows[0]).toMatch(/^ {4}\/model \[id\] {10}show or set/);
   });
 
+  it("takes a prefix for mentions and cuts a name that would push the description off", () => {
+    const { rows } = renderMenu([{ name: "src/very/deep/directory/structure/with/a/long/file/name.ts", description: "file" }], 0, { width: 60, prefix: "@" });
+    expect(rows[0]).toMatch(/^ {2}❯ @src\/very/);
+    expect(rows[0]).toContain("…");
+    expect(rows[0]).toMatch(/file$/);
+  });
+
   it("windows a long list around the selection, and says which visible row is selected", () => {
     // The marker and the highlight drifted apart once the list scrolled: the
     // highlight used the selection's index in the whole list as an index into

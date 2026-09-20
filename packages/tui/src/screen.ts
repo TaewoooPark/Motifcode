@@ -77,8 +77,8 @@ export interface ScreenOptions {
 export interface ComposerView {
   draft: ComposerSnapshot;
   placeholder?: string;
-  /** The slash-command menu: the matching items and which is selected. */
-  menu?: { items: MenuItem[]; selected: number };
+  /** The menu under the input: the matching items, which is selected, and their prefix (`/` or `@`). */
+  menu?: { items: MenuItem[]; selected: number; prefix?: string };
 }
 
 export type KeyHandler = (key: Key) => void;
@@ -488,7 +488,7 @@ export class Screen {
     const cursorCol = Math.min(2 + render.cursorCol, Math.max(0, width - 1));
     rows.push(border("╰", "╯"));
     if (view.menu && view.menu.items.length > 0) {
-      const menu = renderMenu(view.menu.items, view.menu.selected, { width });
+      const menu = renderMenu(view.menu.items, view.menu.selected, { width, ...(view.menu.prefix ? { prefix: view.menu.prefix } : {}) });
       menu.rows.forEach((row, i) => {
         const t = truncateToWidth(row, width);
         rows.push({

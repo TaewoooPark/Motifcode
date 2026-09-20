@@ -241,6 +241,162 @@ them, it needs a different server.`,
 
   /* ---------------------------------------------------------------- */
   `---
+name: init
+description: Write the project notes a session loads — stack, commands, conventions, gotchas
+budget: 900
+tags: setup
+---
+Produce \`.motif/NOTES.md\`: the file every session reads into its system
+prompt before doing anything here. It is for a model arriving cold, so write
+what you would want to be told, and nothing that \`ls\` already says.
+
+Find out first, then write. Read the manifest and the README; run the test
+command once to learn what passing looks like; \`rg -n\` for the conventions
+the code actually follows rather than the ones the README claims.
+
+Cover, briefly, each with a verifiable line:
+
+- **What this is** and where the entry points are.
+- **How to build, test and lint**, as exact commands, and how long the tests take.
+- **Conventions that a change must match** — formatting, error handling,
+  naming, how modules export, how tests are laid out.
+- **Gotchas**: the thing that is not obvious and wastes an hour. A directory
+  that is generated. A test that needs a service. A file that must not be edited.
+- **Do not**: anything the owner has said is off limits.
+
+Keep it under 60 lines. Every line is paid for on every request. If a
+\`NOTES.md\` exists, update it rather than replacing it, and keep what still holds.`,
+
+  /* ---------------------------------------------------------------- */
+  `---
+name: plan
+description: Turn a request into an ordered plan with the files it touches and how to verify each step
+budget: 900
+tags: think
+---
+Plan before editing, and show the plan before running it. A plan is a list of
+steps a reviewer could check off, not a paragraph of intent.
+
+1. **Restate the goal in one line**, including what must not change.
+2. **Locate.** \`rg -n\` for the code involved; name the files and the
+   functions. If you cannot name them, you are not ready to plan.
+3. **Order the steps** so that each leaves the repository working. Put the
+   change that everything else depends on first, and the risky one where it
+   can be reverted alone.
+4. **Say how each step is verified** — a test to run, a command whose output
+   changes, a file whose contents you will read back.
+5. **Name the unknowns.** What would change the plan, and how you will find
+   out early.
+
+Then stop and reply with the plan. Do not start editing in the same turn:
+the person reads the plan first, and either says go or changes it.`,
+
+  /* ---------------------------------------------------------------- */
+  `---
+name: explain
+description: Explain how a piece of code works, from its entry point down, with the parts that matter
+budget: 800
+tags: read
+---
+Explain by tracing, not by summarising. Start where execution starts — the
+command, the request handler, the exported function — and follow it down,
+naming each file and function as you pass through it.
+
+Read before you claim. Every statement about behaviour should come from a
+line you opened; quote the identifier, give the path and line.
+
+Structure the answer as:
+
+- **What it does**, in two sentences a newcomer would understand.
+- **The path through the code**, step by step, with file and function names.
+- **The parts that matter**: the invariant, the edge case, the thing that
+  looks wrong and is not — or is.
+- **What you did not check.**
+
+Reply in prose; this task ends with an explanation, not with edits. Match the
+language the person used to ask.`,
+
+  /* ---------------------------------------------------------------- */
+  `---
+name: refactor
+description: Restructure code without changing behaviour, verified by the tests before and after
+budget: 900
+tags: edit
+---
+A refactor changes structure and nothing else. The tests decide whether that
+held, so run them first to know the baseline, and last to prove it.
+
+1. **Run the tests before touching anything.** A failing test that was already
+   failing is not yours to fix here; note it and move on.
+2. **One kind of change at a time.** Rename, then move, then split. Mixing them
+   makes the diff unreadable and a regression impossible to locate.
+3. **Keep the public surface.** Exported names, signatures and error types stay
+   unless the task says otherwise. \`rg -n\` for every caller before changing
+   one.
+4. **Prefer the edit tool to rewriting a file.** A whole-file rewrite hides
+   what changed; a patch shows it.
+5. **Run the tests after each step**, not only at the end.
+
+Report what moved and what stayed, and paste the test summary from before and
+after. If behaviour had to change to make the structure work, say so and stop
+— that is a different task.`,
+
+  /* ---------------------------------------------------------------- */
+  `---
+name: security-review
+description: Look for the ways this change or repository can be made to do harm
+budget: 1000
+tags: review
+---
+Assume an attacker who can supply any input the code reads: arguments,
+files, network bodies, environment, a cloned repository. Look for where that
+input reaches something that acts.
+
+Check, in this order, and give a file and line for every finding:
+
+- **Injection**: strings that become shell commands, SQL, HTML, format
+  strings, regular expressions, or paths. \`rg -n\` for \`exec\`, \`spawn\`,
+  \`eval\`, template concatenation into commands.
+- **Paths**: anything resolving a user-supplied path; can it escape the
+  intended directory through \`..\` or a symlink?
+- **Secrets**: keys in the tree, in logs, in error messages, in environment
+  handed to child processes.
+- **Deserialisation and parsing** of untrusted data; sizes and depths that
+  are unbounded.
+- **Authorisation**: a check that is a request rather than a boundary —
+  enforced by a prompt, a comment, or the caller's good behaviour.
+- **Terminal output** of untrusted text: escape sequences reaching the screen.
+
+Rate each finding by what an attacker gains, and give the input that
+demonstrates it. Do not fix anything unless asked; report, with severity
+first. An empty report is a real result, and say what you did not look at.`,
+
+  /* ---------------------------------------------------------------- */
+  `---
+name: docs
+description: Write or update documentation from the code as it actually is
+budget: 800
+tags: write
+---
+Documentation is a claim about the code, so check the code before making it.
+Read the thing being documented; run it if it can be run; copy the real
+output rather than the expected one.
+
+- **Start with what the reader needs to do**, not with what the code is.
+  A quickstart before a reference.
+- **Commands must be copy-pasteable** and must have been run. Show their
+  actual output, trimmed.
+- **Match the existing voice and format.** A README with sentence-case
+  headings and short paragraphs does not want a new section in another style.
+- **Update, do not append.** Find the paragraph that is now wrong and change
+  it; a document that grows by appending contradicts itself.
+- **Say what is not covered**, in one line, rather than implying completeness.
+
+If asked to document an API, generate the list of exports from the code —
+\`rg -n "^export"\` — rather than from memory, and check each signature.`,
+
+  /* ---------------------------------------------------------------- */
+  `---
 name: korean
 description: Write output in natural Korean rather than translated English
 budget: 600

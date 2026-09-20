@@ -52,6 +52,8 @@ export interface MenuRenderOptions {
   width: number;
   /** Rows shown at once; the window follows the selection. */
   maxRows?: number;
+  /** What precedes each name: `/` for commands, `@` for mentions. */
+  prefix?: string;
 }
 
 const DEFAULT_ROWS = 8;
@@ -77,11 +79,15 @@ export function renderMenu(items: readonly MenuItem[], selected: number, opts: M
   const sel = clampSelection(selected, items.length);
   const start = Math.max(0, Math.min(sel - Math.floor(maxRows / 2), items.length - maxRows));
   const window = items.slice(start, start + maxRows);
-  const nameWidth = Math.max(...items.map((i) => displayWidth(`/${i.name}${i.usage ? ` ${i.usage}` : ""}`)));
+  const prefix = opts.prefix ?? "/";
+  const label = (i: MenuItem): string => `${prefix}${i.name}${i.usage ? ` ${i.usage}` : ""}`;
+  // Names wider than half the screen are cut, so a deep path cannot push the
+  // description off the edge.
+  const nameWidth = Math.min(Math.max(...window.map((i) => displayWidth(label(i)))), Math.max(12, Math.floor(opts.width / 2)));
   const room = Math.max(8, opts.width - 4 - nameWidth - 2);
   const rows = window.map((item, i) => {
     const marker = start + i === sel ? "❯ " : "  ";
-    const name = padToWidth(`/${item.name}${item.usage ? ` ${item.usage}` : ""}`, nameWidth);
+    const name = padToWidth(truncateToWidth(label(item), nameWidth), nameWidth);
     return `  ${marker}${name}  ${truncateToWidth(item.description, room)}`;
   });
   return { rows, selectedRow: sel - start };

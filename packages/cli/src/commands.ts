@@ -51,6 +51,7 @@ export interface CommandContext {
   doctor(): Promise<string[]>;
   skills(): string[];
   agents(): string[];
+  plugins(): string[];
   sessions(): string[];
   /** Available themes, one line each. */
   themes(): string[];
@@ -94,6 +95,9 @@ const KEYS: readonly [string, string][] = [
   ["ctrl-c", "interrupt; twice on an empty prompt to quit (ctrl-d too)"],
   ["tab", "complete the selected command; on an empty prompt, show or hide reasoning"],
   ["?", "on an empty prompt, show or hide the key list"],
+  ["@path", "attach a file or directory to the message; @skill:name attaches a skill's instructions"],
+  ["!command", "run a shell command here and put its output in the conversation"],
+  ["#note", "append a line to .motif/NOTES.md, which every session reads"],
   ["up / down", "browse earlier tasks, or move within a multi-line draft"],
   ["ctrl-a / ctrl-e", "start / end of the line;  ctrl-u / ctrl-k delete to either end;  ctrl-w delete a word"],
 ];
@@ -297,6 +301,11 @@ export const COMMANDS: readonly SlashCommand[] = [
     name: "agents",
     description: "list the subagents the model can delegate to",
     run: (ctx) => ok("/agents", ctx.agents()),
+  },
+  {
+    name: "plugins",
+    description: "list the plugins loaded from ~/.motif/plugins and .motif/plugins",
+    run: (ctx) => ok("/plugins", ctx.plugins()),
   },
   {
     name: "new",

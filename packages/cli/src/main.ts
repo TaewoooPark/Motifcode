@@ -60,6 +60,7 @@ import { BUILTIN_SKILLS, SkillRegistry, parseSkill } from "@motifcode/skills";
 import { CORE_TOOLS, CORE_TOOL_NAMES, lintTools, formatFindings, toolPrefix } from "@motifcode/tools";
 import { Screen, applyTheme, themeNames } from "@motifcode/tui";
 import { Chat } from "./chat.js";
+import { describePlugins, loadPlugins, type LoadedPlugins } from "./plugins.js";
 import { loadSettings, saveUserSetting } from "./settings.js";
 import { doctor, formatChecks, worstState } from "./doctor.js";
 import { ToolExecutor } from "./executor.js";
@@ -85,7 +86,7 @@ function parseArgs(argv: string[]): Args {
       if (eq !== -1) flags[a.slice(2, eq)] = a.slice(eq + 1);
       else if (argv[i + 1] && !argv[i + 1]!.startsWith("-")) flags[a.slice(2)] = argv[++i]!;
       else flags[a.slice(2)] = true;
-    } else if (rest.length === 0 && ["doctor", "sessions", "resume", "skills", "agents", "config", "lint", "distil", "metrics", "trust", "redact", "corpus-spec", "corpus-render", "help", "version"].includes(a)) {
+    } else if (rest.length === 0 && ["doctor", "sessions", "resume", "skills", "agents", "plugins", "config", "lint", "distil", "metrics", "trust", "redact", "corpus-spec", "corpus-render", "help", "version"].includes(a)) {
       command = a;
     } else {
       rest.push(a);
@@ -151,9 +152,19 @@ function nextRunId(prefix: string): string {
 
 const CONFIG_DIR = ".motif";
 
+/** Plugins are read once per process; the registries take from here. */
+let pluginsLoaded: LoadedPlugins | null = null;
+function plugins(cwd: string): LoadedPlugins {
+  pluginsLoaded ??= loadPlugins({ cwd, home: homedir() });
+  return pluginsLoaded;
+}
+
 function loadSkills(cwd: string): SkillRegistry {
   const reg = new SkillRegistry();
   reg.registerAll(BUILTIN_SKILLS);
+  // Plugins sit between the built-ins and the person's own skills: what a
+  // plugin ships can be overridden by hand, never the other way round.
+  reg.registerAll(plugins(cwd).skills);
   // Project skills shadow built-ins of the same name, which is the precedence
   // every other harness uses.
   for (const [dir, source] of [
@@ -234,6 +245,7 @@ function loadHooks(cwd: string, opts: { trustFlag?: string | boolean }): HookCon
 function loadAgents(cwd: string): AgentRegistry {
   const reg = new AgentRegistry();
   reg.registerAll(BUILTIN_AGENTS);
+  reg.registerAll(plugins(cwd).agents);
   for (const [dir, source] of [
     [join(homedir(), CONFIG_DIR, "agents"), "user"],
     [join(cwd, CONFIG_DIR, "agents"), "project"],
@@ -297,6 +309,7 @@ const HELP = `motif ${VERSION} — a coding agent built for Motif-3
   motif skills              list available skills
   motif agents              list available subagents
   motif config              show the effective settings and where each came from
+  motif plugins             list the plugins under ~/.motif/plugins and .motif/plugins
   motif lint                lint the tool schemas
   motif trust               approve this repository's .motif/settings.json hooks
   motif distil <dir>        export graded trajectories
@@ -336,7 +349,13 @@ The .motif directory
   ~/.motif/settings.json    your defaults: model, channel, budgets, theme, thinking, compactAt
   ~/.motif/skills, agents   your skills (SKILL.md) and subagents (*.md)
   <repo>/.motif/            the project's settings.json (hooks too; trusted with 'motif trust'),
-                            skills/, agents/, NOTES.md, sessions/*.jsonl, history.jsonl
+                            skills/, agents/, plugins/, NOTES.md, sessions/*.jsonl, history.jsonl
+  plugins/<name>/           plugin.json + skills/<s>/SKILL.md + agents/<a>.md, under either .motif
+
+At the prompt
+  @path attaches a file or directory to the message (a picker opens as you type);
+  @skill:name attaches a skill's instructions; /skill runs one; !cmd runs a shell
+  command and shows the model its output; #note appends to .motif/NOTES.md.
 
 A trajectory carries structured messages for training; a profile document
 carries one rendered text per line for the routing profiler. They are different
@@ -533,6 +552,11 @@ async function main(): Promise<number> {
         const tools = CORE_TOOL_NAMES.slice(0, a.toolCount).join(" ");
         process.stdout.write(`${a.name.padEnd(12)} ${a.description}  (${a.source ?? "builtin"})\n${"".padEnd(12)} tools: ${tools}\n`);
       }
+      return 0;
+    }
+
+    case "plugins": {
+      for (const line of describePlugins(plugins(cwd))) process.stdout.write(`${line}\n`);
       return 0;
     }
 
@@ -752,6 +776,8 @@ async function main(): Promise<number> {
       settingsInfo: stored,
       persist: (key, value) => saveUserSetting(key, value as never),
       historyPath: join(cwd, CONFIG_DIR, "history.jsonl"),
+      pluginLines: describePlugins(plugins(cwd)),
+      notesPath: join(cwd, CONFIG_DIR, "NOTES.md"),
       channelPolicy,
       ...(apiKey !== undefined ? { apiKey } : {}),
       ...(connection.sources.apiKey !== undefined ? { apiKeySource: connection.sources.apiKey } : {}),
