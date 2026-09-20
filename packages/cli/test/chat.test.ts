@@ -301,6 +301,9 @@ describe("interactive session", () => {
   it("compacts on its own once a request crosses the threshold", async () => {
     // The fake endpoint reports 100 prompt tokens; a threshold below that
     // makes every task cross it, so the compaction runs right after.
+    // Every request reports 100 prompt tokens, so every task crosses the
+    // threshold and is followed by a compaction; the second one has no
+    // scripted summary and must surface as a warning, not as a rejection.
     const t = new GateTransport([...reply("done with one"), "</think>SUMMARY ONE", ...reply("done with two")]);
     const s = session(t, { settings: { model: "m", endpoint: "https://x", channel: "toolcall", maxTurns: 20, cwd: mkdtempSync(join(tmpdir(), "motif-chat-")), theme: "motif", compactAt: 0.0001, permissions: "auto" } });
     open.push(s);
@@ -313,6 +316,8 @@ describe("interactive session", () => {
     expect(second[1]!.content).toBe("one");
     expect(String(second[2]!.content)).toContain("SUMMARY ONE");
     expect(second[3]!.content).toBe("two");
+    await vi.waitFor(() => expect(s.screen()).toContain("compaction failed: no scripted body left; the transcript was left as it was"));
+    await s.chat.whenIdle();
   });
 
   it("switches the theme and says so", async () => {
@@ -425,7 +430,8 @@ describe("interactive session", () => {
     s.type("go\r");
     await vi.waitFor(() => expect(s.screen()).toContain("Run this command?"));
     expect(s.screen()).toContain("echo allowed-output");
-    expect(s.screen()).toContain("❯ 1 Yes");
+    expect(s.screen()).toContain("❯ 1. Yes");
+    expect(s.screen()).toContain("  2. Yes, and don't ask again for bash this session");
     // Letters meant for a draft cannot answer; only the answers can.
     s.type("hello");
     s.type("1");

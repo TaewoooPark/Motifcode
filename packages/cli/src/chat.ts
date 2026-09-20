@@ -498,7 +498,7 @@ export class Chat {
   }
 
   /** The question the panel shows for a call. */
-  private confirmView(call: ToolInvocation, selected: number): { title: string; lines: string[]; choices: string } {
+  private confirmView(call: ToolInvocation, selected: number): { title: string; lines: string[]; choices: string[] } {
     const a = call.arguments;
     const text = (k: string): string => relativise(typeof a[k] === "string" ? (a[k] as string) : "", this.settings.cwd);
     const preview = (s: string, max: number): string[] => {
@@ -528,11 +528,11 @@ export class Chat {
         title = `Run ${call.name}?`;
         lines = preview(JSON.stringify(a), 4);
     }
-    const options = ["1 Yes", `2 Yes, and don't ask again for ${call.name} this session`, "3 No, and tell the model what to do instead"];
+    const options = ["1. Yes", `2. Yes, and don't ask again for ${call.name} this session`, "3. No, and tell the model what to do instead"];
     return {
       title,
       lines,
-      choices: options.map((o, i) => `${i + 1 === selected ? "❯" : " "} ${o}`).join("   "),
+      choices: options.map((o, i) => `${i + 1 === selected ? "❯" : " "} ${o}`),
     };
   }
 
@@ -858,9 +858,19 @@ export class Chat {
     }
     if (this.totals.lastContext >= this.compactLimit() && this.history.length > 0) {
       // The last request was already over the line; compact now rather than
-      // at the next task's first turn, so the person sees it happen.
-      const lines = await this.compactNow();
-      this.screen.append({ kind: "system", title: "compaction", lines });
+      // at the next task's first turn, so the person sees it happen. A
+      // summary that fails leaves the transcript as it was, with a warning —
+      // never an unhandled rejection out of a fire-and-forget submit.
+      try {
+        const lines = await this.compactNow();
+        this.screen.append({ kind: "system", title: "compaction", lines });
+      } catch (err) {
+        this.screen.append({
+          kind: "notice",
+          level: "warn",
+          text: `${err instanceof Error ? err.message : String(err)}; the transcript was left as it was`,
+        });
+      }
     }
     const next = this.queued.shift();
     if (next !== undefined) {

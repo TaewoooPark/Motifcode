@@ -14,14 +14,17 @@
  * screen. Every footer line is at most one terminal row wide: the footer is
  * cleared by counting rows upward, and a line the terminal wrapped on its own
  * is a row the count does not know about, so a long command left its first
- * half behind on every repaint. And a resize is not a repaint. Terminals
+ * half behind on every repaint. And a narrowing is not a repaint. Terminals
  * reflow what is on screen when they are narrowed, each in its own way and
  * with the cursor wherever they choose to leave it — measured on tmux, which
  * splits every over-wide row and parks the cursor at the top — so nothing
  * written before the resize can be found again by counting. Instead the
  * visible screen is erased and rebuilt: the tail of the transcript at the
- * new width, then the footer. Scrollback is untouched, and this is what
- * Claude Code's renderer does when the terminal changes under it.
+ * new width, then the footer. This is what Claude Code's renderer does when
+ * the terminal changes under it, and it has the cost it has there: Terminal
+ * and iTerm keep the erased screen in scrollback, so each narrowing leaves a
+ * copy behind. A widening costs nothing — no row that fitted before can wrap
+ * now — so it is an ordinary repaint.
  *
  * The terminal's cursor is left inside the composer after each paint, so the
  * terminal's own input method composes where the text will land — Hangul
@@ -82,10 +85,11 @@ export interface ComposerView {
   draft: ComposerSnapshot;
   placeholder?: string;
   /**
-   * A question in place of the input: what is about to run, and the keys
-   * that answer. While it shows, the draft is kept but not painted.
+   * A question in place of the input: what is about to run, and the
+   * answers, one per line, the selected one marked with `❯`. While it
+   * shows, the draft is kept but not painted.
    */
-  confirm?: { title: string; lines: string[]; choices: string };
+  confirm?: { title: string; lines: string[]; choices: string[] };
   /** The menu under the input: the matching items, which is selected, and their prefix (`/` or `@`). */
   menu?: { items: MenuItem[]; selected: number; prefix?: string };
 }
@@ -313,12 +317,14 @@ export class Screen {
         else if (key.type === "ctrl" && key.key === "c") process.kill(process.pid, "SIGINT");
       }
     };
-    // A drag sends a burst of resizes; one rebuild at the end is enough.
+    // A drag sends a burst of resizes; one repaint at the end is enough.
+    // Narrower than the last paint means a rebuild; wider is a repaint.
     const onResize = (): void => {
       if (this.resizeTimer) clearTimeout(this.resizeTimer);
       this.resizeTimer = setTimeout(() => {
         this.resizeTimer = null;
-        this.repaintAll();
+        if (this.columns() < this.paintedWidth) this.repaintAll();
+        else this.paint();
       }, 40);
     };
 
@@ -438,9 +444,9 @@ export class Screen {
   }
 
   private paint(): void {
-    if (this.interactive && this.footer.length > 0 && this.columns() !== this.paintedWidth) {
-      // The width changed without a resize event reaching us first — a
-      // resize is rebuilt, never repainted over.
+    if (this.interactive && this.footer.length > 0 && this.columns() < this.paintedWidth) {
+      // Narrowed since the last paint, with or without a resize event: the
+      // rows on screen have been reflowed and cannot be counted over.
       this.repaintAll();
       return;
     }
@@ -581,14 +587,23 @@ export class Screen {
         const t = truncateToWidth(s, inner);
         return `${t}${" ".repeat(Math.max(0, inner - displayWidth(t)))}`;
       };
-      const body = [view.confirm.title, ...view.confirm.lines.map((l) => `  ${l}`), "", view.confirm.choices];
+      const body = [view.confirm.title, ...view.confirm.lines.map((l) => `  ${l}`), "", ...view.confirm.choices];
+      const firstChoice = body.length - view.confirm.choices.length;
       for (const [i, l] of body.entries()) {
-        const painted = i === 0 ? paint(fit(l), style.bold) : i === body.length - 1 ? paint(fit(l), style.accent) : fit(l);
+        const painted =
+          i === 0
+            ? paint(fit(l), style.bold)
+            : i >= firstChoice
+              ? l.startsWith("❯")
+                ? paint(fit(l), style.accent)
+                : paint(fit(l), style.faint)
+              : fit(l);
         rows.push({ text: `${paint("│ ", style.faint)}${painted}${paint(" │", style.faint)}`, width: inner + 4 });
       }
       rows.push(border("╰", "╯"));
-      // The cursor rests at the choices line; there is nothing to type.
-      return { rows, cursorRow: rows.length - 2, cursorCol: 2 + displayWidth(view.confirm.choices) };
+      // The cursor rests on the selected choice; there is nothing to type.
+      const selectedLine = view.confirm.choices.findIndex((c) => c.startsWith("❯"));
+      return { rows, cursorRow: 1 + firstChoice + Math.max(0, selectedLine), cursorCol: 2 };
     }
     for (const row of render.rows) {
       const body = render.placeholder ? paint(row.body, style.faint) : row.body;
