@@ -29,8 +29,8 @@
     "node": ">=20"
   },
   "bin": {
-    "motif": "./dist/motif.js",
-    "motifcode": "./dist/motif.js"
+    "motif": "dist/motif.js",
+    "motifcode": "dist/motif.js"
   },
   "main": "./src/index.ts",
   "exports": {
