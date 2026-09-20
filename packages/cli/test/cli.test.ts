@@ -196,6 +196,26 @@ describe("executor", () => {
     expect(r.output).toContain("JSON object string");
   });
 
+  it("asks before a command runs when given a gate, and reports a refusal to the model", async () => {
+    const asked: string[] = [];
+    const ex = new ToolExecutor({
+      cwd,
+      confirm: async (call) => {
+        asked.push(call.name);
+        return call.name === "bash" ? "deny" : "allow";
+      },
+    });
+    const denied = await ex.run({ id: "1", name: "bash", arguments: { command: "echo x" }, repaired: false, validated: true });
+    expect(denied.ok).toBe(false);
+    expect(denied.output).toContain("declined");
+    // Reads are never a question.
+    writeFileSync(join(cwd, "g.txt"), "g\n", "utf8");
+    const read = await ex.run({ id: "2", name: "read", arguments: { path: "g.txt" }, repaired: false, validated: true });
+    expect(read.ok).toBe(true);
+    ex.close();
+    expect(asked).toEqual(["bash"]);
+  });
+
   it("says so when a tool is unavailable rather than failing silently", async () => {
     const ex = new ToolExecutor({ cwd });
     const r = await ex.run({ id: "1", name: "task", arguments: { agent: "x", prompt: "y" }, repaired: false, validated: true });

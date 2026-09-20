@@ -29,6 +29,8 @@ export type Cell =
       ok?: boolean;
       ms?: number;
       hooks: { label: string; ok: boolean }[];
+      /** What a still-running tool says about itself: a subagent's tool count, elapsed time. */
+      progress?: string;
     }
   | { kind: "repair"; reason: string; attempt: number; max: number }
   | { kind: "breakage"; kindOf: ParseFailureKind; sample: string }
@@ -201,7 +203,19 @@ export function reduce(state: ViewState, event: LoopEvent): ViewState {
       replaceLast(
         "tool",
         (c) => c.id === event.id,
-        (c) => ({ ...c, output: event.output, ok: event.ok, ms: event.ms }),
+        (c) => {
+          const { progress: _done, ...rest } = c;
+          void _done;
+          return { ...rest, output: event.output, ok: event.ok, ms: event.ms };
+        },
+      );
+      break;
+
+    case "tool_progress":
+      replaceLast(
+        "tool",
+        (c) => c.id === event.id,
+        (c) => ({ ...c, progress: event.text }),
       );
       break;
 

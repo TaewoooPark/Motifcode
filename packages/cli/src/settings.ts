@@ -32,6 +32,8 @@ export interface StoredSettings {
   thinking?: boolean;
   /** Fraction of the context window at which the transcript is compacted. */
   compactAt?: number;
+  /** Whether the session asks before a tool that changes the world runs. */
+  permissions?: "ask" | "auto";
 }
 
 export type SettingsSource = "project" | "user" | "default";
@@ -55,6 +57,7 @@ const KEYS: readonly (keyof StoredSettings)[] = [
   "theme",
   "thinking",
   "compactAt",
+  "permissions",
 ];
 
 export function userSettingsPath(home = homedir()): string {
@@ -112,6 +115,10 @@ export function parseSettings(text: string): { values: StoredSettings; problems:
     const v = obj["compactAt"];
     if (typeof v === "number" && v > 0 && v <= 1) values.compactAt = v;
     else problems.push("compactAt must be a fraction between 0 and 1");
+  }
+  if (obj["permissions"] !== undefined) {
+    if (obj["permissions"] === "ask" || obj["permissions"] === "auto") values.permissions = obj["permissions"];
+    else problems.push("permissions must be ask or auto");
   }
   return { values, problems };
 }

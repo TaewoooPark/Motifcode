@@ -202,6 +202,11 @@ reads. `/` opens the command menu: `/help`, `/status`, `/config`, `/doctor`, `/m
 `/thinking`, `/compact`, `/compact-at`, `/cwd`, `/skills`, `/agents`,
 `/plugins`, `/new`, `/sessions`, `/resume` (a numbered list, or a number, or a file), `/quit`;
 `motif --continue` opens the prompt with the latest conversation here loaded.
+By default the session asks before a command, a write, a patch or the
+terminal runs — `y` once, `a` for that tool all session, `n` to decline, and
+the model is told about a refusal; Shift-Tab or `/permissions auto` runs
+everything without asking, as `--dangerously-skip-permissions` does in Claude
+Code, and the choice is remembered.
 The reply streams in as the model writes it; Ctrl-O shows tool output in
 full; Ctrl-L redraws. Skills are commands too:
 `/commit fix the parser` runs the `commit` skill with that input. A setting changed at the

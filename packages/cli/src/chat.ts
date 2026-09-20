@@ -33,6 +33,7 @@ import {
   type ChannelPolicy,
   type LoopEvent,
   type LoopResult,
+  type ToolInvocation,
   type Transport,
 } from "@motifcode/core";
 import { runHooks, runShell, type HookConfig } from "@motifcode/hooks";
@@ -158,6 +159,10 @@ export class Chat {
   private shellSequence = 0;
   /** A `!command` in flight; tasks sent meanwhile wait behind it. */
   private shellBusy = false;
+  /** A tool call waiting for the person's yes or no. */
+  private pendingConfirm: { call: ToolInvocation; resolve: (v: "allow" | "deny") => void } | null = null;
+  /** Tools the person allowed for the rest of the session with `a`. */
+  private readonly alwaysAllowed = new Set<string>();
   private active: ActiveTask | null = null;
   private queued: string | null = null;
   private quitting = false;
@@ -224,6 +229,13 @@ export class Chat {
         });
       }
       this.screen.setLabel(this.settings.model);
+      if (!this.opts.apiKey) {
+        this.screen.append({
+          kind: "notice",
+          level: "warn",
+          text: "no API key is configured: set MOTIF_API_KEY in ~/.motif/.env or ./.env, then /doctor",
+        });
+      }
       this.screen.attachInput(this.opts.stdin, (key) => this.onKey(key));
       this.refresh();
       if (this.opts.continueFrom) {
@@ -245,8 +257,21 @@ export class Chat {
   /* ---------------------------------------------------------------- */
 
   private onKey(key: Key): void {
+    if (this.pendingConfirm) {
+      this.answerConfirm(key);
+      return;
+    }
     const menu = this.menuItems();
     switch (key.type) {
+      case "shift-tab":
+        this.settings.permissions = this.settings.permissions === "ask" ? "auto" : "ask";
+        this.opts.persist?.("permissions", this.settings.permissions);
+        this.screen.append({
+          kind: "notice",
+          level: "info",
+          text: this.settings.permissions === "ask" ? "permissions: asking before tools that change the world" : "permissions: running every tool call without asking",
+        });
+        break;
       case "text":
         // `?` on an empty prompt opens the shortcuts panel, as in Claude Code;
         // anywhere else it is a character.
@@ -420,6 +445,80 @@ export class Chat {
     for (let i = 0; i < [...after].length; i++) this.composer.left();
   }
 
+  /**
+   * The person's answer to a pending tool call.
+   *
+   * `y` or Enter allows it once, `a` allows that tool for the rest of the
+   * session, `n` or Esc declines. Anything else is ignored: the question
+   * stays until it is answered, and typing cannot slip past it.
+   */
+  private answerConfirm(key: Key): void {
+    const pending = this.pendingConfirm;
+    if (!pending) return;
+    let verdict: "allow" | "deny" | null = null;
+    if (key.type === "enter") verdict = "allow";
+    else if (key.type === "escape") verdict = "deny";
+    else if (key.type === "text") {
+      const k = key.text.toLowerCase();
+      if (k === "y") verdict = "allow";
+      else if (k === "n") verdict = "deny";
+      else if (k === "a") {
+        this.alwaysAllowed.add(pending.call.name);
+        verdict = "allow";
+      }
+    } else if (key.type === "ctrl" && key.key === "c") {
+      verdict = "deny";
+      this.interrupt();
+    }
+    if (verdict === null) return;
+    this.pendingConfirm = null;
+    pending.resolve(verdict);
+    this.refresh();
+  }
+
+  /** Put a tool call to the person, unless the mode or an earlier `a` says not to. */
+  private confirm(call: ToolInvocation): Promise<"allow" | "deny"> {
+    if (this.settings.permissions === "auto" || this.alwaysAllowed.has(call.name)) return Promise.resolve("allow");
+    return new Promise((resolve) => {
+      this.pendingConfirm = { call, resolve };
+      this.refresh();
+    });
+  }
+
+  /** The question the panel shows for a call. */
+  private confirmView(call: ToolInvocation): { title: string; lines: string[]; choices: string } {
+    const a = call.arguments;
+    const text = (k: string): string => (typeof a[k] === "string" ? (a[k] as string) : "");
+    const preview = (s: string, max: number): string[] => {
+      const lines = s.replace(/\s+$/, "").split("\n");
+      return lines.length > max ? [...lines.slice(0, max), `… +${lines.length - max} lines`] : lines;
+    };
+    let title: string;
+    let lines: string[];
+    switch (call.name) {
+      case "bash":
+        title = "Run this command?";
+        lines = preview(text("command"), 8);
+        break;
+      case "write":
+        title = `Write ${text("path")}?`;
+        lines = preview(text("content"), 6);
+        break;
+      case "apply_patch":
+        title = "Apply this patch?";
+        lines = preview(text("patch"), 10);
+        break;
+      case "term":
+        title = "Send this to the terminal?";
+        lines = preview(text("keystrokes"), 6);
+        break;
+      default:
+        title = `Run ${call.name}?`;
+        lines = preview(JSON.stringify(a), 4);
+    }
+    return { title, lines, choices: `[y] yes   [a] always for ${call.name} this session   [n] no` };
+  }
+
   private menuItems(): MenuItem[] {
     const items = this.mentionOpen() ? this.mentionItems() : menuItemsFor(this.composer.text, this.allMenuItems());
     // A new filter starts at the top; a longer or shorter one keeps whatever
@@ -438,7 +537,8 @@ export class Chat {
     const view: ComposerView = {
       draft: this.composer.snapshot(),
       placeholder: PLACEHOLDER,
-      ...(items.length > 0
+      ...(this.pendingConfirm ? { confirm: this.confirmView(this.pendingConfirm.call) } : {}),
+      ...(items.length > 0 && !this.pendingConfirm
         ? { menu: { items, selected: clampSelection(this.menuSelected, items.length), prefix: this.mentionOpen() ? "@" : "/" } }
         : {}),
     };
@@ -447,9 +547,11 @@ export class Chat {
   }
 
   private hintText(): string {
+    if (this.pendingConfirm) return "waiting for your answer";
     if (this.ctrlCArmedAt > 0 && this.now() - this.ctrlCArmedAt <= CTRL_C_WINDOW_MS) return "ctrl-c again to quit";
     if (this.queued !== null) return `queued: ${this.queued.split("\n")[0]}`;
     if (this.active) return RUNNING_HINT;
+    if (this.settings.permissions === "auto") return "⏵⏵ auto-approve on (shift-tab to ask)";
     return IDLE_HINT;
   }
 
@@ -750,6 +852,11 @@ export class Chat {
   }
 
   private interrupt(): void {
+    if (this.pendingConfirm) {
+      const pending = this.pendingConfirm;
+      this.pendingConfirm = null;
+      pending.resolve("deny");
+    }
     this.active?.abort.abort();
   }
 
@@ -830,8 +937,9 @@ export class Chat {
       hooks: this.opts.hooks,
       skills: this.opts.skills,
       policy: policyForAgent({ root: cwd, tools: toolNames, readOnly: false }),
+      confirm: (call) => this.confirm(call),
       onHook: (event, label, ok) => this.screen.apply({ type: "hook", event, label, ok }),
-      runAgent: async (name, prompt) => {
+      runAgent: async (name, prompt, callId) => {
         const active = this.active;
         const def = this.opts.agents.get(name);
         if (!def || !active) {
@@ -854,6 +962,7 @@ export class Chat {
           const childExecutor = new ToolExecutor({
             cwd: this.settings.cwd,
             skills: this.opts.skills,
+            confirm: (call) => this.confirm(call),
             policy: policyForAgent({
               root: this.settings.cwd,
               tools: CORE_TOOL_NAMES.slice(0, def.toolCount),
@@ -865,6 +974,19 @@ export class Chat {
             task: prompt,
             initialMessages: [{ role: "user", content: prompt }],
           });
+          // The parent's cell shows how the child is getting on: tool uses and
+          // seconds, the way Claude Code's Task cell does.
+          const childSink = active.journal.sinkFor(childScope);
+          const startedAt = this.now();
+          let toolUses = 0;
+          const childEmit = (e: LoopEvent): void => {
+            if (e.type !== "stream") childSink(e);
+            if (e.type === "tool_start" && callId) {
+              toolUses += 1;
+              const seconds = Math.floor((this.now() - startedAt) / 1000);
+              this.screen.apply({ type: "tool_progress", id: callId, text: `${toolUses} tool use${toolUses === 1 ? "" : "s"} · ${seconds}s` });
+            }
+          };
           try {
             const sub = await runLoop({
               transport: active.transport,
@@ -879,7 +1001,7 @@ export class Chat {
                 }),
               userTask: prompt,
               executor: childExecutor,
-              emit: active.journal.sinkFor(childScope),
+              emit: childEmit,
               onCheckpoint: active.journal.checkpointFor(childScope),
               scopeId: childScope.scopeId,
               repo: { cwd: this.settings.cwd },
@@ -983,6 +1105,7 @@ export class Chat {
       ["theme", s.theme, src("theme")],
       ["thinking", this.screen.thinkingShown ? "shown" : "hidden", src("thinking")],
       ["compactAt", String(s.compactAt), src("compactAt")],
+      ["permissions", s.permissions, src("permissions")],
     ];
     const lines = rows.map(([k, v, from]) => `${k.padEnd(16)} ${v.padEnd(40)} ${from}`);
     lines.push("");
@@ -1008,6 +1131,7 @@ export class Chat {
       `max-tokens  ${s.maxOutputTokens === undefined ? "off (server default)" : s.maxOutputTokens}`,
       `seed        ${s.seed === undefined ? "off" : s.seed}`,
       `theme       ${s.theme}`,
+      `permissions ${s.permissions}${this.alwaysAllowed.size ? ` (always: ${[...this.alwaysAllowed].join(", ")})` : ""}`,
       `thinking    ${this.screen.thinkingShown ? "shown" : "hidden"}`,
       `compact-at  ${s.compactAt} of ${MAX_CONTEXT.toLocaleString("en-US")} tokens`,
       `api key     ${this.opts.apiKey ? `present, from ${this.opts.apiKeySource ?? "the caller"}` : "none"}`,

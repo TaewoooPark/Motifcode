@@ -17,6 +17,7 @@ function fakeContext(overrides: Partial<CommandContext> = {}) {
     cwd: "/repo",
     theme: "motif",
     compactAt: 0.75,
+    permissions: "ask",
   };
   const calls: string[] = [];
   const ctx: CommandContext = {
@@ -153,6 +154,15 @@ describe("commands", () => {
     const bad = await runSlash("/theme neon", ctx);
     expect(bad.error).toBe(true);
     expect(settings.theme).toBe("claude");
+  });
+
+  it("shows and sets the permission mode", async () => {
+    const { ctx, settings, calls } = fakeContext();
+    expect((await runSlash("/permissions", ctx)).lines[0]).toContain("ask:");
+    await runSlash("/permissions auto", ctx);
+    expect(settings.permissions).toBe("auto");
+    expect(calls).toContain('persist permissions="auto"');
+    expect((await runSlash("/permissions maybe", ctx)).error).toBe(true);
   });
 
   it("compacts on request and sets the threshold", async () => {

@@ -15,9 +15,9 @@ function tmp(): string {
 describe("parsing", () => {
   it("takes the recognised keys and reports the wrong-typed ones", () => {
     const { values, problems } = parseSettings(
-      JSON.stringify({ model: "m", channel: "raw", maxTurns: 7, theme: "claude", thinking: true, compactAt: 0.6, hooks: {}, maxOutputTokens: "lots", seed: -1 }),
+      JSON.stringify({ model: "m", channel: "raw", maxTurns: 7, theme: "claude", thinking: true, compactAt: 0.6, permissions: "auto", hooks: {}, maxOutputTokens: "lots", seed: -1 }),
     );
-    expect(values).toEqual({ model: "m", channel: "raw", maxTurns: 7, theme: "claude", thinking: true, compactAt: 0.6 });
+    expect(values).toEqual({ model: "m", channel: "raw", maxTurns: 7, theme: "claude", thinking: true, compactAt: 0.6, permissions: "auto" });
     expect(problems).toHaveLength(2);
   });
 

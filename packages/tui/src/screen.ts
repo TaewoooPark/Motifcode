@@ -77,6 +77,11 @@ export interface ScreenOptions {
 export interface ComposerView {
   draft: ComposerSnapshot;
   placeholder?: string;
+  /**
+   * A question in place of the input: what is about to run, and the keys
+   * that answer. While it shows, the draft is kept but not painted.
+   */
+  confirm?: { title: string; lines: string[]; choices: string };
   /** The menu under the input: the matching items, which is selected, and their prefix (`/` or `@`). */
   menu?: { items: MenuItem[]; selected: number; prefix?: string };
 }
@@ -115,6 +120,8 @@ function inlineMarkup(text: string): string {
 export class Screen {
   private state: ViewState = initialState();
   private readonly commits = new CommitTracker();
+  /** The settled lines for the cells and options they were rendered from; a keystroke changes neither. */
+  private settledMemo: { cells: readonly unknown[]; key: string; lines: StyledLine[] } | null = null;
   /** The rows of the last painted footer, top to bottom. */
   private footer: Row[] = [];
   /** Where the cursor was left: the footer row index and column, or null when below the footer. */
@@ -418,10 +425,26 @@ export class Screen {
     // Only settled cells go to scrollback. A tool cell between `tool_start` and
     // `tool_end` is still growing, and committing it there would print a tool
     // that appears to have produced nothing.
-    const settled = renderSettledStyled(this.state, this.renderOptions);
+    const settled = this.settledLines();
     const fresh = this.commits.take(settled.map((l) => l.text));
     for (const line of settled.slice(settled.length - fresh.length)) this.write(this.colour(line) + "\n");
     this.paintFooter();
+  }
+
+  /**
+   * The settled transcript, rendered once per change.
+   *
+   * Every keystroke repaints the footer, and the footer's arithmetic starts
+   * from the settled lines; re-rendering a long transcript for each
+   * character typed is work whose result is already known.
+   */
+  private settledLines(): StyledLine[] {
+    const opts = this.renderOptions;
+    const key = `${opts.width}|${opts.showThinking ? 1 : 0}|${opts.outputLines ?? ""}|${opts.showShortcuts ? 1 : 0}`;
+    if (this.settledMemo && this.settledMemo.cells === this.state.cells && this.settledMemo.key === key) return this.settledMemo.lines;
+    const lines = renderSettledStyled(this.state, opts);
+    this.settledMemo = { cells: this.state.cells, key, lines };
+    return lines;
   }
 
   /**
@@ -436,7 +459,7 @@ export class Screen {
   private repaintAll(): void {
     if (!this.interactive) return;
     const width = this.columns();
-    const settled = renderSettledStyled(this.state, this.renderOptions);
+    const settled = this.settledLines();
     const fresh = this.commits.take(settled.map((l) => l.text));
     void fresh;
     const footer = this.buildFooter(width);
@@ -530,6 +553,20 @@ export class Screen {
       width: inner + 4,
     });
     const rows: Row[] = [border("╭", "╮")];
+    if (view.confirm) {
+      const fit = (s: string): string => {
+        const t = truncateToWidth(s, inner);
+        return `${t}${" ".repeat(Math.max(0, inner - displayWidth(t)))}`;
+      };
+      const body = [view.confirm.title, ...view.confirm.lines.map((l) => `  ${l}`), "", view.confirm.choices];
+      for (const [i, l] of body.entries()) {
+        const painted = i === 0 ? paint(fit(l), style.bold) : i === body.length - 1 ? paint(fit(l), style.accent) : fit(l);
+        rows.push({ text: `${paint("│ ", style.faint)}${painted}${paint(" │", style.faint)}`, width: inner + 4 });
+      }
+      rows.push(border("╰", "╯"));
+      // The cursor rests at the choices line; there is nothing to type.
+      return { rows, cursorRow: rows.length - 2, cursorCol: 2 + displayWidth(view.confirm.choices) };
+    }
     for (const row of render.rows) {
       const body = render.placeholder ? paint(row.body, style.faint) : row.body;
       const plainWidth = displayWidth(row.prefix) + displayWidth(row.body);

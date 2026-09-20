@@ -25,7 +25,6 @@ exports[`transcript > renders a full session 1`] = `
      --- a/ohe_subtraction.py
      +++ b/ohe_subtraction.py
   ⎿  Error: test_ohe.py: 2 failed
-     hook fmt ✓
 
 ↻ repair 1/2 · tool failure
 

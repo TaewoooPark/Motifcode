@@ -79,7 +79,7 @@ function session(transport: Transport, extra: Partial<ConstructorParameters<type
   const chat = new Chat({
     screen: new Screen({ write: (s) => out.push(s), columns: () => 100, interactive: true }),
     stdin: stdin as unknown as NodeJS.ReadStream,
-    settings: { model: "motif/motif-3", endpoint: "https://llm.onerouter.pro", channel: "toolcall", maxTurns: 20, cwd, theme: "motif", compactAt: 0.75 },
+    settings: { model: "motif/motif-3", endpoint: "https://llm.onerouter.pro", channel: "toolcall", maxTurns: 20, cwd, theme: "motif", compactAt: 0.75, permissions: "auto" },
     channelPolicy: "fixed",
     skills,
     agents,
@@ -285,7 +285,7 @@ describe("interactive session", () => {
     // The fake endpoint reports 100 prompt tokens; a threshold below that
     // makes every task cross it, so the compaction runs right after.
     const t = new GateTransport([...reply("done with one"), "</think>SUMMARY ONE", ...reply("done with two")]);
-    const s = session(t, { settings: { model: "m", endpoint: "https://x", channel: "toolcall", maxTurns: 20, cwd: mkdtempSync(join(tmpdir(), "motif-chat-")), theme: "motif", compactAt: 0.0001 } });
+    const s = session(t, { settings: { model: "m", endpoint: "https://x", channel: "toolcall", maxTurns: 20, cwd: mkdtempSync(join(tmpdir(), "motif-chat-")), theme: "motif", compactAt: 0.0001, permissions: "auto" } });
     open.push(s);
     s.type("one\r");
     await vi.waitFor(() => expect(s.screen()).toContain("Context compacted"));
@@ -399,6 +399,52 @@ describe("interactive session", () => {
     expect(s.chat.transcript.length).toBeGreaterThan(0);
     s.type("\x0f");
     await vi.waitFor(() => expect(s.screen()).toContain("line 29"));
+  });
+
+  it("asks before a command runs, and a yes runs it", async () => {
+    const t = new GateTransport([toolCallBody("bash", { command: "echo allowed-output" }), ...reply("done")]);
+    const s = session(t, { settings: { model: "m", endpoint: "https://x", channel: "toolcall", maxTurns: 20, cwd: mkdtempSync(join(tmpdir(), "motif-chat-")), theme: "motif", compactAt: 0.75, permissions: "ask" } });
+    open.push(s);
+    s.type("go\r");
+    await vi.waitFor(() => expect(s.screen()).toContain("Run this command?"));
+    expect(s.screen()).toContain("echo allowed-output");
+    expect(s.screen()).toContain("[y] yes");
+    s.type("y");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    expect(s.screen()).toContain("⎿  allowed-output");
+  });
+
+  it("tells the model when a call is declined, and stops asking after an a", async () => {
+    const t = new GateTransport([
+      toolCallBody("bash", { command: "echo first" }),
+      toolCallBody("bash", { command: "echo second" }),
+      toolCallBody("bash", { command: "echo third" }),
+      ...reply("done"),
+    ]);
+    const s = session(t, { settings: { model: "m", endpoint: "https://x", channel: "toolcall", maxTurns: 20, cwd: mkdtempSync(join(tmpdir(), "motif-chat-")), theme: "motif", compactAt: 0.75, permissions: "ask" } });
+    open.push(s);
+    s.type("go\r");
+    await vi.waitFor(() => expect(s.screen()).toContain("Run this command?"));
+    s.type("n");
+    await vi.waitFor(() => expect(s.screen()).toContain("echo second"));
+    // The model heard about the refusal in the tool result.
+    const declined = t.seen[1]!.messages.find((m) => m.role === "tool");
+    expect(String(declined?.content)).toContain("declined");
+    s.type("a");
+    // The third call ran without a question — a question would wait forever here.
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    expect(s.screen()).toContain("⎿  third");
+  });
+
+  it("toggles permissions with shift-tab and says so", async () => {
+    const t = new GateTransport([]);
+    const s = session(t);
+    open.push(s);
+    s.type(`${ESC}[Z`);
+    await vi.waitFor(() => expect(s.screen()).toContain("asking before tools"));
+    s.type(`${ESC}[Z`);
+    await vi.waitFor(() => expect(s.screen()).toContain("running every tool call"));
+    expect(s.screen()).toContain("auto-approve on");
   });
 
   it("opens the shortcuts panel on ? and shows the spinner while the model works", async () => {

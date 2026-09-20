@@ -52,13 +52,23 @@ export interface ExecutorOptions {
    * directory it was pointed at. Subagents get a narrower one.
    */
   policy?: ExecutionPolicy;
-  /** Runs a subagent; supplied by the CLI so this module stays loop-agnostic. */
-  runAgent?: (agent: string, prompt: string) => Promise<SubagentOutcome>;
+  /** Runs a subagent; supplied by the CLI so this module stays loop-agnostic. The call id lets it report progress against the parent's cell. */
+  runAgent?: (agent: string, prompt: string, callId?: string) => Promise<SubagentOutcome>;
   /** Called for MCP proxy calls. Absent means no servers are connected. */
   callMcp?: (server: string, method: string, args: unknown) => Promise<string>;
   onHook?: (event: HookEvent, label: string, ok: boolean) => void;
   timeoutMs?: number;
+  /**
+   * Asked before a tool that changes the world runs — bash, write, a patch,
+   * the terminal, an MCP call. Absent, everything runs. The interactive
+   * session supplies one that puts the question to the person; a denial goes
+   * back to the model as a result it can act on, not as an error.
+   */
+  confirm?: (call: ToolInvocation) => Promise<"allow" | "deny">;
 }
+
+/** The tools a confirmation gate applies to. Reading and delegating are not among them. */
+export const CONFIRMED_TOOLS: ReadonlySet<string> = new Set(["bash", "write", "apply_patch", "term", "mcp"]);
 
 /**
  * Read an argument the validator has already checked.
@@ -448,6 +458,17 @@ export class ToolExecutor implements Executor {
       return { ok: false, output: `refused by execution policy: ${decision.reason}` };
     }
 
+    if (this.opts.confirm && CONFIRMED_TOOLS.has(call.name)) {
+      const verdict = await this.opts.confirm(call);
+      if (verdict === "deny") {
+        // Worded for the model: what happened, and what to do about it.
+        return {
+          ok: false,
+          output: "The person declined this tool call. Do not retry it as it was; ask what they would prefer, or take a different approach.",
+        };
+      }
+    }
+
     if (hooks) {
       const pre = await runHooks(hooks, {
         event: "PreToolUse",
@@ -584,7 +605,7 @@ export class ToolExecutor implements Executor {
           return { ok: false, output: "task needs a non-empty `prompt`; nothing was delegated" };
         }
         try {
-          const out = await run(str(args, "agent"), prompt);
+          const out = await run(str(args, "agent"), prompt, call.id);
           const head = `[${out.runId}] `;
           if (!out.ok) {
             return {

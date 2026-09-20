@@ -25,6 +25,7 @@ export type Key =
   | { type: "backspace" }
   | { type: "delete" }
   | { type: "tab" }
+  | { type: "shift-tab" }
   | { type: "escape" }
   | { type: "up" }
   | { type: "down" }
@@ -61,6 +62,8 @@ function csiKey(params: string, final: string): Key | null {
       return { type: "home" };
     case "F":
       return { type: "end" };
+    case "Z":
+      return { type: "shift-tab" };
     case "~":
       switch (params.split(";")[0]) {
         case "1":

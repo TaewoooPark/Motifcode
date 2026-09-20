@@ -238,7 +238,7 @@ function renderCellRaw(cell: Cell, opts: RenderOptions): StyledLine[] {
         out.push(...diffLines(cell.args["patch"], Math.max(outputLines, 12)));
       }
       if (cell.ok === undefined) {
-        out.push(line(`  ${RESULT}  Running…`, "dim"));
+        out.push(line(`  ${RESULT}  Running…${cell.progress ? ` · ${cell.progress}` : ""}`, "dim"));
       } else if (!cell.ok) {
         const { lines, hidden } = clip(cell.output ?? "", outputLines);
         const body = lines.length > 0 && lines[0] !== "" ? lines : ["(failed)"];
@@ -253,9 +253,11 @@ function renderCellRaw(cell: Cell, opts: RenderOptions): StyledLine[] {
         const { lines, hidden } = clip(cell.output ?? "", outputLines);
         const body = lines.length > 0 && lines[0] !== "" ? lines : ["(no output)"];
         out.push(...results(body).map((l) => line(l, "dim")));
-        if (hidden > 0) out.push(line(`     … +${hidden} lines`, "dim"));
+        if (hidden > 0) out.push(line(`     … +${hidden} lines${opts.showShortcuts ? " (ctrl-o to expand)" : ""}`, "dim"));
       }
-      for (const h of cell.hooks) out.push(line(`     hook ${h.label} ${h.ok ? "✓" : "✗"}`, "dim"));
+      // A hook that passed is silent, as in Claude Code; one that failed is
+      // the thing the person needs to see.
+      for (const h of cell.hooks) if (!h.ok) out.push(line(`     hook ${h.label} ✗`, "warn"));
       out.push(blank);
       return out;
     }
@@ -382,8 +384,10 @@ export function renderTailStyled(state: ViewState, opts: RenderOptions): StyledL
     const room = Math.max(10, opts.width - 4);
     out.push({ text: sanitize(`${THINK} ${truncateEndToWidth(last, room)}`), tone: "dim" });
   }
-  if (state.pendingContent !== "") {
-    for (const l of proseLines(state.pendingContent, `${BULLET} `)) out.push({ text: sanitize(l.text), tone: l.tone });
+  // A model about to call a tool often sends a newline first; whitespace is
+  // not a reply worth a bullet.
+  if (state.pendingContent.trim() !== "") {
+    for (const l of proseLines(state.pendingContent.replace(/^\s+/, ""), `${BULLET} `)) out.push({ text: sanitize(l.text), tone: l.tone });
   }
   return out;
 }

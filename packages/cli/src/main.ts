@@ -333,6 +333,7 @@ Flags
   --continue                open the prompt with the most recent conversation here loaded
   --thinking                show the model's reasoning in the transcript
   --theme <name>            colour theme (motif, claude, mono, solarized, dracula)
+  --permissions <mode>      ask (default) before commands, writes and patches run, or auto
   --no-hero                 skip the splash
 
 distil flags
@@ -399,6 +400,7 @@ async function main(): Promise<number> {
   }
   const showThinking = args.flags["thinking"] === true || stored.values.thinking === true;
   const compactAt = stored.values.compactAt ?? 0.75;
+  const permissions = flagEnum(args.flags, "permissions", ["ask", "auto"] as const, stored.values.permissions ?? "ask");
   const { endpoint, model, apiKey } = connection;
   // Read once, then gone: every command the agent runs inherits this process's
   // environment, and a credential in it is one `env` away from a tool result.
@@ -572,6 +574,7 @@ async function main(): Promise<number> {
         ["theme", themeName, typeof args.flags["theme"] === "string" ? "flag" : (stored.sources.theme ?? "default")],
         ["thinking", showThinking ? "shown" : "hidden", args.flags["thinking"] === true ? "flag" : (stored.sources.thinking ?? "default")],
         ["compactAt", String(compactAt), stored.sources.compactAt ?? "default"],
+        ["permissions", permissions, typeof args.flags["permissions"] === "string" ? "flag" : (stored.sources.permissions ?? "default")],
       ];
       for (const [k, v, from] of rows) process.stdout.write(`${k.padEnd(16)} ${v.padEnd(40)} ${from}\n`);
       process.stdout.write(`\nuser file     ${stored.userPath}${existsSync(stored.userPath) ? "" : " (absent)"}\n`);
@@ -773,6 +776,7 @@ async function main(): Promise<number> {
         cwd,
         theme: applyTheme(themeName) ? themeName : "motif",
         compactAt,
+        permissions,
       },
       settingsInfo: stored,
       persist: (key, value) => saveUserSetting(key, value as never),

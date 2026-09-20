@@ -37,10 +37,12 @@ export interface ChatSettings {
   theme: string;
   /** Fraction of the context window at which the transcript is compacted. */
   compactAt: number;
+  /** Ask before a tool that changes the world runs, or run everything. */
+  permissions: "ask" | "auto";
 }
 
 /** Settings a command may write to the person's file. */
-export type PersistableKey = "model" | "endpoint" | "channel" | "maxTurns" | "maxOutputTokens" | "seed" | "theme" | "thinking" | "compactAt";
+export type PersistableKey = "model" | "endpoint" | "channel" | "maxTurns" | "maxOutputTokens" | "seed" | "theme" | "thinking" | "compactAt" | "permissions";
 
 export interface CommandContext {
   settings: ChatSettings;
@@ -95,6 +97,8 @@ const KEYS: readonly [string, string][] = [
   ["ctrl-c", "interrupt; twice on an empty prompt to quit (ctrl-d too)"],
   ["tab", "complete the selected command; on an empty prompt, show or hide reasoning"],
   ["?", "on an empty prompt, show or hide the key list"],
+  ["shift-tab", "toggle permissions: ask before tools run, or run everything"],
+  ["y / a / n", "when asked about a tool call: allow once, allow that tool for the session, decline"],
   ["ctrl-o", "show tool output in full, or clipped again"],
   ["ctrl-l", "redraw the screen"],
   ["@path", "attach a file or directory to the message; @skill:name attaches a skill's instructions"],
@@ -286,6 +290,23 @@ export const COMMANDS: readonly SlashCommand[] = [
       if (!Number.isFinite(f) || f < 0.1 || f > 1) return fail("/compact-at", `compact-at must be a fraction between 0.1 and 1; got ${args}`);
       ctx.settings.compactAt = f;
       return ok("/compact-at", [`the transcript is compacted at ${f} of the context window`, ...saved(ctx, "compactAt", f)]);
+    },
+  },
+  {
+    name: "permissions",
+    description: "ask before commands, writes and patches run, or run everything (shift-tab toggles)",
+    usage: "[ask|auto]",
+    run: (ctx, args) => {
+      if (args === "") {
+        return ok("/permissions", [
+          ctx.settings.permissions === "ask"
+            ? "ask: bash, write, apply_patch, term and mcp wait for a yes; y allows once, a allows that tool for the session, n declines"
+            : "auto: every tool call runs without asking",
+        ]);
+      }
+      if (args !== "ask" && args !== "auto") return fail("/permissions", `permissions must be ask or auto; got ${args}`);
+      ctx.settings.permissions = args;
+      return ok("/permissions", [args === "ask" ? "asking before tools that change the world" : "running every tool call without asking", ...saved(ctx, "permissions", args)]);
     },
   },
   {

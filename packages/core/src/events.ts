@@ -126,6 +126,8 @@ export type LoopEvent =
    * once the whole response is in, and the journal does not keep these.
    */
   | { type: "stream"; reasoning?: string; content?: string; tool?: string }
+  /** A running tool's progress, for the screen — a subagent's tool count and elapsed time. */
+  | { type: "tool_progress"; id: string; text: string }
   | { type: "notice"; level: "info" | "warn" | "error"; text: string }
   | { type: "session_end"; reason: SessionEndReason; summary?: string };
 
