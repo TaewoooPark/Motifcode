@@ -47,6 +47,17 @@ export class Composer {
     return { text: this.text, cursor: this.pos };
   }
 
+  /** Earlier entries, oldest first, from a previous session. */
+  seedHistory(entries: readonly string[]): void {
+    for (const e of entries) {
+      if (e !== "" && this.history[this.history.length - 1] !== e) this.history.push(e);
+    }
+  }
+
+  get historyEntries(): readonly string[] {
+    return this.history;
+  }
+
   insert(text: string): void {
     const incoming = [...text];
     this.chars.splice(this.pos, 0, ...incoming);

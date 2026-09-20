@@ -78,7 +78,7 @@ function session(transport: Transport, extra: Partial<ConstructorParameters<type
   const chat = new Chat({
     screen: new Screen({ write: (s) => out.push(s), columns: () => 100, interactive: true }),
     stdin: stdin as unknown as NodeJS.ReadStream,
-    settings: { model: "motif/motif-3", endpoint: "https://llm.onerouter.pro", channel: "toolcall", maxTurns: 20, cwd },
+    settings: { model: "motif/motif-3", endpoint: "https://llm.onerouter.pro", channel: "toolcall", maxTurns: 20, cwd, theme: "motif", compactAt: 0.75 },
     channelPolicy: "fixed",
     skills,
     agents,
@@ -238,6 +238,73 @@ describe("interactive session", () => {
     s.type("second\r");
     await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(2));
     expect(t.seen[1]!.messages.map((m) => m.role)).toEqual(["system", "user"]);
+  });
+
+  it("runs a skill as a command, showing what was typed and sending the sheet", async () => {
+    const t = new GateTransport([...reply("committed")]);
+    const s = session(t);
+    open.push(s);
+    s.type("/commit fix the parser\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    const sent = String(t.seen[0]!.messages[1]!.content);
+    expect(sent).toContain('<skill name="commit">');
+    expect(sent).toContain("fix the parser");
+    expect(s.screen()).toContain("> /commit fix the parser");
+    expect(s.screen()).not.toContain('> <skill name="commit">');
+  });
+
+  it("lists skills in the slash menu after the built-in commands", async () => {
+    const t = new GateTransport([]);
+    const s = session(t);
+    open.push(s);
+    s.type("/comm");
+    await vi.waitFor(() => expect(s.screen()).toContain("❯ /commit [input]"));
+    expect(s.screen()).toContain("skill · ");
+  });
+
+  it("compacts the conversation on /compact, keeping the person's messages verbatim", async () => {
+    // The summary request is one more completion; the reply is the handoff.
+    const t = new GateTransport([...reply("first answer"), "</think>HANDOFF: the parser was fixed"]);
+    const s = session(t);
+    open.push(s);
+    s.type("fix the parser\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    s.type("/compact\r");
+    await vi.waitFor(() => expect(s.screen()).toContain("Context compacted"));
+    const roles = s.chat.transcript.map((m) => m.role);
+    expect(roles).toEqual(["user", "user"]);
+    expect(s.chat.transcript[0]!.content).toBe("fix the parser");
+    expect(String(s.chat.transcript[1]!.content)).toContain("HANDOFF: the parser was fixed");
+    // The summary request carried the whole transcript plus the prompt.
+    const summaryRequest = t.seen[1]!;
+    expect(String(summaryRequest.messages[summaryRequest.messages.length - 1]!.content)).toContain("CONTEXT CHECKPOINT COMPACTION");
+  });
+
+  it("compacts on its own once a request crosses the threshold", async () => {
+    // The fake endpoint reports 100 prompt tokens; a threshold below that
+    // makes every task cross it, so the compaction runs right after.
+    const t = new GateTransport([...reply("done with one"), "</think>SUMMARY ONE", ...reply("done with two")]);
+    const s = session(t, { settings: { model: "m", endpoint: "https://x", channel: "toolcall", maxTurns: 20, cwd: mkdtempSync(join(tmpdir(), "motif-chat-")), theme: "motif", compactAt: 0.0001 } });
+    open.push(s);
+    s.type("one\r");
+    await vi.waitFor(() => expect(s.screen()).toContain("Context compacted"));
+    s.type("two\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(2));
+    const second = t.seen[2]!.messages;
+    expect(second.map((m) => m.role)).toEqual(["system", "user", "user", "user"]);
+    expect(second[1]!.content).toBe("one");
+    expect(String(second[2]!.content)).toContain("SUMMARY ONE");
+    expect(second[3]!.content).toBe("two");
+  });
+
+  it("switches the theme and says so", async () => {
+    const t = new GateTransport([]);
+    const s = session(t);
+    open.push(s);
+    s.type("/theme claude\r");
+    await vi.waitFor(() => expect(s.screen()).toContain("theme set to claude"));
+    s.type("/theme neon\r");
+    await vi.waitFor(() => expect(s.screen()).toContain("no theme named neon"));
   });
 
   it("opens the shortcuts panel on ? and shows the spinner while the model works", async () => {

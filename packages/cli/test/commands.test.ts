@@ -15,11 +15,28 @@ function fakeContext(overrides: Partial<CommandContext> = {}) {
     channel: "toolcall",
     maxTurns: 100,
     cwd: "/repo",
+    theme: "motif",
+    compactAt: 0.75,
   };
   const calls: string[] = [];
   const ctx: CommandContext = {
     settings,
     status: () => ["status line"],
+    config: () => ["config line"],
+    themes: () => ["motif      blue", "claude     terracotta"],
+    setTheme: (name) => {
+      if (name !== "motif" && name !== "claude") return [`no theme named ${name}`];
+      settings.theme = name;
+      return [`theme set to ${name}`];
+    },
+    compact: async () => {
+      calls.push("compact");
+      return ["compacted"];
+    },
+    persist: (key, value) => {
+      calls.push(`persist ${key}=${JSON.stringify(value)}`);
+      return "/home/u/.motif/settings.json";
+    },
     doctor: async () => ["✓ endpoint ok"],
     skills: () => ["explore"],
     agents: () => ["explorer"],
@@ -67,11 +84,13 @@ describe("commands", () => {
     expect(out.lines.join("\n")).toContain("esc");
   });
 
-  it("shows and sets the model, endpoint, budgets and seed", async () => {
-    const { ctx, settings } = fakeContext();
+  it("shows and sets the model, endpoint, budgets and seed, and remembers each", async () => {
+    const { ctx, settings, calls } = fakeContext();
     expect((await runSlash("/model", ctx)).lines).toEqual(["motif/motif-3"]);
-    await runSlash("/model other/model", ctx);
+    const set = await runSlash("/model other/model", ctx);
     expect(settings.model).toBe("other/model");
+    expect(set.lines[1]).toContain("saved to /home/u/.motif/settings.json");
+    expect(calls).toContain('persist model="other/model"');
 
     await runSlash("/endpoint http://x/v1", ctx);
     expect(settings.endpoint).toBe("http://x");
@@ -99,7 +118,7 @@ describe("commands", () => {
     const { ctx, settings, calls } = fakeContext();
     const out = await runSlash("/channel raw", ctx);
     expect(settings.channel).toBe("raw");
-    expect(calls).toEqual(["new: channel changed to raw"]);
+    expect(calls).toEqual(["new: channel changed to raw", 'persist channel="raw"']);
     expect(out.lines.join(" ")).toContain("experimental");
     expect((await runSlash("/channel raw", ctx)).lines).toEqual(["already on raw"]);
     expect((await runSlash("/channel banana", ctx)).error).toBe(true);
@@ -117,7 +136,31 @@ describe("commands", () => {
     await runSlash("/thinking", ctx);
     await runSlash("/new", ctx);
     await runSlash("/exit", ctx);
-    expect(calls).toEqual(["resume a.jsonl", "cwd ../other", "thinking", "new: new conversation", "quit"]);
+    expect(calls).toEqual(["resume a.jsonl", "cwd ../other", "thinking", "persist thinking=true", "new: new conversation", "quit"]);
+  });
+
+  it("lists, sets and refuses themes", async () => {
+    const { ctx, settings, calls } = fakeContext();
+    const list = await runSlash("/theme", ctx);
+    expect(list.lines[0]).toBe("current: motif");
+    expect(list.lines.join("\n")).toContain("claude");
+    const set = await runSlash("/theme claude", ctx);
+    expect(settings.theme).toBe("claude");
+    expect(set.lines).toEqual(["theme set to claude", "saved to /home/u/.motif/settings.json"]);
+    expect(calls).toContain('persist theme="claude"');
+    const bad = await runSlash("/theme neon", ctx);
+    expect(bad.error).toBe(true);
+    expect(settings.theme).toBe("claude");
+  });
+
+  it("compacts on request and sets the threshold", async () => {
+    const { ctx, settings, calls } = fakeContext();
+    expect((await runSlash("/compact", ctx)).lines).toEqual(["compacted"]);
+    expect(calls).toContain("compact");
+    await runSlash("/compact-at 0.5", ctx);
+    expect(settings.compactAt).toBe(0.5);
+    expect((await runSlash("/compact-at 3", ctx)).error).toBe(true);
+    expect((await runSlash("/config", ctx)).lines).toEqual(["config line"]);
   });
 
   it("reports an unknown command and a missing argument as errors", async () => {

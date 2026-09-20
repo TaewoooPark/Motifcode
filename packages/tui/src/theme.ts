@@ -3,26 +3,84 @@
  *
  * Severity drives colour, never decoration: a reading is faint because it is
  * fine, amber because it wants attention, red because something is wrong. The
- * accent is Motif's brand blue, sampled from the logo.
+ * accent marks what the harness itself says — the prompt, the bullets — and
+ * is the one thing a theme is mostly about.
+ *
+ * Themes are palettes, not layouts. Every theme fills the same slots, so the
+ * writer never asks which theme is active; it asks for `style.accent` and gets
+ * whatever the palette put there. `applyTheme` swaps the slots in place, which
+ * is why `style` is an object and not a frozen constant.
  */
 
-const ESC = "[";
+const ESC = "\x1b[";
 
 export const NO_COLOR = process.env["NO_COLOR"] !== undefined || process.env["TERM"] === "dumb";
 
+const rgb = (r: number, g: number, b: number): string => `${ESC}38;2;${r};${g};${b}m`;
+const idx = (n: number): string => `${ESC}38;5;${n}m`;
+
+export interface Palette {
+  accent: string;
+  ok: string;
+  warn: string;
+  bad: string;
+  faint: string;
+}
+
+/** The palettes on offer, by name. */
+export const THEMES: Record<string, { description: string; palette: Palette }> = {
+  motif: {
+    description: "Motif's brand blue, sampled from the logo",
+    palette: { accent: rgb(96, 122, 213), ok: rgb(80, 170, 120), warn: rgb(200, 150, 60), bad: rgb(200, 90, 80), faint: idx(245) },
+  },
+  claude: {
+    description: "Claude's terracotta accent with GitHub's status colours",
+    palette: { accent: rgb(217, 119, 87), ok: rgb(63, 185, 80), warn: rgb(210, 153, 34), bad: rgb(248, 81, 73), faint: idx(245) },
+  },
+  mono: {
+    description: "no colour at all — weight and dimness only",
+    palette: { accent: `${ESC}1m`, ok: idx(250), warn: `${ESC}1m`, bad: `${ESC}1m${ESC}4m`, faint: idx(245) },
+  },
+  solarized: {
+    description: "Solarized's blue, green, yellow and red",
+    palette: { accent: rgb(38, 139, 210), ok: rgb(133, 153, 0), warn: rgb(181, 137, 0), bad: rgb(220, 50, 47), faint: rgb(147, 161, 161) },
+  },
+  dracula: {
+    description: "Dracula's purple, green, yellow and red",
+    palette: { accent: rgb(189, 147, 249), ok: rgb(80, 250, 123), warn: rgb(241, 250, 140), bad: rgb(255, 85, 85), faint: rgb(98, 114, 164) },
+  },
+};
+
+export const DEFAULT_THEME = "motif";
+
+export function themeNames(): string[] {
+  return Object.keys(THEMES);
+}
+
+/** The active palette, swapped in place by `applyTheme`. */
 export const style = {
   reset: `${ESC}0m`,
   dim: `${ESC}2m`,
   bold: `${ESC}1m`,
-  /** #607AD5, sampled from the Motif mark. */
-  accent: `${ESC}38;2;96;122;213m`,
-  ok: `${ESC}38;2;80;170;120m`,
-  warn: `${ESC}38;2;200;150;60m`,
-  bad: `${ESC}38;2;200;90;80m`,
-  faint: `${ESC}38;5;245m`,
   /** Swapped foreground and background, for the selected menu row. */
   inverse: `${ESC}7m`,
-} as const;
+  ...THEMES[DEFAULT_THEME]!.palette,
+};
+
+let active = DEFAULT_THEME;
+
+export function activeTheme(): string {
+  return active;
+}
+
+/** Switch palettes. Returns false, and changes nothing, for an unknown name. */
+export function applyTheme(name: string): boolean {
+  const theme = THEMES[name];
+  if (!theme) return false;
+  Object.assign(style, theme.palette);
+  active = name;
+  return true;
+}
 
 export function paint(text: string, code: string): string {
   if (NO_COLOR) return text;

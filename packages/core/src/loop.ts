@@ -48,6 +48,7 @@ import {
   type Tool,
 } from "@motifcode/protocol";
 import { BreakageBudget, LoopGuard, nextChannel, type BudgetState } from "./budget.js";
+import { buildCompactedHistory, summarizeTranscript } from "./compaction.js";
 import {
   PROTOCOL_VERSION,
   isMutating,
@@ -143,6 +144,17 @@ export interface LoopOptions {
    * talking to is the confirmation.
    */
   confirmDone?: boolean;
+  /**
+   * Compact the transcript once a request's prompt reaches `limitTokens`.
+   *
+   * Codex's approach: the model writes a handoff summary of the transcript,
+   * and the summary replaces it — after the person's own messages, which are
+   * kept verbatim. `userTurns` are those messages from earlier tasks in the
+   * same conversation; the current task is added here. The compaction runs
+   * before the next request rather than mid-turn, so a turn's tool calls and
+   * their results are never split.
+   */
+  compaction?: { limitTokens: number; userTurns?: readonly string[] };
   /** Output cap per model step. Sent on the wire, not merely assumed. */
   maxOutputTokens?: number;
   temperature?: number;
@@ -363,6 +375,8 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
   let callSequence = resume?.nextCallSequence ?? 1;
   let seq = resume?.afterSeq ?? 0;
   const transitions: ChannelTransition[] = [];
+  /** Prompt tokens of the request that crossed the compaction limit, until compacted. */
+  let compactPending: number | null = null;
 
   void lifecycle("SessionStart");
 
@@ -458,6 +472,34 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
 
   while (turn < maxTurns) {
     if (signal?.aborted) return finish("aborted");
+
+    if (compactPending !== null && opts.compaction) {
+      // Between turns, never inside one: the transcript being summarised is
+      // whole, with every tool result in place.
+      const before = compactPending;
+      compactPending = null;
+      try {
+        const summary = await summarizeTranscript({
+          transport,
+          messages: session.messages,
+          tools,
+          ...(signal ? { signal } : {}),
+        });
+        const turns = [...(opts.compaction.userTurns ?? [])];
+        if (turns[turns.length - 1] !== opts.userTask) turns.push(opts.userTask);
+        session.restart(system(channel), buildCompactedHistory(turns, summary));
+        emit({ type: "compaction", beforeTokens: before, summaryChars: summary.length, summary });
+        checkpoint();
+      } catch (err) {
+        if (TransportError.is(err) && err.kind === "aborted") return finish("aborted");
+        emit({
+          type: "notice",
+          level: "warn",
+          text: `compaction failed: ${err instanceof Error ? err.message : String(err)}; continuing with the full transcript`,
+        });
+      }
+    }
+
     turn++;
     emit({ type: "turn_start", turn });
 
@@ -524,6 +566,13 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
       ...(response.usage?.cachedTokens !== undefined ? { cachedTokens: response.usage.cachedTokens } : {}),
       requestMs: response.ms,
     });
+    if (
+      opts.compaction &&
+      response.usage?.promptTokens !== undefined &&
+      response.usage.promptTokens >= opts.compaction.limitTokens
+    ) {
+      compactPending = response.usage.promptTokens;
+    }
 
     checkpoint();
 

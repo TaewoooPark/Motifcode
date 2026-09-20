@@ -37,6 +37,8 @@ export type Cell =
   | { kind: "notice"; level: "info" | "warn" | "error"; text: string }
   | { kind: "loop"; signature: string; repeats: number }
   | { kind: "end"; reason: string; summary?: string }
+  /** The transcript was replaced by the model's own summary of it. */
+  | { kind: "compaction"; beforeTokens: number; summaryChars: number }
   /** Output of a slash command, or anything else the harness says for itself. */
   | { kind: "system"; title: string; lines: string[] };
 
@@ -235,6 +237,10 @@ export function reduce(state: ViewState, event: LoopEvent): ViewState {
 
     case "loop_detected":
       cells.push({ kind: "loop", signature: event.signature, repeats: event.repeats });
+      break;
+
+    case "compaction":
+      cells.push({ kind: "compaction", beforeTokens: event.beforeTokens, summaryChars: event.summaryChars });
       break;
 
     case "notice":

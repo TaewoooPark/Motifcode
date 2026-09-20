@@ -159,3 +159,4 @@ export function concurrencyFor(endpoint: string): number {
 }
 
 export { BUILTIN_AGENTS } from "./builtin.js";
+export { parseAgent, parseToolCount } from "./parse.js";

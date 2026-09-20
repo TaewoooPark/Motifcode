@@ -10,7 +10,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { AgentRegistry, AgentScheduler, BUILTIN_AGENTS, concurrencyFor } from "@motifcode/agents";
+import { AgentRegistry, AgentScheduler, BUILTIN_AGENTS, concurrencyFor, parseAgent } from "@motifcode/agents";
 import {
   DEFAULT_ENDPOINT,
   DEFAULT_MODEL,
@@ -58,8 +58,9 @@ import {
 } from "@motifcode/protocol";
 import { BUILTIN_SKILLS, SkillRegistry, parseSkill } from "@motifcode/skills";
 import { CORE_TOOLS, CORE_TOOL_NAMES, lintTools, formatFindings, toolPrefix } from "@motifcode/tools";
-import { Screen } from "@motifcode/tui";
+import { Screen, applyTheme, themeNames } from "@motifcode/tui";
 import { Chat } from "./chat.js";
+import { loadSettings, saveUserSetting } from "./settings.js";
 import { doctor, formatChecks, worstState } from "./doctor.js";
 import { ToolExecutor } from "./executor.js";
 import { policyForAgent } from "./policy.js";
@@ -84,7 +85,7 @@ function parseArgs(argv: string[]): Args {
       if (eq !== -1) flags[a.slice(2, eq)] = a.slice(eq + 1);
       else if (argv[i + 1] && !argv[i + 1]!.startsWith("-")) flags[a.slice(2)] = argv[++i]!;
       else flags[a.slice(2)] = true;
-    } else if (rest.length === 0 && ["doctor", "sessions", "resume", "skills", "agents", "lint", "distil", "metrics", "trust", "redact", "corpus-spec", "corpus-render", "help", "version"].includes(a)) {
+    } else if (rest.length === 0 && ["doctor", "sessions", "resume", "skills", "agents", "config", "lint", "distil", "metrics", "trust", "redact", "corpus-spec", "corpus-render", "help", "version"].includes(a)) {
       command = a;
     } else {
       rest.push(a);
@@ -225,6 +226,48 @@ function loadHooks(cwd: string, opts: { trustFlag?: string | boolean }): HookCon
   return DEFAULT_HOOKS;
 }
 
+/**
+ * Subagents: the built-ins, then `~/.motif/agents/*.md`, then the project's
+ * `.motif/agents/*.md` — later ones shadow earlier ones of the same name,
+ * the precedence skills already use.
+ */
+function loadAgents(cwd: string): AgentRegistry {
+  const reg = new AgentRegistry();
+  reg.registerAll(BUILTIN_AGENTS);
+  for (const [dir, source] of [
+    [join(homedir(), CONFIG_DIR, "agents"), "user"],
+    [join(cwd, CONFIG_DIR, "agents"), "project"],
+  ] as const) {
+    if (!existsSync(dir)) continue;
+    for (const name of readdirSync(dir)) {
+      if (!name.endsWith(".md")) continue;
+      const file = join(dir, name);
+      try {
+        reg.register(parseAgent(readFileSync(file, "utf8"), source));
+      } catch (err) {
+        process.stderr.write(`skipping ${file}: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
+    }
+  }
+  return reg;
+}
+
+/**
+ * Whether the project's `.motif/settings.json` may be applied.
+ *
+ * The same decision the hooks make, for the same reason: a cloned repository
+ * must not be able to point the harness — and the credential it sends — at
+ * an endpoint of its choosing. `--trust-project-hooks <sha256>` pre-approves
+ * an exact content hash for non-interactive runs.
+ */
+function projectTrusted(cwd: string, content: string, trustFlag: string | boolean | undefined): boolean {
+  const decision = checkTrust(loadTrustStore(), cwd, content);
+  if (decision.trusted) return true;
+  if (typeof trustFlag !== "string") return false;
+  const again = checkTrust(approveTrust(loadTrustStore(), cwd, content), cwd, content);
+  return again.trusted && again.record.settingsSha256 === trustFlag;
+}
+
 function loadProjectNotes(cwd: string): string | undefined {
   for (const name of ["AGENTS.md", "CLAUDE.md", join(CONFIG_DIR, "NOTES.md")]) {
     const file = join(cwd, name);
@@ -253,6 +296,7 @@ const HELP = `motif ${VERSION} — a coding agent built for Motif-3
   motif resume <file>       resume an interrupted session
   motif skills              list available skills
   motif agents              list available subagents
+  motif config              show the effective settings and where each came from
   motif lint                lint the tool schemas
   motif trust               approve this repository's .motif/settings.json hooks
   motif distil <dir>        export graded trajectories
@@ -274,6 +318,7 @@ Flags
   --journal <path>          write the session record here instead of .motif/sessions
   --interactive             open the prompt after the task, or with no task at all
   --thinking                show the model's reasoning in the transcript
+  --theme <name>            colour theme (motif, claude, mono, solarized, dracula)
   --no-hero                 skip the splash
 
 distil flags
@@ -286,6 +331,12 @@ Connection
   then from ./.env, then from ~/.motif/.env — MOTIF_* keys only, and never into
   the environment. The key is sent as a bearer token and is withheld from every
   command the agent runs.
+
+The .motif directory
+  ~/.motif/settings.json    your defaults: model, channel, budgets, theme, thinking, compactAt
+  ~/.motif/skills, agents   your skills (SKILL.md) and subagents (*.md)
+  <repo>/.motif/            the project's settings.json (hooks too; trusted with 'motif trust'),
+                            skills/, agents/, NOTES.md, sessions/*.jsonl, history.jsonl
 
 A trajectory carries structured messages for training; a profile document
 carries one rendered text per line for the routing profiler. They are different
@@ -304,13 +355,30 @@ async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2));
   const cwd = flagStr(args.flags, "cwd", process.cwd());
   const envFile = flagStr(args.flags, "env-file", "");
+  // The settings files sit below the environment and the flags: a one-off
+  // override belongs on the command line, a lasting choice in the file.
+  const stored = loadSettings({
+    cwd,
+    projectTrusted: (content) => projectTrusted(cwd, content, args.flags["trust-project-hooks"]),
+    warn: (m) => process.stderr.write(`${m}\n`),
+  });
   const connection = resolveEndpointConfig({
     flags: {
       ...(typeof args.flags["endpoint"] === "string" ? { endpoint: args.flags["endpoint"] } : {}),
       ...(typeof args.flags["model"] === "string" ? { model: args.flags["model"] } : {}),
     },
     dotenvPaths: [...(envFile ? [envFile] : []), ...defaultDotenvPaths()],
+    defaults: {
+      ...(stored.values.endpoint !== undefined ? { endpoint: stored.values.endpoint } : {}),
+      ...(stored.values.model !== undefined ? { model: stored.values.model } : {}),
+    },
   });
+  const themeName = flagStr(args.flags, "theme", stored.values.theme ?? "motif");
+  if (!applyTheme(themeName)) {
+    process.stderr.write(`no theme named ${themeName}; using motif (themes: ${themeNames().join(", ")})\n`);
+  }
+  const showThinking = args.flags["thinking"] === true || stored.values.thinking === true;
+  const compactAt = stored.values.compactAt ?? 0.75;
   const { endpoint, model, apiKey } = connection;
   // Read once, then gone: every command the agent runs inherits this process's
   // environment, and a credential in it is one `env` away from a tool result.
@@ -461,12 +529,29 @@ async function main(): Promise<number> {
     }
 
     case "agents": {
-      const reg = new AgentRegistry();
-      reg.registerAll(BUILTIN_AGENTS);
-      for (const a of reg.list()) {
+      for (const a of loadAgents(cwd).list()) {
         const tools = CORE_TOOL_NAMES.slice(0, a.toolCount).join(" ");
-        process.stdout.write(`${a.name.padEnd(12)} ${a.description}\n${"".padEnd(12)} tools: ${tools}\n`);
+        process.stdout.write(`${a.name.padEnd(12)} ${a.description}  (${a.source ?? "builtin"})\n${"".padEnd(12)} tools: ${tools}\n`);
       }
+      return 0;
+    }
+
+    case "config": {
+      const rows: [string, string, string][] = [
+        ["model", model, connection.sources.model],
+        ["endpoint", endpoint, connection.sources.endpoint],
+        ["channel", stored.values.channel ?? "toolcall", stored.sources.channel ?? "default"],
+        ["maxTurns", String(stored.values.maxTurns ?? 100), stored.sources.maxTurns ?? "default"],
+        ["maxOutputTokens", stored.values.maxOutputTokens === undefined ? "off" : String(stored.values.maxOutputTokens), stored.sources.maxOutputTokens ?? "default"],
+        ["seed", stored.values.seed === undefined ? "off" : String(stored.values.seed), stored.sources.seed ?? "default"],
+        ["theme", themeName, typeof args.flags["theme"] === "string" ? "flag" : (stored.sources.theme ?? "default")],
+        ["thinking", showThinking ? "shown" : "hidden", args.flags["thinking"] === true ? "flag" : (stored.sources.thinking ?? "default")],
+        ["compactAt", String(compactAt), stored.sources.compactAt ?? "default"],
+      ];
+      for (const [k, v, from] of rows) process.stdout.write(`${k.padEnd(16)} ${v.padEnd(40)} ${from}\n`);
+      process.stdout.write(`\nuser file     ${stored.userPath}${existsSync(stored.userPath) ? "" : " (absent)"}\n`);
+      const projectState = !existsSync(stored.projectPath) ? " (absent)" : stored.projectApplied ? " (applied)" : " (present, not trusted — run `motif trust`)";
+      process.stdout.write(`project file  ${stored.projectPath}${projectState}\n`);
       return 0;
     }
 
@@ -566,19 +651,21 @@ async function main(): Promise<number> {
       break;
   }
 
-  const channel: ChannelId = flagEnum(args.flags, "channel", CHANNELS, "toolcall");
+  const channel: ChannelId = flagEnum(args.flags, "channel", CHANNELS, stored.values.channel ?? "toolcall");
   const channelPolicy = flagEnum(args.flags, "channel-policy", CHANNEL_POLICIES, "fixed");
-  const maxTurns = flagInt(args.flags, "max-turns", 100, 1);
+  const maxTurns = flagInt(args.flags, "max-turns", stored.values.maxTurns ?? 100, 1);
   const maxOutputTokens =
     args.flags["max-output-tokens"] !== undefined
       ? flagInt(args.flags, "max-output-tokens", 0, 1)
-      : undefined;
-  const seed = args.flags["seed"] !== undefined ? flagInt(args.flags, "seed", 0, 0) : undefined;
+      : stored.values.maxOutputTokens;
+  const seed = args.flags["seed"] !== undefined ? flagInt(args.flags, "seed", 0, 0) : stored.values.seed;
 
   // The two body-parsing channels are implemented end to end but have never
   // been run against Motif-3. Saying so with a flag is more honest than a
-  // README note nobody reads at the point of use.
-  if (channel !== "toolcall" && args.flags["experimental-channel"] !== true) {
+  // README note nobody reads at the point of use. A channel chosen in a
+  // settings file was chosen on purpose, and is not asked again.
+  const channelFromFlag = typeof args.flags["channel"] === "string";
+  if (channel !== "toolcall" && channelFromFlag && args.flags["experimental-channel"] !== true) {
     throw new UsageError(
       `the ${channel} channel has never been measured against Motif-3; pass --experimental-channel to try it`,
     );
@@ -591,8 +678,7 @@ async function main(): Promise<number> {
   }
 
   const skills = loadSkills(cwd);
-  const agents = new AgentRegistry();
-  agents.registerAll(BUILTIN_AGENTS);
+  const agents = loadAgents(cwd);
   const hooks = loadHooks(cwd, { trustFlag: args.flags["trust-project-hooks"] });
   const projectNotes = loadProjectNotes(cwd);
 
@@ -650,7 +736,7 @@ async function main(): Promise<number> {
   }
   if ((wantsChat || !task) && tty && !resumeFrom) {
     const chat = new Chat({
-      screen: new Screen({ showThinking: args.flags["thinking"] === true }),
+      screen: new Screen({ showThinking }),
       stdin: process.stdin,
       settings: {
         model,
@@ -660,7 +746,12 @@ async function main(): Promise<number> {
         ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
         ...(seed !== undefined ? { seed } : {}),
         cwd,
+        theme: applyTheme(themeName) ? themeName : "motif",
+        compactAt,
       },
+      settingsInfo: stored,
+      persist: (key, value) => saveUserSetting(key, value as never),
+      historyPath: join(cwd, CONFIG_DIR, "history.jsonl"),
       channelPolicy,
       ...(apiKey !== undefined ? { apiKey } : {}),
       ...(connection.sources.apiKey !== undefined ? { apiKeySource: connection.sources.apiKey } : {}),
@@ -683,7 +774,7 @@ async function main(): Promise<number> {
   }
 
   const transport = new HttpTransport({ endpoint, model, ...(apiKey !== undefined ? { apiKey } : {}) });
-  const screen = new Screen({ showThinking: args.flags["thinking"] === true });
+  const screen = new Screen({ showThinking });
   const runId = new Date().toISOString().replace(/[:.]/g, "-");
   // `--journal` so a benchmark runner knows where the record went without
   // scraping a directory for the newest file. Two rows finishing in the same

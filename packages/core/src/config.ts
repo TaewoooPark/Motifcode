@@ -45,6 +45,12 @@ export interface ResolveOptions {
   flags?: { endpoint?: string; model?: string };
   env?: NodeJS.ProcessEnv;
   /**
+   * What to fall back to when nothing else names a value — a settings file's
+   * choice, below the environment and the flags. Absent, the built-in
+   * defaults apply.
+   */
+  defaults?: { endpoint?: string; model?: string };
+  /**
    * `.env` files to read, in order of precedence. Defaults to `.env` in the
    * current directory and then `~/.motif/.env`. A path that does not exist is
    * skipped; one that exists but does not parse is an error, because a key
@@ -125,11 +131,11 @@ export function resolveEndpointConfig(opts: ResolveOptions = {}): EndpointConfig
       const v = f.values[key];
       if (v !== undefined && v !== "") return { value: v, source: `${f.path} (${key})` };
     }
-    return { value: fallback, source: "default" };
+    return { value: fallback, source: fallback !== undefined && fallback !== (key === ENV_ENDPOINT ? DEFAULT_ENDPOINT : DEFAULT_MODEL) ? "settings" : "default" };
   };
 
-  const endpoint = pick(opts.flags?.endpoint, ENV_ENDPOINT, DEFAULT_ENDPOINT);
-  const model = pick(opts.flags?.model, ENV_MODEL, DEFAULT_MODEL);
+  const endpoint = pick(opts.flags?.endpoint, ENV_ENDPOINT, opts.defaults?.endpoint ?? DEFAULT_ENDPOINT);
+  const model = pick(opts.flags?.model, ENV_MODEL, opts.defaults?.model ?? DEFAULT_MODEL);
   const apiKey = pick(undefined, ENV_API_KEY, undefined);
 
   return {

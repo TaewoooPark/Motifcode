@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { CORE_TOOL_NAMES } from "@motifcode/tools";
 import { unwrapTool, type Tool } from "@motifcode/protocol";
-import { AgentRegistry, AgentScheduler, BUILTIN_AGENTS, concurrencyFor } from "../src/index.js";
+import { AgentRegistry, AgentScheduler, BUILTIN_AGENTS, concurrencyFor, parseAgent, parseToolCount } from "../src/index.js";
 
 const reg = new AgentRegistry();
 reg.registerAll(BUILTIN_AGENTS);
@@ -107,5 +107,46 @@ describe("scheduling", () => {
     ).rejects.toThrow("boom");
     expect(states).toContain("failed");
     expect(s.pending).toHaveLength(0);
+  });
+});
+
+describe("agent definitions from markdown", () => {
+  const doc = [
+    "---",
+    "name: auditor",
+    "description: Checks a change for security problems",
+    "tools: done bash read",
+    "readOnly: true",
+    "maxTurns: 12",
+    "---",
+    "Look for injection, secrets in the tree, and unsafe shell.",
+    "",
+  ].join("\n");
+
+  it("reads the frontmatter and the body", () => {
+    const def = parseAgent(doc, "project");
+    expect(def).toMatchObject({ name: "auditor", toolCount: 3, readOnly: true, maxTurns: 12, source: "project" });
+    expect(def.instructions).toContain("Look for injection");
+  });
+
+  it("accepts a count or a prefix, and refuses a set", () => {
+    expect(parseToolCount("4", "x")).toBe(4);
+    expect(parseToolCount("done bash", "x")).toBe(2);
+    expect(() => parseToolCount("bash task", "x")).toThrow(/prefix/);
+    expect(() => parseToolCount("0", "x")).toThrow();
+  });
+
+  it("refuses a definition with no name, no description or no body", () => {
+    expect(() => parseAgent("no frontmatter")).toThrow(/frontmatter/);
+    expect(() => parseAgent("---\ndescription: d\n---\nbody")).toThrow(/name/);
+    expect(() => parseAgent("---\nname: a\n---\nbody")).toThrow(/description/);
+    expect(() => parseAgent("---\nname: a\ndescription: d\n---\n")).toThrow(/instructions/);
+  });
+
+  it("shadows a built-in of the same name when registered after it", () => {
+    const reg = new AgentRegistry();
+    reg.registerAll(BUILTIN_AGENTS);
+    reg.register(parseAgent("---\nname: explorer\ndescription: mine\n---\nDo it my way.", "project"));
+    expect(reg.get("explorer")?.source).toBe("project");
   });
 });

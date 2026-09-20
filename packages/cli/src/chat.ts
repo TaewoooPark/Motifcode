@@ -22,12 +22,14 @@
  * controller runs against a fake stream in a test.
  */
 
-import { existsSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { AgentRegistry, AgentScheduler, concurrencyFor } from "@motifcode/agents";
 import {
   HttpTransport,
+  buildCompactedHistory,
   runLoop,
+  summarizeTranscript,
   type ChannelPolicy,
   type LoopEvent,
   type LoopResult,
@@ -35,12 +37,14 @@ import {
 } from "@motifcode/core";
 import { runHooks, type HookConfig } from "@motifcode/hooks";
 import { Journal, listSessions, loadResume, newHeader, type ScopeIdentity } from "@motifcode/journal";
-import { SAMPLING_DEFAULTS, systemPromptHash, toolSchemaHash, type ChannelId, type Message, type Tool } from "@motifcode/protocol";
+import { MAX_CONTEXT, SAMPLING_DEFAULTS, systemPromptHash, toolSchemaHash, type ChannelId, type Message, type Tool } from "@motifcode/protocol";
 import type { SkillRegistry } from "@motifcode/skills";
 import { CORE_TOOL_NAMES } from "@motifcode/tools";
 import {
   Composer,
   Screen,
+  THEMES,
+  applyTheme,
   clampSelection,
   menuItemsFor,
   renderComposer,
@@ -49,7 +53,8 @@ import {
   type Key,
   type MenuItem,
 } from "@motifcode/tui";
-import { COMMANDS, parseSlash, runSlash, type ChatSettings, type CommandContext } from "./commands.js";
+import { COMMANDS, findCommand, parseSlash, runSlash, type ChatSettings, type CommandContext, type PersistableKey } from "./commands.js";
+import type { LoadedSettings } from "./settings.js";
 import { doctor, formatChecks } from "./doctor.js";
 import { ToolExecutor } from "./executor.js";
 import { policyForAgent } from "./policy.js";
@@ -76,6 +81,12 @@ export interface ChatOptions {
   /** A task to send before the first prompt, from the command line. */
   initialTask?: string;
   now?: () => number;
+  /** What the settings files said, for `/config`. */
+  settingsInfo?: LoadedSettings;
+  /** Writes one setting to the person's file; returns its path, or null when not persisted. */
+  persist?: (key: PersistableKey, value: unknown) => string | null;
+  /** Where the composer's history is kept between sessions. */
+  historyPath?: string;
 }
 
 interface ActiveTask {
@@ -118,6 +129,9 @@ const MENU_ITEMS: MenuItem[] = COMMANDS.map((c) => ({
   ...(c.usage ? { usage: c.usage } : {}),
 }));
 
+/** The most recent entries kept from the history file; older lines are left on disk. */
+const HISTORY_LOADED = 200;
+
 let runSequence = 0;
 function nextRunId(prefix: string): string {
   runSequence += 1;
@@ -131,6 +145,8 @@ export class Chat {
   private menuSelected = 0;
   private menuFilter = "";
   private history: Message[] = [];
+  /** Every task sent in this conversation, verbatim, for compaction to keep. */
+  private tasks: string[] = [];
   private active: ActiveTask | null = null;
   private queued: string | null = null;
   private quitting = false;
@@ -159,6 +175,7 @@ export class Chat {
       this.screen.apply({ type: "queue", agent: entry.agent, state: entry.state === "failed" ? "done" : entry.state }),
     );
     this.executor = this.makeExecutor(this.settings.cwd);
+    if (opts.historyPath) this.composer.seedHistory(readHistory(opts.historyPath));
   }
 
   /** The number of tasks that have finished, however they ended. Tests wait on it. */
@@ -324,8 +341,17 @@ export class Chat {
     }
   }
 
+  /** Built-in commands, then every skill that does not share a name with one. */
+  private allMenuItems(): MenuItem[] {
+    const skills = this.opts.skills
+      .list()
+      .filter((s) => !findCommand(s.name))
+      .map((s) => ({ name: s.name, description: `skill · ${s.description}`, usage: "[input]" }));
+    return [...MENU_ITEMS, ...skills];
+  }
+
   private menuItems(): MenuItem[] {
-    const items = menuItemsFor(this.composer.text, MENU_ITEMS);
+    const items = menuItemsFor(this.composer.text, this.allMenuItems());
     // A new filter starts at the top; a longer or shorter one keeps whatever
     // was selected when it still exists.
     if (this.composer.text !== this.menuFilter) {
@@ -362,7 +388,19 @@ export class Chat {
 
   private async submit(text: string): Promise<void> {
     if (text.trim() === "") return;
+    if (this.opts.historyPath) appendHistory(this.opts.historyPath, text);
     const slash = parseSlash(text);
+    if (slash && !findCommand(slash.name) && this.opts.skills.get(slash.name)) {
+      // A skill as a command, the way Claude Code runs one: its instructions
+      // become the task, with whatever followed the name as the input.
+      if (this.active) {
+        this.queued = text;
+        this.refresh();
+        return;
+      }
+      await this.runTask(skillTask(this.opts.skills.render(slash.name), slash.args), text);
+      return;
+    }
     if (slash) {
       if (this.active && BLOCKED_WHILE_RUNNING.has(slash.name.toLowerCase())) {
         this.screen.append({
@@ -393,8 +431,14 @@ export class Chat {
     await this.runTask(text);
   }
 
-  private async runTask(task: string): Promise<void> {
-    this.screen.append({ kind: "user", text: task });
+  /**
+   * Run one task. `display` is what the transcript shows for it when the
+   * task text itself is not what was typed — a skill's instructions stand in
+   * for `/commit`, and the person should see `/commit`.
+   */
+  private async runTask(task: string, display?: string): Promise<void> {
+    this.screen.append({ kind: "user", text: display ?? task });
+    this.tasks.push(task);
     const transport = (this.opts.makeTransport ?? defaultTransport)(this.settings, this.opts.apiKey);
     const runId = new Date(this.now()).toISOString().replace(/[:.]/g, "-") + `-${String(this.totals.tasks + 1).padStart(2, "0")}`;
     const journalPath = join(this.opts.journalDir, `${runId}.jsonl`);
@@ -506,6 +550,7 @@ export class Chat {
         // confirmation a `done` would otherwise need.
         replyEnds: true,
         confirmDone: false,
+        compaction: { limitTokens: this.compactLimit(), userTurns: this.tasks.slice(0, -1) },
         signal: abort.signal,
       });
       journal.record(scope, {
@@ -535,10 +580,16 @@ export class Chat {
       this.finish();
       return;
     }
+    if (this.totals.lastContext >= this.compactLimit() && this.history.length > 0) {
+      // The last request was already over the line; compact now rather than
+      // at the next task's first turn, so the person sees it happen.
+      const lines = await this.compactNow();
+      this.screen.append({ kind: "system", title: "compaction", lines });
+    }
     const next = this.queued;
     this.queued = null;
     if (next !== null) {
-      await this.runTask(next);
+      await this.submit(next);
       return;
     }
     const waiters = this.idleWaiters;
@@ -548,6 +599,38 @@ export class Chat {
 
   private interrupt(): void {
     this.active?.abort.abort();
+  }
+
+  private compactLimit(): number {
+    return Math.floor(this.settings.compactAt * MAX_CONTEXT);
+  }
+
+  /**
+   * Replace the transcript with the model's summary of it, Codex-style: the
+   * person's messages stay verbatim, the rest becomes a handoff.
+   */
+  private async compactNow(): Promise<string[]> {
+    if (this.history.length === 0) return ["nothing to compact; the conversation is empty"];
+    const before = this.totals.lastContext;
+    const transport = (this.opts.makeTransport ?? defaultTransport)(this.settings, this.opts.apiKey);
+    this.screen.setActivity("Compacting the conversation…");
+    try {
+      const summary = await summarizeTranscript({
+        transport,
+        messages: [{ role: "system", content: this.systemFor(this.settings.channel) }, ...this.history],
+        tools: this.opts.tools,
+      });
+      this.history = buildCompactedHistory(this.tasks, summary);
+      this.screen.apply({ type: "compaction", beforeTokens: before, summaryChars: summary.length, summary });
+      return [
+        `the transcript was replaced by a ${summary.length}-character summary${before > 0 ? ` (last request: ${before.toLocaleString("en-US")} tokens)` : ""}`,
+        `${this.tasks.length} of your message(s) were kept verbatim ahead of it`,
+      ];
+    } catch (err) {
+      throw new Error(`compaction failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      this.screen.setActivity(null);
+    }
   }
 
   private quit(): void {
@@ -685,6 +768,16 @@ export class Chat {
     return {
       settings: this.settings,
       status: () => this.statusLines(),
+      config: () => this.configLines(),
+      themes: () => Object.entries(THEMES).map(([name, t]) => `${name.padEnd(10)} ${t.description}`),
+      setTheme: (name) => {
+        if (!applyTheme(name)) return [`no theme named ${name}; /theme lists them`];
+        this.settings.theme = name;
+        this.refresh();
+        return [`theme set to ${name}`];
+      },
+      compact: () => this.compactNow(),
+      persist: (key, value) => (this.opts.persist ? this.opts.persist(key, value) : null),
       doctor: async () =>
         formatChecks(
           await doctor({
@@ -711,6 +804,7 @@ export class Chat {
       resume: async (file) => this.resume(file),
       newConversation: (reason) => {
         this.history = [];
+        this.tasks = [];
         this.screen.append({ kind: "notice", level: "info", text: `${reason}; the transcript was cleared` });
       },
       setCwd: (path) => this.setCwd(path),
@@ -720,6 +814,32 @@ export class Chat {
       },
       quit: () => this.quit(),
     };
+  }
+
+  private configLines(): string[] {
+    const info = this.opts.settingsInfo;
+    const s = this.settings;
+    const src = (key: keyof LoadedSettings["sources"]): string => info?.sources[key] ?? "default";
+    const rows: [string, string, string][] = [
+      ["model", s.model, src("model")],
+      ["endpoint", s.endpoint, src("endpoint")],
+      ["channel", s.channel, src("channel")],
+      ["maxTurns", String(s.maxTurns), src("maxTurns")],
+      ["maxOutputTokens", s.maxOutputTokens === undefined ? "off" : String(s.maxOutputTokens), src("maxOutputTokens")],
+      ["seed", s.seed === undefined ? "off" : String(s.seed), src("seed")],
+      ["theme", s.theme, src("theme")],
+      ["thinking", this.screen.thinkingShown ? "shown" : "hidden", src("thinking")],
+      ["compactAt", String(s.compactAt), src("compactAt")],
+    ];
+    const lines = rows.map(([k, v, from]) => `${k.padEnd(16)} ${v.padEnd(40)} ${from}`);
+    lines.push("");
+    if (info) {
+      lines.push(`user file     ${info.userPath}${existsSync(info.userPath) ? "" : " (absent)"}`);
+      const projectState = !existsSync(info.projectPath) ? " (absent)" : info.projectApplied ? " (applied)" : " (present, not trusted — run `motif trust`)";
+      lines.push(`project file  ${info.projectPath}${projectState}`);
+    }
+    lines.push("flags and MOTIF_* in the environment or .env outrank both files; /model and the rest save to the user file");
+    return lines;
   }
 
   private statusLines(): string[] {
@@ -734,7 +854,9 @@ export class Chat {
       `max-turns   ${s.maxTurns}`,
       `max-tokens  ${s.maxOutputTokens === undefined ? "off (server default)" : s.maxOutputTokens}`,
       `seed        ${s.seed === undefined ? "off" : s.seed}`,
+      `theme       ${s.theme}`,
       `thinking    ${this.screen.thinkingShown ? "shown" : "hidden"}`,
+      `compact-at  ${s.compactAt} of ${MAX_CONTEXT.toLocaleString("en-US")} tokens`,
       `api key     ${this.opts.apiKey ? `present, from ${this.opts.apiKeySource ?? "the caller"}` : "none"}`,
       `journal     ${this.lastJournalPath ?? `(none yet; ${this.opts.journalDir})`}`,
       `history     ${this.history.length} turn(s) in the conversation`,
@@ -775,6 +897,42 @@ export class Chat {
     this.settings.cwd = target;
     this.executor = this.makeExecutor(target);
     return [`working directory is now ${target}`, "the persistent shell was restarted there"];
+  }
+}
+
+/**
+ * A skill's instructions as a task, with the input where the skill wants it.
+ *
+ * `$ARGUMENTS` is the ecosystem's convention for the slot; a skill without
+ * one gets the input appended, labelled, so the model knows which part is
+ * the person's and which the sheet's.
+ */
+export function skillTask(rendered: string, input: string): string {
+  if (rendered.includes("$ARGUMENTS")) return rendered.replaceAll("$ARGUMENTS", input);
+  return input === "" ? rendered : `${rendered}\n\nInput from the person:\n${input}`;
+}
+
+function readHistory(path: string): string[] {
+  if (!existsSync(path)) return [];
+  const entries: string[] = [];
+  for (const line of readFileSync(path, "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const parsed = JSON.parse(line) as { text?: unknown };
+      if (typeof parsed.text === "string") entries.push(parsed.text);
+    } catch {
+      // A torn line from an interrupted write is not worth losing the file over.
+    }
+  }
+  return entries.slice(-HISTORY_LOADED);
+}
+
+function appendHistory(path: string, text: string): void {
+  try {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    appendFileSync(path, JSON.stringify({ at: new Date().toISOString(), text }) + "\n", "utf8");
+  } catch {
+    // History is a convenience; a read-only directory must not stop a task.
   }
 }
 

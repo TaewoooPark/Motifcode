@@ -183,16 +183,43 @@ pnpm lint:tools    # schema linter — fails the build on loose schemas
 ./packages/cli/dist/motif.js agents
 ```
 
-`motif` on its own opens the interactive session: a prompt at the bottom,
-the transcript above it, a status line under it. Every line sent is a task run
-by the same loop as the one-shot command, and the conversation carries across
-tasks — the second task sees the first and everything the model did about it.
-`/` opens the command menu (`/help`, `/status`, `/doctor`, `/model`,
-`/channel`, `/max-turns`, `/max-tokens`, `/seed`, `/thinking`, `/cwd`,
-`/skills`, `/agents`, `/new`, `/sessions`, `/resume`, `/quit`); Esc interrupts
-a running task; a message sent while one runs is queued; Ctrl-C twice quits.
+`motif` on its own opens the interactive session: the transcript above, a
+bordered prompt below, a hint line under it. It reads the way Claude Code
+reads — your line after `>`, the model's prose and each tool call behind a
+`⏺`, results under a `⎿`, reasoning hidden unless you ask for it. A reply
+with no tool call ends the turn; a task that ends in work ends with `done`.
+The conversation carries across tasks — the second sees the first and
+everything the model did about it — and is compacted the way Codex does it
+when it grows past `compactAt` of the window: the model writes a handoff
+summary, your own messages are kept verbatim ahead of it, and the rest goes.
+
+`/` opens the command menu: `/help`, `/status`, `/config`, `/doctor`, `/model`,
+`/endpoint`, `/channel`, `/max-turns`, `/max-tokens`, `/seed`, `/theme`,
+`/thinking`, `/compact`, `/compact-at`, `/cwd`, `/skills`, `/agents`, `/new`,
+`/sessions`, `/resume`, `/quit`. Skills are commands too: `/commit fix the
+parser` runs the `commit` skill with that input. A setting changed at the
+prompt is saved to `~/.motif/settings.json`. Esc interrupts a running task; a
+message sent while one runs is queued; `?` lists the keys; Ctrl-C twice quits.
 Each task writes its own journal, and each journal's last checkpoint holds the
 whole conversation so far, which is what `/resume` reads back.
+
+The `.motif` directory is the backend, laid out the way Claude Code lays out
+`.claude`:
+
+```
+~/.motif/settings.json      your defaults: model, endpoint, channel, budgets, theme, thinking, compactAt
+~/.motif/.env               the credential (see below)
+~/.motif/skills/<n>/SKILL.md, ~/.motif/agents/<n>.md      yours, on every project
+<repo>/.motif/settings.json the project's settings and hooks — applied once `motif trust` approves it
+<repo>/.motif/skills/, agents/, NOTES.md                    the project's
+<repo>/.motif/sessions/*.jsonl                              one journal per task
+<repo>/.motif/history.jsonl                                 what you typed, for ↑
+```
+
+A subagent file is Markdown with frontmatter — `name`, `description`,
+`tools` (a count, or a prefix of the canonical list), `readOnly`, `maxTurns`
+— and the instructions as the body. Themes: `motif`, `claude`, `mono`,
+`solarized`, `dracula`, via `/theme`, `--theme`, or the settings file.
 
 `MOTIF_API_KEY`, `MOTIF_ENDPOINT` and `MOTIF_MODEL` are read from the
 environment, then `./.env`, then `~/.motif/.env` (`--env-file` puts a file

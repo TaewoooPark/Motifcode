@@ -112,6 +112,14 @@ export type LoopEvent =
       requestMs: number;
     }
   | { type: "loop_detected"; signature: string; repeats: number }
+  /**
+   * The transcript was replaced by a summary the model wrote of it.
+   *
+   * `beforeTokens` is the server's count for the request that crossed the
+   * limit, so the reader can see what was compacted; `summary` is what the
+   * model will read in its place from now on.
+   */
+  | { type: "compaction"; beforeTokens: number; summaryChars: number; summary: string }
   | { type: "notice"; level: "info" | "warn" | "error"; text: string }
   | { type: "session_end"; reason: SessionEndReason; summary?: string };
 

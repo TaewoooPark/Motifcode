@@ -4,9 +4,15 @@
  * What the interactive session can do besides send a task: look at its own
  * settings, change them, and reach the housekeeping subcommands — doctor,
  * sessions, resume — without leaving the conversation. The set follows what
- * Claude Code and Codex both converged on (`/help`, `/status`, `/model`,
- * `/clear`, `/resume`, `/doctor`, `/quit`), plus the knobs that are specific
- * to this harness: the action channel, the turn and token budgets, the seed.
+ * Claude Code and Codex both converged on (`/help`, `/status`, `/config`,
+ * `/model`, `/clear`, `/compact`, `/resume`, `/doctor`, `/quit`), plus the
+ * knobs that are specific to this harness: the action channel, the turn and
+ * token budgets, the seed, the theme.
+ *
+ * A setting changed here is remembered: the context persists it to the
+ * person's settings file and says so. Skills are commands too — `/commit`
+ * runs the `commit` skill — but they come from the registry, so the chat
+ * controller resolves them after this table has said no.
  *
  * Every command is a pure function of its arguments and a `CommandContext`,
  * which is the whole of what a command may touch. Nothing here knows about
@@ -28,24 +34,40 @@ export interface ChatSettings {
   maxOutputTokens?: number;
   seed?: number;
   cwd: string;
+  theme: string;
+  /** Fraction of the context window at which the transcript is compacted. */
+  compactAt: number;
 }
+
+/** Settings a command may write to the person's file. */
+export type PersistableKey = "model" | "endpoint" | "channel" | "maxTurns" | "maxOutputTokens" | "seed" | "theme" | "thinking" | "compactAt";
 
 export interface CommandContext {
   settings: ChatSettings;
   /** Current settings and session totals, one line each. */
   status(): string[];
+  /** Effective settings with where each came from, and the files involved. */
+  config(): string[];
   doctor(): Promise<string[]>;
   skills(): string[];
   agents(): string[];
   sessions(): string[];
+  /** Available themes, one line each. */
+  themes(): string[];
+  /** Switch palettes; returns what happened. */
+  setTheme(name: string): string[];
   /** Load a journal's transcript into this conversation. */
   resume(file: string): Promise<string[]>;
+  /** Replace the transcript with the model's summary of it. */
+  compact(): Promise<string[]>;
   /** Forget the transcript and start again; the reason is shown. */
   newConversation(reason: string): void;
   /** Change the working directory; returns what happened. */
   setCwd(path: string): string[];
-  /** Fold or unfold reasoning cells; returns the new state. */
+  /** Show or hide reasoning cells; returns the new state. */
   toggleThinking(): boolean;
+  /** Remember a setting across sessions; the file it went to, or null when not persisted. */
+  persist(key: PersistableKey, value: unknown): string | null;
   quit(): void;
 }
 
@@ -71,6 +93,7 @@ const KEYS: readonly [string, string][] = [
   ["esc", "interrupt the running task, or clear the draft"],
   ["ctrl-c", "interrupt; twice on an empty prompt to quit (ctrl-d too)"],
   ["tab", "complete the selected command; on an empty prompt, show or hide reasoning"],
+  ["?", "on an empty prompt, show or hide the key list"],
   ["up / down", "browse earlier tasks, or move within a multi-line draft"],
   ["ctrl-a / ctrl-e", "start / end of the line;  ctrl-u / ctrl-k delete to either end;  ctrl-w delete a word"],
 ];
@@ -89,6 +112,12 @@ function parseIntArg(args: string, name: string, min: number): number | string {
   return n;
 }
 
+/** The sentence added when a change was written to disk. */
+function saved(ctx: CommandContext, key: PersistableKey, value: unknown): string[] {
+  const path = ctx.persist(key, value);
+  return path ? [`saved to ${path}`] : [];
+}
+
 export const COMMANDS: readonly SlashCommand[] = [
   {
     name: "help",
@@ -98,6 +127,7 @@ export const COMMANDS: readonly SlashCommand[] = [
       const lines = COMMANDS.map(
         (c) => `${`/${c.name}${c.usage ? ` ${c.usage}` : ""}`.padEnd(width)}  ${c.description}`,
       );
+      lines.push("", "Skills are commands too: /<skill> [input] runs one — /skills lists them.");
       const keyWidth = Math.max(...KEYS.map(([k]) => k.length));
       lines.push("", "keys");
       for (const [k, what] of KEYS) lines.push(`${k.padEnd(keyWidth)}  ${what}`);
@@ -108,6 +138,11 @@ export const COMMANDS: readonly SlashCommand[] = [
     name: "status",
     description: "connection, settings and session totals",
     run: (ctx) => ok("/status", ctx.status()),
+  },
+  {
+    name: "config",
+    description: "effective settings, where each came from, and the files",
+    run: (ctx) => ok("/config", ctx.config()),
   },
   {
     name: "doctor",
@@ -121,7 +156,7 @@ export const COMMANDS: readonly SlashCommand[] = [
     run: (ctx, args) => {
       if (args === "") return ok("/model", [ctx.settings.model]);
       ctx.settings.model = args;
-      return ok("/model", [`model set to ${args} for the next task`]);
+      return ok("/model", [`model set to ${args} for the next task`, ...saved(ctx, "model", args)]);
     },
   },
   {
@@ -132,7 +167,10 @@ export const COMMANDS: readonly SlashCommand[] = [
       if (args === "") return ok("/endpoint", [ctx.settings.endpoint]);
       if (!/^https?:\/\//.test(args)) return fail("/endpoint", `not a URL: ${args}`);
       ctx.settings.endpoint = args.replace(/\/+$/, "").replace(/\/v1$/, "");
-      return ok("/endpoint", [`endpoint set to ${ctx.settings.endpoint} for the next task`]);
+      return ok("/endpoint", [
+        `endpoint set to ${ctx.settings.endpoint} for the next task`,
+        ...saved(ctx, "endpoint", ctx.settings.endpoint),
+      ]);
     },
   },
   {
@@ -158,6 +196,7 @@ export const COMMANDS: readonly SlashCommand[] = [
           "which the hosted endpoint does not have — the first request may fail",
         );
       }
+      lines.push(...saved(ctx, "channel", to));
       return ok("/channel", lines);
     },
   },
@@ -170,7 +209,7 @@ export const COMMANDS: readonly SlashCommand[] = [
       const n = parseIntArg(args, "max-turns", 1);
       if (typeof n === "string") return fail("/max-turns", n);
       ctx.settings.maxTurns = n;
-      return ok("/max-turns", [`turn ceiling set to ${n}`]);
+      return ok("/max-turns", [`turn ceiling set to ${n}`, ...saved(ctx, "maxTurns", n)]);
     },
   },
   {
@@ -178,15 +217,17 @@ export const COMMANDS: readonly SlashCommand[] = [
     description: "show or set the output cap per model step",
     usage: "[n|off]",
     run: (ctx, args) => {
-      if (args === "") return ok("/max-tokens", [ctx.settings.maxOutputTokens === undefined ? "off (server default)" : String(ctx.settings.maxOutputTokens)]);
+      if (args === "") {
+        return ok("/max-tokens", [ctx.settings.maxOutputTokens === undefined ? "off (server default)" : String(ctx.settings.maxOutputTokens)]);
+      }
       if (args === "off") {
         delete ctx.settings.maxOutputTokens;
-        return ok("/max-tokens", ["output cap removed; the server's default applies"]);
+        return ok("/max-tokens", ["output cap removed; the server's default applies", ...saved(ctx, "maxOutputTokens", undefined)]);
       }
       const n = parseIntArg(args, "max-tokens", 1);
       if (typeof n === "string") return fail("/max-tokens", n);
       ctx.settings.maxOutputTokens = n;
-      return ok("/max-tokens", [`output cap set to ${n} tokens per step`]);
+      return ok("/max-tokens", [`output cap set to ${n} tokens per step`, ...saved(ctx, "maxOutputTokens", n)]);
     },
   },
   {
@@ -197,18 +238,49 @@ export const COMMANDS: readonly SlashCommand[] = [
       if (args === "") return ok("/seed", [ctx.settings.seed === undefined ? "off" : String(ctx.settings.seed)]);
       if (args === "off") {
         delete ctx.settings.seed;
-        return ok("/seed", ["seed removed"]);
+        return ok("/seed", ["seed removed", ...saved(ctx, "seed", undefined)]);
       }
       const n = parseIntArg(args, "seed", 0);
       if (typeof n === "string") return fail("/seed", n);
       ctx.settings.seed = n;
-      return ok("/seed", [`seed set to ${n}`]);
+      return ok("/seed", [`seed set to ${n}`, ...saved(ctx, "seed", n)]);
+    },
+  },
+  {
+    name: "theme",
+    description: "show, list or set the colour theme",
+    usage: "[name]",
+    run: (ctx, args) => {
+      if (args === "") return ok("/theme", [`current: ${ctx.settings.theme}`, "", ...ctx.themes()]);
+      const lines = ctx.setTheme(args);
+      if (ctx.settings.theme !== args) return fail("/theme", lines.join(" "));
+      return ok("/theme", [...lines, ...saved(ctx, "theme", args)]);
     },
   },
   {
     name: "thinking",
     description: "show or hide the model's reasoning",
-    run: (ctx) => ok("/thinking", [ctx.toggleThinking() ? "reasoning shown" : "reasoning hidden"]),
+    run: (ctx) => {
+      const shown = ctx.toggleThinking();
+      return ok("/thinking", [shown ? "reasoning shown" : "reasoning hidden", ...saved(ctx, "thinking", shown)]);
+    },
+  },
+  {
+    name: "compact",
+    description: "replace the transcript with the model's summary of it",
+    run: async (ctx) => ok("/compact", await ctx.compact()),
+  },
+  {
+    name: "compact-at",
+    description: "show or set the context fraction at which compaction runs",
+    usage: "[0.5-1]",
+    run: (ctx, args) => {
+      if (args === "") return ok("/compact-at", [`${ctx.settings.compactAt} of the context window`]);
+      const f = Number(args);
+      if (!Number.isFinite(f) || f < 0.1 || f > 1) return fail("/compact-at", `compact-at must be a fraction between 0.1 and 1; got ${args}`);
+      ctx.settings.compactAt = f;
+      return ok("/compact-at", [`the transcript is compacted at ${f} of the context window`, ...saved(ctx, "compactAt", f)]);
+    },
   },
   {
     name: "cwd",
@@ -218,7 +290,7 @@ export const COMMANDS: readonly SlashCommand[] = [
   },
   {
     name: "skills",
-    description: "list the skills the model can load",
+    description: "list the skills; each runs as /<skill> [input]",
     run: (ctx) => ok("/skills", ctx.skills()),
   },
   {

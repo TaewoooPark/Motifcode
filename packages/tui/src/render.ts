@@ -247,6 +247,12 @@ function renderCellRaw(cell: Cell, opts: RenderOptions): StyledLine[] {
       return [line(`  ${RESULT}  ${label[cell.reason] ?? `Stopped: ${cell.reason}`}`, "warn"), blank];
     }
 
+    case "compaction":
+      return [
+        line(`⟳ Context compacted · ${Math.round(cell.beforeTokens / 1000)}K tokens replaced by a ${cell.summaryChars}-character summary`, "dim"),
+        blank,
+      ];
+
     case "system":
       return [line(rule(cell.title, width), "rule"), ...cell.lines.map((l) => line(`  ${l}`)), blank];
 
