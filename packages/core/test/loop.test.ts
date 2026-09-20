@@ -13,6 +13,7 @@ import { CORE_TOOLS } from "@motifcode/tools";
 import { FaultTransport, ScriptedTransport, doneBody, toolCallBody } from "@motifcode/replay";
 import {
   EmptyTaskError,
+  TransportError,
   runLoop,
   resetIds,
   clampOutput,
@@ -727,6 +728,64 @@ describe("history on the native channel", () => {
     await runLoop({ ...base, transport, executor: okExecutor, emit });
     const assistant = transport.seen[1]!.messages.find((m) => m.role === "assistant")!;
     expect(assistant.tool_calls![0]!.id).toMatch(/^root-c\d+$/);
+  });
+});
+
+describe("continuing a conversation", () => {
+  it("puts the history before the task and hands the transcript back", async () => {
+    // The interactive session: the second task sees the first and everything
+    // the model did about it, and gets back what to pass to the third.
+    const { emit } = collect();
+    const first = new ScriptedTransport([doneBody("one"), doneBody("one", { confirm: true })]);
+    const a = await runLoop({ ...base, transport: first, executor: okExecutor, emit });
+    expect(a.transcript[0]!.role).toBe("system");
+
+    const second = new ScriptedTransport([doneBody("two"), doneBody("two", { confirm: true })]);
+    const b = await runLoop({
+      ...base,
+      userTask: "and now this",
+      history: a.transcript.slice(1),
+      transport: second,
+      executor: okExecutor,
+      emit,
+    });
+    const roles = second.seen[0]!.messages.map((m) => m.role);
+    expect(roles).toEqual(["system", "user", "assistant", "user", "assistant", "user"]);
+    expect(second.seen[0]!.messages[1]!.content).toBe(TASK);
+    expect(second.seen[0]!.messages[5]!.content).toBe("and now this");
+    expect(b.transcript.length).toBeGreaterThan(a.transcript.length);
+  });
+
+  it("records the confirming done turn before ending", async () => {
+    // Otherwise the transcript stopped at the harness's challenge, and a
+    // conversation continued from it showed the model asked to confirm and
+    // never answering.
+    const { emit } = collect();
+    const checkpoints: { messages: { role: string }[] }[] = [];
+    const transport = new ScriptedTransport([doneBody("s"), doneBody("s", { confirm: true })]);
+    const r = await runLoop({ ...base, transport, executor: okExecutor, emit, onCheckpoint: (c) => checkpoints.push(c) });
+    const last = r.transcript[r.transcript.length - 1]!;
+    expect(last.role).toBe("assistant");
+    expect(last.tool_calls?.[0]?.function).toEqual({ name: "done", arguments: { summary: "s", confirm: true } });
+    expect(checkpoints[checkpoints.length - 1]!.messages.length).toBe(r.transcript.length);
+  });
+
+  it("hands back what it had when interrupted", async () => {
+    const { emit } = collect();
+    const ac = new AbortController();
+    const transport = new ScriptedTransport([
+      toolCallBody("bash", { command: "ls" }),
+      new TransportError("stopped", { kind: "aborted" }),
+    ]);
+    const executor: Executor = {
+      run: async () => {
+        ac.abort();
+        return { ok: true, output: "a.txt" };
+      },
+    };
+    const r = await runLoop({ ...base, transport, executor, emit, signal: ac.signal });
+    expect(r.reason).toBe("aborted");
+    expect(r.transcript.map((m) => m.role)).toEqual(["system", "user", "assistant", "tool"]);
   });
 });
 

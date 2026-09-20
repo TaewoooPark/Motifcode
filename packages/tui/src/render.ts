@@ -177,6 +177,9 @@ function renderCellRaw(cell: Cell, opts: RenderOptions): string[] {
       return out;
     }
 
+    case "system":
+      return [rule(cell.title, width), ...indent(cell.lines), ""];
+
     default:
       return [];
   }

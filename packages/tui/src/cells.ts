@@ -36,7 +36,9 @@ export type Cell =
   | { kind: "queue"; agent: string; state: "queued" | "running" | "done" }
   | { kind: "notice"; level: "info" | "warn" | "error"; text: string }
   | { kind: "loop"; signature: string; repeats: number }
-  | { kind: "end"; reason: string; summary?: string };
+  | { kind: "end"; reason: string; summary?: string }
+  /** Output of a slash command, or anything else the harness says for itself. */
+  | { kind: "system"; title: string; lines: string[] };
 
 export interface Instruments {
   channel: string;
@@ -253,4 +255,9 @@ export function reduce(state: ViewState, event: LoopEvent): ViewState {
 export function pushUser(state: ViewState, text: string): ViewState {
   state.cells.push({ kind: "user", text });
   return state;
+}
+
+/** Append a cell the loop did not produce — a user turn, a command's output. */
+export function appendCell(state: ViewState, cell: Cell): ViewState {
+  return { ...state, cells: [...state.cells, cell] };
 }

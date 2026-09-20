@@ -59,6 +59,7 @@ import {
 import { BUILTIN_SKILLS, SkillRegistry, parseSkill } from "@motifcode/skills";
 import { CORE_TOOLS, CORE_TOOL_NAMES, lintTools, formatFindings, toolPrefix } from "@motifcode/tools";
 import { Screen } from "@motifcode/tui";
+import { Chat } from "./chat.js";
 import { doctor, formatChecks, worstState } from "./doctor.js";
 import { ToolExecutor } from "./executor.js";
 import { policyForAgent } from "./policy.js";
@@ -245,7 +246,8 @@ function toolsHash(names: readonly string[]): string {
 
 const HELP = `motif ${VERSION} — a coding agent built for Motif-3
 
-  motif "<task>"            run a session
+  motif                     open the interactive session (a terminal is required)
+  motif "<task>"            run one task and exit; add --interactive to stay
   motif doctor              check the endpoint, the credentials and what the server produces
   motif sessions            list recorded sessions
   motif resume <file>       resume an interrupted session
@@ -270,6 +272,7 @@ Flags
   --seed <n>                sampling seed, passed to the server
   --cwd <path>              working directory
   --journal <path>          write the session record here instead of .motif/sessions
+  --interactive             open the prompt after the task, or with no task at all
   --no-hero                 skip the splash
 
 distil flags
@@ -634,6 +637,43 @@ async function main(): Promise<number> {
     );
   } else {
     task = args.rest.join(" ").trim();
+  }
+
+  // No task and a terminal on both ends means a conversation, not a usage
+  // error. Without a terminal the old answer stands: a pipe cannot host a
+  // prompt, and printing help is the honest response to an empty command.
+  const wantsChat = args.flags["interactive"] === true || args.flags["chat"] === true;
+  const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  if (wantsChat && !tty) {
+    throw new UsageError("--interactive needs a terminal on stdin and stdout");
+  }
+  if ((wantsChat || !task) && tty && !resumeFrom) {
+    const chat = new Chat({
+      screen: new Screen(),
+      stdin: process.stdin,
+      settings: {
+        model,
+        endpoint,
+        channel,
+        maxTurns,
+        ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+        ...(seed !== undefined ? { seed } : {}),
+        cwd,
+      },
+      channelPolicy,
+      ...(apiKey !== undefined ? { apiKey } : {}),
+      ...(connection.sources.apiKey !== undefined ? { apiKeySource: connection.sources.apiKey } : {}),
+      skills,
+      agents,
+      hooks,
+      ...(projectNotes !== undefined ? { projectNotes } : {}),
+      tools: activeTools,
+      journalDir: join(cwd, CONFIG_DIR, "sessions"),
+      version: VERSION,
+      hero: args.flags["no-hero"] !== true,
+      ...(task ? { initialTask: task } : {}),
+    });
+    return chat.run();
   }
 
   if (!task) {

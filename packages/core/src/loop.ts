@@ -43,6 +43,7 @@ import {
   type ChannelId,
   type ChannelParse,
   type CompletionRequest,
+  type Message,
   type SerializedCall,
   type Tool,
 } from "@motifcode/protocol";
@@ -96,6 +97,16 @@ export interface LoopOptions {
    * emptiness while still looking like a real run.
    */
   userTask: string;
+  /**
+   * Turns that precede this task: the transcript of an earlier task in the
+   * same conversation, without its system turn.
+   *
+   * How the interactive session continues. The system prompt and the tools
+   * are the caller's, as for a fresh run; the history is what the model has
+   * already seen and said, and the task becomes the next user turn after it.
+   * Ignored when `resume` is set, which carries its own transcript.
+   */
+  history?: Message[];
   executor: Executor;
   emit: EventSink;
   channel?: ChannelId;
@@ -172,6 +183,14 @@ export interface ChannelTransition {
 export interface LoopResult {
   reason: SessionEndReason;
   summary?: string;
+  /**
+   * The whole transcript as it stood when the loop ended, system turn first.
+   *
+   * What an interactive session hands back as `history` for the next task —
+   * after `done`, and after an interruption too, since the work the model did
+   * before being stopped is still the state of the conversation.
+   */
+  transcript: Message[];
   turns: number;
   budget: Readonly<BudgetState>;
   /** Where the session ended up. Use `initialChannel` to group runs. */
@@ -280,7 +299,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
   const session = new Session({
     system: system(channel),
     tools,
-    initialMessages: [{ role: "user", content: opts.userTask }],
+    initialMessages: [...(opts.history ?? []), { role: "user", content: opts.userTask }],
   });
   if (resume) session.restoreMessages(resume.messages);
   const budget = resume ? BreakageBudget.restore(resume.breakage) : new BreakageBudget();
@@ -363,6 +382,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
     return {
       reason,
       summary,
+      transcript: session.messages.map((m) => ({ ...m })),
       turns: turn,
       budget: budget.snapshot,
       channel,
@@ -700,6 +720,13 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
         checkpoint();
         continue;
       }
+      // The confirming turn goes into the transcript like any other before
+      // the session ends. Without it the record stopped at the harness's
+      // challenge, so a conversation continued from here — and a trajectory
+      // exported from here — showed the model asked to confirm and never
+      // answering.
+      session.appendAll(codec.serializeAssistant(split.content, split.reasoning, parsed, doneCalls));
+      checkpoint();
       return finish("done", doneAction.summary);
     }
     // Any other action withdraws a pending proposal: the model went back to

@@ -1,0 +1,73 @@
+/**
+ * The slash-command menu.
+ *
+ * Opens the moment the draft starts with `/`, narrows as the name is typed,
+ * and closes once a space follows the name — from then on the user is typing
+ * arguments and a list under the cursor would only be in the way. Claude Code
+ * and Codex both settled on that shape, and for the same reason: the menu is
+ * for finding the command, not for reading its manual.
+ *
+ * Pure. The controller owns the selection index and hands it back in; the
+ * renderer returns plain rows and the writer colours the selected one.
+ */
+
+import { displayWidth, padToWidth, truncateToWidth } from "./width.js";
+
+export interface MenuItem {
+  /** Without the leading slash. */
+  name: string;
+  description: string;
+  /** Argument hint, shown after the name: `[id]`, `<file>`. */
+  usage?: string;
+}
+
+/** The typed command name, or null when the draft is not naming a command. */
+export function commandPrefix(text: string): string | null {
+  if (!text.startsWith("/")) return null;
+  if (/\s/.test(text)) return null;
+  return text.slice(1).toLowerCase();
+}
+
+/**
+ * Items matching the draft.
+ *
+ * Prefix matches first, because that is what a person typing a name means;
+ * substring matches only when nothing starts with what was typed, so a
+ * half-remembered `tok` still finds `max-tokens`.
+ */
+export function menuItemsFor(text: string, all: readonly MenuItem[]): MenuItem[] {
+  const prefix = commandPrefix(text);
+  if (prefix === null) return [];
+  const starts = all.filter((i) => i.name.startsWith(prefix));
+  if (starts.length > 0) return starts;
+  return all.filter((i) => i.name.includes(prefix));
+}
+
+export function clampSelection(selected: number, count: number): number {
+  if (count === 0) return 0;
+  return ((selected % count) + count) % count;
+}
+
+export interface MenuRenderOptions {
+  width: number;
+  /** Rows shown at once; the window follows the selection. */
+  maxRows?: number;
+}
+
+const DEFAULT_ROWS = 8;
+
+/** One row per visible item. The selected row starts with the marker. */
+export function renderMenu(items: readonly MenuItem[], selected: number, opts: MenuRenderOptions): string[] {
+  if (items.length === 0) return [];
+  const maxRows = opts.maxRows ?? DEFAULT_ROWS;
+  const sel = clampSelection(selected, items.length);
+  const start = Math.max(0, Math.min(sel - Math.floor(maxRows / 2), items.length - maxRows));
+  const window = items.slice(start, start + maxRows);
+  const nameWidth = Math.max(...items.map((i) => displayWidth(`/${i.name}${i.usage ? ` ${i.usage}` : ""}`)));
+  const room = Math.max(8, opts.width - 4 - nameWidth - 2);
+  return window.map((item, i) => {
+    const marker = start + i === sel ? "❯ " : "  ";
+    const name = padToWidth(`/${item.name}${item.usage ? ` ${item.usage}` : ""}`, nameWidth);
+    return `  ${marker}${name}  ${truncateToWidth(item.description, room)}`;
+  });
+}

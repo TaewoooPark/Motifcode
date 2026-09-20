@@ -135,12 +135,12 @@ local runtime's, and went with it.
 | `tools` — frozen set + linter | passing; `write` added on evidence, and the tool ceiling raised to 9 with it |
 | `core` — agent loop | passing, driven entirely by injected faults |
 | `replay` — record / replay / fault injection | passing; a recorded session replays identically |
-| `tui` — cells, two-region streaming, instruments | passing, snapshot-tested |
+| `tui` — cells, two-region streaming, instruments, composer, slash menu | passing, snapshot-tested; the interactive session is driven end to end through a fake terminal |
 | `skills` — registry + 9 built-in skills | passing |
 | `agents` — 5 built-in subagents + local scheduler | passing |
 | `hooks` — lifecycle shell hooks | passing |
 | `journal` — append-only log, resume, trajectory export | passing |
-| `cli` — `motif`, `doctor`, `sessions`, `resume`, `distil` | passing; runs end to end against a mock server, and against the hosted endpoint |
+| `cli` — `motif`, the interactive session, `doctor`, `sessions`, `resume`, `distil` | passing; runs end to end against a mock server, and against the hosted endpoint |
 | `core` — endpoint config | `MOTIF_*` from flags, environment, `./.env`, `~/.motif/.env`; the key never enters the environment |
 | `toolkit/prune` — surgery | unit-tested; dry-runs against the real checkpoint index |
 | `toolkit/campaign` — manifest, score table | reports a campaign over the manifest's denominator |
@@ -182,6 +182,17 @@ pnpm lint:tools    # schema linter — fails the build on loose schemas
 ./packages/cli/dist/motif.js skills    # what is available
 ./packages/cli/dist/motif.js agents
 ```
+
+`motif` on its own opens the interactive session: a prompt at the bottom,
+the transcript above it, a status line under it. Every line sent is a task run
+by the same loop as the one-shot command, and the conversation carries across
+tasks — the second task sees the first and everything the model did about it.
+`/` opens the command menu (`/help`, `/status`, `/doctor`, `/model`,
+`/channel`, `/max-turns`, `/max-tokens`, `/seed`, `/thinking`, `/cwd`,
+`/skills`, `/agents`, `/new`, `/sessions`, `/resume`, `/quit`); Esc interrupts
+a running task; a message sent while one runs is queued; Ctrl-C twice quits.
+Each task writes its own journal, and each journal's last checkpoint holds the
+whole conversation so far, which is what `/resume` reads back.
 
 `MOTIF_API_KEY`, `MOTIF_ENDPOINT` and `MOTIF_MODEL` are read from the
 environment, then `./.env`, then `~/.motif/.env` (`--env-file` puts a file

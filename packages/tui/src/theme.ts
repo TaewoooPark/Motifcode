@@ -20,6 +20,8 @@ export const style = {
   warn: `${ESC}38;2;200;150;60m`,
   bad: `${ESC}38;2;200;90;80m`,
   faint: `${ESC}38;5;245m`,
+  /** Swapped foreground and background, for the selected menu row. */
+  inverse: `${ESC}7m`,
 } as const;
 
 export function paint(text: string, code: string): string {
@@ -38,4 +40,7 @@ export const term = {
   clearLine: `${ESC}2K`,
   lineStart: "\r",
   up: (n: number) => (n > 0 ? `${ESC}${n}A` : ""),
+  down: (n: number) => (n > 0 ? `${ESC}${n}B` : ""),
+  /** Absolute column, 1-based in the terminal; this takes 0-based. */
+  column: (col: number) => `${ESC}${col + 1}G`,
 } as const;

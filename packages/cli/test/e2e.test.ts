@@ -90,15 +90,17 @@ interface RunResult {
 }
 
 function runCli(argv: string[], cwd: string, env: Record<string, string> = {}): Promise<RunResult> {
-  // The key is stripped from the inherited environment so a developer's own
-  // MOTIF_API_KEY cannot make the unauthenticated cases pass by accident.
+  // The key is stripped from the inherited environment, and HOME points at an
+  // empty directory, so neither a developer's own MOTIF_API_KEY nor their
+  // ~/.motif/.env can make the unauthenticated cases pass by accident.
   const { MOTIF_API_KEY: _dropped, ...inherited } = process.env;
   void _dropped;
+  const home = mkdtempSync(join(tmpdir(), "motif-home-"));
   return new Promise((resolveRun) => {
     const child = spawn(
       process.execPath,
       [join(REPO, "node_modules/tsx/dist/cli.mjs"), MAIN, ...argv],
-      { cwd, env: { ...inherited, NO_COLOR: "1", ...env }, stdio: ["ignore", "pipe", "pipe"] },
+      { cwd, env: { ...inherited, HOME: home, NO_COLOR: "1", ...env }, stdio: ["ignore", "pipe", "pipe"] },
     );
     let stdout = "";
     let stderr = "";
@@ -216,10 +218,23 @@ describe("cli process end to end", () => {
   }, 60_000);
 
   it("prints help and exits 2 for an empty task", async () => {
+    // Without a terminal there is no prompt to open, so an empty command is
+    // a usage error, as it always was.
     server = new MockServer(() => toolCall("done", { summary: "s" }));
     await server.start();
     const r = await runCli(["   ", "--endpoint", server.endpoint, "--no-hero"], dir);
     expect(r.code).toBe(2);
+    expect(r.stdout).toContain("motif \"<task>\"");
+    expect(server.bodies).toHaveLength(0);
+  }, 30_000);
+
+  it("refuses --interactive without a terminal, in one line", async () => {
+    server = new MockServer(() => toolCall("done", { summary: "s" }));
+    await server.start();
+    const r = await runCli(["t", "--interactive", "--endpoint", server.endpoint, "--no-hero"], dir);
+    expect(r.code).toBe(2);
+    expect(r.stderr.trim().split("\n")).toHaveLength(1);
+    expect(r.stderr).toContain("terminal");
     expect(server.bodies).toHaveLength(0);
   }, 30_000);
 });

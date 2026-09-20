@@ -44,16 +44,26 @@ function parseReading(inst: Instruments): Reading {
 }
 
 function prefixReading(inst: Instruments): Reading {
-  if (inst.prefixTotal === 0) return { label: "prefix", value: "—", severity: "ok" };
+  // The server's own count, when it gives one, is the cache measurement: the
+  // share of the prompt it served from cache. The textual overlap below is
+  // only what this process can compute, and it says nothing on the first
+  // request of a task — which on a hosted endpoint is usually a cache hit.
+  if (inst.cachedTokens !== undefined && inst.contextTokensMeasured && inst.contextTokens > 0) {
+    const pct = Math.round((inst.cachedTokens / inst.contextTokens) * 100);
+    const severity: Severity = pct >= 80 ? "ok" : pct >= 50 ? "warn" : "bad";
+    const mark = severity === "ok" ? "✓" : "✗";
+    return { label: "prefix", value: `${mark} ${pct}% · cached ${fmtTokens(inst.cachedTokens)}`, severity };
+  }
+  // Nothing to compare against yet: the first request has no predecessor.
+  if (inst.prefixTotal === 0 || (inst.prefixShared === 0 && inst.turn <= 1)) {
+    return { label: "prefix", value: "—", severity: "ok" };
+  }
   const pct = Math.round((inst.prefixShared / inst.prefixTotal) * 100);
   // Below about half, something invalidated the tools block or the system turn
   // — which on this model usually means the tool list changed.
   const severity: Severity = pct >= 80 ? "ok" : pct >= 50 ? "warn" : "bad";
   const mark = severity === "ok" ? "✓" : "✗";
-  // The server's count, when it gives one, is the actual cache measurement;
-  // the percentage is only what this process can compute from the text.
-  const cached = inst.cachedTokens !== undefined ? ` · cached ${fmtTokens(inst.cachedTokens)}` : "";
-  return { label: "prefix", value: `${mark} ${pct}%${cached}`, severity };
+  return { label: "prefix", value: `${mark} ${pct}%`, severity };
 }
 
 function contextReading(inst: Instruments): Reading {
