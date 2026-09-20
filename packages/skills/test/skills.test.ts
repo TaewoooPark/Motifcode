@@ -38,9 +38,9 @@ describe("built-in skills", () => {
 
   it("ships the two that only make sense for this model", () => {
     const names = reg.list().map((s) => s.name);
-    // Server misconfiguration is the most common cause of bad output here, and
-    // Korean is a first-class output language for this model.
-    expect(names).toContain("motif-serving");
+    // The endpoint is the most common cause of bad output here, and Korean is
+    // a first-class output language for this model.
+    expect(names).toContain("motif-endpoint");
     expect(names).toContain("korean");
   });
 

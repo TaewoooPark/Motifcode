@@ -656,6 +656,80 @@ describe("output clamping", () => {
   });
 });
 
+describe("history on the native channel", () => {
+  // What a correctly served Motif-3 returns: an empty body, the call lifted
+  // out into `tool_calls`. Everything the model knows about its own previous
+  // turn has to come from what the harness writes back.
+  const structured = (name: string, args: Record<string, unknown>) => ({
+    content: "",
+    rawText: "",
+    ms: 1,
+    toolCalls: [{ id: "srv-1", type: "function" as const, function: { name, arguments: JSON.stringify(args) } }],
+  });
+
+  it("carries the call in the assistant turn, with the id its result answers", async () => {
+    // Without this the second request showed an empty assistant turn followed
+    // by a tool response — a reply to a call that was not there.
+    const { emit } = collect();
+    const transport = new ScriptedTransport([
+      structured("bash", { command: "ls" }),
+      structured("done", { summary: "s" }),
+      structured("done", { summary: "s", confirm: true }),
+    ]);
+    await runLoop({ ...base, transport, executor: okExecutor, emit });
+    const second = transport.seen[1]!.messages;
+    const assistant = second.find((m) => m.role === "assistant")!;
+    expect(assistant.tool_calls).toHaveLength(1);
+    expect(assistant.tool_calls![0]!.function).toEqual({ name: "bash", arguments: { command: "ls" } });
+    const tool = second.find((m) => m.role === "tool")!;
+    expect(tool.tool_call_id).toBe(assistant.tool_calls![0]!.id);
+    expect(tool.content).toBe("ok");
+  });
+
+  it("shows the model the batch it refused, so it can correct it", async () => {
+    const { emit } = collect();
+    const transport = new ScriptedTransport([
+      structured("bash", { command: 42 }),
+      structured("done", { summary: "s" }),
+      structured("done", { summary: "s", confirm: true }),
+    ]);
+    await runLoop({ ...base, transport, executor: okExecutor, emit });
+    const second = transport.seen[1]!.messages;
+    const assistant = second.find((m) => m.role === "assistant")!;
+    expect(assistant.tool_calls?.[0]?.function?.name).toBe("bash");
+    // Then the refusal, as a user turn, and no tool result — nothing ran.
+    expect(second[second.length - 1]!.role).toBe("user");
+    expect(String(second[second.length - 1]!.content)).toContain("None of the actions");
+    expect(second.some((m) => m.role === "tool")).toBe(false);
+  });
+
+  it("shows the done proposal the confirmation challenge refers to", async () => {
+    const { emit } = collect();
+    const transport = new ScriptedTransport([
+      structured("done", { summary: "all green" }),
+      structured("done", { summary: "all green", confirm: true }),
+    ]);
+    await runLoop({ ...base, transport, executor: okExecutor, emit });
+    const second = transport.seen[1]!.messages;
+    const assistant = second.find((m) => m.role === "assistant")!;
+    expect(assistant.tool_calls?.[0]?.function).toEqual({ name: "done", arguments: { summary: "all green" } });
+  });
+
+  it("assigns ids from the scope's own sequence, not the server's", async () => {
+    // The server's ids are its own bookkeeping; a resumed session must not
+    // collide with them, and two servers may reuse them.
+    const { emit } = collect();
+    const transport = new ScriptedTransport([
+      structured("bash", { command: "ls" }),
+      structured("done", { summary: "s" }),
+      structured("done", { summary: "s", confirm: true }),
+    ]);
+    await runLoop({ ...base, transport, executor: okExecutor, emit });
+    const assistant = transport.seen[1]!.messages.find((m) => m.role === "assistant")!;
+    expect(assistant.tool_calls![0]!.id).toMatch(/^root-c\d+$/);
+  });
+});
+
 describe("server-extracted tool calls", () => {
   it("uses tool_calls the server lifted out of the body", async () => {
     // A server running a tool-call parser — which is what

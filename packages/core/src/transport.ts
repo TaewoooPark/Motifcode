@@ -20,9 +20,10 @@
  * result. Streaming is for the reasoning display, not for actions.
  *
  * Failure is a first-class shape here rather than an exception that escapes.
- * A single local GPU serving a 187 GB checkpoint dies mid-session as a matter
- * of course, and the difference between "connection refused" and "400 bad
- * request" is the difference between waiting and stopping.
+ * A hosted endpoint rate-limits, a gateway times out, a local engine falls
+ * over — and the difference between "connection refused", "429 slow down" and
+ * "400 bad request" is the difference between waiting, waiting longer, and
+ * stopping.
  */
 
 import {
@@ -33,6 +34,7 @@ import {
   type Message,
   type ToolCall,
 } from "@motifcode/protocol";
+import { normalizeEndpoint } from "./config.js";
 
 export type { CompletionRequest, CompletionResponse };
 
@@ -68,7 +70,7 @@ export type TransportErrorKind =
   | "network"
   /** No response within the request deadline. Retryable. */
   | "timeout"
-  /** The server answered with a non-2xx status. Retryable only for 5xx. */
+  /** The server answered with a non-2xx status. Retryable for 5xx and 429. */
   | "http"
   /** A 2xx whose body was not a completion. Not retryable without a change. */
   | "protocol"
@@ -98,6 +100,14 @@ export class TransportError extends Error {
   readonly status?: number;
   readonly body?: string;
   readonly retryable: boolean;
+  /**
+   * How long the server asked us to wait before trying again.
+   *
+   * Set from `Retry-After` on a 429, and defaulted when the header is absent,
+   * because a rate limit retried on the ordinary sub-second backoff is a rate
+   * limit hit three more times. The loop waits at least this long.
+   */
+  readonly retryAfterMs?: number;
 
   constructor(
     message: string,
@@ -106,6 +116,7 @@ export class TransportError extends Error {
       status?: number;
       body?: string;
       retryable?: boolean;
+      retryAfterMs?: number;
       cause?: unknown;
     },
   ) {
@@ -114,6 +125,7 @@ export class TransportError extends Error {
     this.kind = opts.kind;
     if (opts.status !== undefined) this.status = opts.status;
     if (opts.body !== undefined) this.body = opts.body;
+    if (opts.retryAfterMs !== undefined) this.retryAfterMs = opts.retryAfterMs;
     this.retryable = opts.retryable ?? defaultRetryable(opts.kind, opts.status);
   }
 }
@@ -124,10 +136,11 @@ function defaultRetryable(kind: TransportErrorKind, status?: number): boolean {
     case "timeout":
       return true;
     case "http":
-      // 5xx is the engine falling over. 4xx is the request being wrong, and
-      // resending it unchanged will be wrong again. 429 needs a Retry-After
-      // policy that does not exist yet, so it is not retried silently.
-      return status !== undefined && status >= 500;
+      // 5xx is the engine or the gateway falling over. 429 is the endpoint
+      // asking for time, and it says how much. Any other 4xx is the request
+      // being wrong — a rejected key, an unknown field — and resending it
+      // unchanged will be wrong again.
+      return status !== undefined && (status >= 500 || status === 429);
     case "protocol":
     case "aborted":
       return false;
@@ -144,6 +157,29 @@ function isNetworkFailure(err: unknown): boolean {
     return /^(ECONNREFUSED|ECONNRESET|EPIPE|ENOTFOUND|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH|ETIMEDOUT|UND_ERR)/.test(code);
   }
   return /fetch failed|socket hang up|network/i.test(e.message ?? "");
+}
+
+/** Longest a `Retry-After` is honoured for; past this, something else is wrong. */
+const MAX_RETRY_AFTER_MS = 120_000;
+/** What a 429 without a `Retry-After` is worth waiting. */
+const DEFAULT_RETRY_AFTER_MS = 5_000;
+
+/**
+ * `Retry-After`, in milliseconds.
+ *
+ * Either a delay in seconds or an HTTP date; both are in the standard and both
+ * are seen in practice. A value that does not parse is treated as absent
+ * rather than as zero — zero would mean "retry immediately", which is the one
+ * reading a rate limit never intends.
+ */
+export function parseRetryAfter(header: string | null | undefined, now = Date.now()): number | undefined {
+  if (header === null || header === undefined) return undefined;
+  const text = header.trim();
+  if (text === "") return undefined;
+  if (/^\d+$/.test(text)) return Math.min(MAX_RETRY_AFTER_MS, Number(text) * 1000);
+  const date = Date.parse(text);
+  if (Number.isNaN(date)) return undefined;
+  return Math.min(MAX_RETRY_AFTER_MS, Math.max(0, date - now));
 }
 
 function isAbort(err: unknown): boolean {
@@ -266,7 +302,7 @@ export class HttpTransport implements Transport {
   private readonly requestTimeoutMs: number;
 
   constructor(opts: HttpTransportOptions) {
-    this.endpoint = opts.endpoint.replace(/\/+$/, "");
+    this.endpoint = normalizeEndpoint(opts.endpoint);
     this.model = opts.model;
     this.apiKey = opts.apiKey;
     this.fetchImpl = opts.fetchImpl ?? globalThis.fetch;
@@ -330,13 +366,30 @@ export class HttpTransport implements Transport {
       // Include the body. A bare "400 Bad Request" tells nobody anything, and
       // the server almost always says exactly which field it rejected.
       const detail = text.trim().slice(0, 400);
-      throw new TransportError(
-        detail ? `${res.status} ${res.statusText} — ${detail}` : `${res.status} ${res.statusText}`,
-        { kind: "http", status: res.status, body: text },
-      );
+      let message = detail ? `${res.status} ${res.statusText} — ${detail}` : `${res.status} ${res.statusText}`;
+      if (res.status === 401 || res.status === 403) {
+        // The one failure whose fix is never on the server. Say which side of
+        // it the user is on: no key at all, or a key the endpoint refused.
+        message += this.apiKey
+          ? " (the endpoint rejected the API key that was sent; check MOTIF_API_KEY)"
+          : " (no API key was sent; set MOTIF_API_KEY in the environment or in .env)";
+      }
+      const retryAfterMs =
+        res.status === 429
+          ? (parseRetryAfter(res.headers.get("retry-after")) ?? DEFAULT_RETRY_AFTER_MS)
+          : undefined;
+      throw new TransportError(message, {
+        kind: "http",
+        status: res.status,
+        body: text,
+        ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+      });
     }
 
-    let json: { choices?: ChatChoice[]; usage?: Record<string, number> };
+    let json: {
+      choices?: ChatChoice[];
+      usage?: Record<string, unknown> & { prompt_tokens_details?: { cached_tokens?: number } };
+    };
     try {
       json = (await res.json()) as typeof json;
     } catch (err) {
@@ -362,6 +415,10 @@ export class HttpTransport implements Transport {
     }
     const reasoning = choice.message?.reasoning_content ?? choice.message?.reasoning ?? undefined;
     const toolCalls = normaliseToolCalls(choice.message?.tool_calls);
+    // The hosted endpoint reports how much of the prompt it served from its
+    // prefix cache. That is the first direct measurement this harness has had
+    // of the thing its frozen tool order exists to protect, so it is kept.
+    const cached = json.usage?.prompt_tokens_details?.cached_tokens;
     return {
       content,
       ...(reasoning !== undefined && reasoning !== null ? { reasoningContent: reasoning } : {}),
@@ -369,12 +426,17 @@ export class HttpTransport implements Transport {
       rawText: content,
       finishReason: choice.finish_reason,
       usage: {
-        promptTokens: json.usage?.["prompt_tokens"],
-        completionTokens: json.usage?.["completion_tokens"],
+        promptTokens: numberOr(json.usage?.["prompt_tokens"]),
+        completionTokens: numberOr(json.usage?.["completion_tokens"]),
+        ...(typeof cached === "number" ? { cachedTokens: cached } : {}),
       },
       ms: Date.now() - started,
     };
   }
+}
+
+function numberOr(v: unknown): number | undefined {
+  return typeof v === "number" ? v : undefined;
 }
 
 function describe(err: unknown): string {

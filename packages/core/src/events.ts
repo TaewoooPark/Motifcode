@@ -96,6 +96,12 @@ export type LoopEvent =
       promptTokens?: number;
       completionTokens?: number;
       /**
+       * Prompt tokens the server served from its prefix cache, when it reports
+       * that. The `prefix` event is textual overlap computed here; this is the
+       * server's own claim, and the only one that is a cache measurement.
+       */
+      cachedTokens?: number;
+      /**
        * Whole-request wall time, prefill and queueing included.
        *
        * Deliberately not divided into a tok/s here. `completionTokens / ms` is

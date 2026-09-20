@@ -3,9 +3,10 @@
  *
  * Append-only JSONL of everything that happened, written as it happens, so a
  * session survives the process that produced it. That is not a nice-to-have on
- * this stack: vLLM on GB10 has open reports of fatal engine errors, so a local
- * server dying mid-session is expected rather than exceptional, and a two-hour
- * run vanishing with it is the kind of experience users do not return from.
+ * this stack: a model server going away mid-session — a rate limit, a gateway
+ * timeout, a local engine falling over — is expected rather than exceptional,
+ * and a two-hour run vanishing with it is the kind of experience users do not
+ * return from.
  *
  * Three things about v2 are corrections rather than additions.
  *

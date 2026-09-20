@@ -10,12 +10,11 @@
   <img src="https://img.shields.io/badge/TypeScript-000000?style=flat-square&logo=typescript&logoColor=white&labelColor=000000" alt="TypeScript">
   <img src="https://img.shields.io/badge/Python-000000?style=flat-square&logo=python&logoColor=white&labelColor=000000" alt="Python">
   <img src="https://img.shields.io/badge/Vitest-000000?style=flat-square&logo=vitest&logoColor=white&labelColor=000000" alt="Vitest">
-  <img src="https://img.shields.io/badge/vLLM-000000?style=flat-square&labelColor=000000&color=000000" alt="vLLM">
   &nbsp;
   <img src="https://img.shields.io/badge/Motif--3-000000?style=flat-square&labelColor=000000&color=000000" alt="Motif-3">
   <img src="https://img.shields.io/badge/314B--A13B-000000?style=flat-square&labelColor=000000&color=000000" alt="314B-A13B">
   <img src="https://img.shields.io/badge/256K%20context-000000?style=flat-square&labelColor=000000&color=000000" alt="256K context">
-  <img src="https://img.shields.io/badge/Local--first-000000?style=flat-square&labelColor=000000&color=000000" alt="Local-first">
+  <img src="https://img.shields.io/badge/OpenAI--compatible%20endpoint-000000?style=flat-square&labelColor=000000&color=000000" alt="OpenAI-compatible endpoint">
   <img src="https://img.shields.io/badge/pre--alpha-000000?style=flat-square&labelColor=000000&color=000000" alt="pre-alpha">
 </p>
 
@@ -25,10 +24,12 @@ about [Motif-3](https://huggingface.co/Motif-Technologies/Motif-3)** — most of
 them measured rather than assumed. It is not a general harness pointed at a
 different base URL.
 
-Two artifacts ship together: this harness, and a **coding-specialised checkpoint
-pruned to fit a single GB10 box** — 384 routed experts cut to 192, which keeps
-the full 256K context and leaves the activated parameters, and therefore the
-decode speed, untouched.
+The model is reached over a **hosted OpenAI-compatible endpoint** with an API
+key — the harness is the client, and nothing here serves weights any more. The
+pruning toolkit that once targeted a single GB10 box (384 routed experts cut to
+192, full 256K context, activated parameters untouched) is kept because the
+surgery is hardware-independent; the bring-up scripts that stood the model up
+locally are gone.
 
 > *"A harness earns its keep by being a consequence of the model, not a wrapper around it."*
 
@@ -90,15 +91,29 @@ the model a conversation it never had.
 
 ## Status
 
-Alpha. **It has now been run against Motif-3**, on one GB10 with 128 GB of
-unified memory, serving a mixed-quant GGUF of the 314.8B/13B-activated
-checkpoint through a llama.cpp-family runtime. Agent sessions complete, tests
-run, and the polyglot grader scores them.
+Alpha. **It runs against Motif-3 over the hosted endpoint**, on the `toolcall`
+channel: `motif doctor` confirms the server returns structured `tool_calls`,
+separates reasoning into its own field, reports cached prompt tokens, and
+advertises the full 262,144-token window; agent sessions complete and the
+tests they write pass. The hosted endpoint has no `/v1/completions`, so the
+`object` and `raw` channels cannot run there — `doctor` says so.
 
-What that turned up is worth stating plainly, because none of it was visible
-from the tests alone:
+Moving from a local server to a hosted one exposed a defect the fault-injected
+suite had never reached: with a server that extracts tool calls, the native
+channel wrote the assistant turn back **without its `tool_calls`**, so from turn
+two the model saw an empty turn followed by a tool response to a call that was
+not there. Fixed, and now the thing the end-to-end test checks on the wire. The
+same move added what a hosted endpoint needs and a local one never did: a
+credential that is read from `MOTIF_API_KEY` or `.env`, sent as a bearer token,
+and **withheld from every command the agent runs**; a 401 that says which side
+of the key it is on; a 429 retried after the server's own `Retry-After`.
 
-| Measured over one polyglot campaign | |
+Before that, the harness was run on one GB10 with 128 GB of unified memory,
+serving a mixed-quant GGUF of the 314.8B/13B-activated checkpoint through a
+llama.cpp-family runtime. What that campaign turned up is worth keeping,
+because none of it was visible from the tests alone:
+
+| Measured over one polyglot campaign, local serving, 2026-08 | |
 |---|---|
 | `apply_patch` calls that applied | **1 of 12** — patches ending without a newline, hunk counts off by one, and `git apply` reporting both in the host's language |
 | edit attempts routed through shell heredocs instead | **85%** |
@@ -107,15 +122,16 @@ from the tests alone:
 | decode throughput | 11.8 tok/s single stream, **36% of what the memory bandwidth allows** |
 
 Every one of those is a harness or runtime defect rather than a model
-limitation, and the first four are fixed in this release. The measurements are
-in the journals; `toolkit/serving/report_campaign.py` reads them.
+limitation, and the first four are fixed. The measurements are in the
+journals; `toolkit/campaign/report_campaign.py` reads them. The fifth was the
+local runtime's, and went with it.
 
 | Component | State |
 |---|---|
 | `protocol` — chat template | **byte-identical** to the real Jinja across 14 cases |
 | `protocol` — tool-call repair | 11 golden cases from the vendor's own suite, all passing |
 | `protocol` — reasoning scrubber | passing, including every split point of a marker |
-| `protocol` — action channels | implemented; `toolcall` exercised against the model, the other two still only against fixtures |
+| `protocol` — action channels | implemented; `toolcall` exercised against the model, the other two only against fixtures — and unavailable on the hosted endpoint, which has no completions route |
 | `tools` — frozen set + linter | passing; `write` added on evidence, and the tool ceiling raised to 9 with it |
 | `core` — agent loop | passing, driven entirely by injected faults |
 | `replay` — record / replay / fault injection | passing; a recorded session replays identically |
@@ -124,9 +140,10 @@ in the journals; `toolkit/serving/report_campaign.py` reads them.
 | `agents` — 5 built-in subagents + local scheduler | passing |
 | `hooks` — lifecycle shell hooks | passing |
 | `journal` — append-only log, resume, trajectory export | passing |
-| `cli` — `motif`, `doctor`, `sessions`, `resume`, `distil` | passing; runs end to end against a mock server |
+| `cli` — `motif`, `doctor`, `sessions`, `resume`, `distil` | passing; runs end to end against a mock server, and against the hosted endpoint |
+| `core` — endpoint config | `MOTIF_*` from flags, environment, `./.env`, `~/.motif/.env`; the key never enters the environment |
 | `toolkit/prune` — surgery | unit-tested; dry-runs against the real checkpoint index |
-| `toolkit/serving` — bring-up, manifest, score table | used to stand the model up and to report a campaign |
+| `toolkit/campaign` — manifest, score table | reports a campaign over the manifest's denominator |
 | `eval` — polyglot runner, worktree grader | run end to end against the model |
 
 Six errors were caught by testing rather than by reading: the pruning surgery
@@ -150,19 +167,29 @@ seemed plausible.
 
 ## Quickstart
 
-Needs Node 20+ and pnpm.
+Needs Node 20+ and pnpm, and an API key for the hosted endpoint.
 
 ```bash
+cp .env.example .env               # then put the key in MOTIF_API_KEY
 pnpm install
 pnpm typecheck
 pnpm build         # bundles the CLI to packages/cli/dist/motif.js
 pnpm test          # unit, integration, CLI end-to-end, and an install smoke
 pnpm lint:tools    # schema linter — fails the build on loose schemas
 
-./packages/cli/dist/motif.js doctor    # check a server
+./packages/cli/dist/motif.js doctor    # probes the endpoint: auth, parsers, cache, channels
+./packages/cli/dist/motif.js "fix the failing test in tests/" --cwd /path/to/repo
 ./packages/cli/dist/motif.js skills    # what is available
 ./packages/cli/dist/motif.js agents
 ```
+
+`MOTIF_API_KEY`, `MOTIF_ENDPOINT` and `MOTIF_MODEL` are read from the
+environment, then `./.env`, then `~/.motif/.env` (`--env-file` puts a file
+first); flags outrank all of them. Only `MOTIF_*` keys are read, none of them
+are exported, and the key is removed from the harness's own environment before
+anything is spawned — the agent's `bash` cannot see it, and neither can a
+project hook. The defaults are `https://llm.onerouter.pro` and `motif/motif-3`;
+a base URL pasted with its `/v1` works too.
 
 The Python toolkit needs a real tensor backend for its slicing tests:
 
@@ -172,8 +199,8 @@ MOTIF_REQUIRE_TORCH=1 python -m unittest discover -s toolkit/prune -p 'test_*.py
 ```
 
 Built-in skills: `explore`, `code-review`, `test-fix`, `debug`, `commit`,
-`pr-body`, `skill-creator`, plus `motif-serving` (server misconfiguration is the
-most common cause of bad output here) and `korean`. Built-in subagents:
+`pr-body`, `skill-creator`, plus `motif-endpoint` (the endpoint is the most
+common cause of bad output here, and `doctor` measures it) and `korean`. Built-in subagents:
 `explorer`, `reviewer`, `tester`, `planner`, `patcher` — each taking a
 canonical-order **prefix** of the tool list, which is also why none of them can
 spawn another.
@@ -207,8 +234,10 @@ packages/agents/     subagent definitions and the local scheduler
 packages/hooks/      lifecycle shell hooks
 packages/journal/    append-only session log, resume, trajectory export
 packages/cli/        the `motif` command
+packages/eval/       polyglot suite, campaign runner, worktree grader
 toolkit/fixtures/    golden-prompt generator (jinja2 only)
 toolkit/prune/       expert-pruning surgery and its plan
+toolkit/campaign/    eval manifest writer and campaign score table
 corpus/              vendored template + generated goldens
 ```
 

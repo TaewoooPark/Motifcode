@@ -60,11 +60,14 @@ describe("built-in agents", () => {
 });
 
 describe("scheduling", () => {
-  it("serialises on a local endpoint", () => {
+  it("serialises on a local endpoint and fans out on a hosted one", () => {
     // One GPU means the requests queue in the server anyway; queueing here just
-    // makes the wait visible instead of looking like a stall.
+    // makes the wait visible instead of looking like a stall. A hosted endpoint
+    // has its own queue and admits several.
     expect(concurrencyFor("http://127.0.0.1:8080")).toBe(1);
-    expect(concurrencyFor("http://zgx-1c3b:8080")).toBe(1);
+    expect(concurrencyFor("http://localhost:8080")).toBe(1);
+    expect(concurrencyFor("http://box.local:8080")).toBe(1);
+    expect(concurrencyFor("https://llm.onerouter.pro")).toBe(4);
     expect(concurrencyFor("https://api.example.com")).toBeGreaterThan(1);
   });
 

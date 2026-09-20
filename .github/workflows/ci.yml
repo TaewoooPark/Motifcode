@@ -73,8 +73,9 @@ jobs:
       - run: python toolkit/fixtures/gen_template_golden.py
       - run: git diff --exit-code corpus/template-golden/
 
-  # ARM64 is where this actually deploys — a GB10 is aarch64. The bug that
-  # motivated `killGroup` only appeared on Linux, and only in CI.
+  # A second architecture, because the bug that motivated `killGroup` only
+  # appeared on Linux, and only in CI. The harness is a client now and runs
+  # wherever Node does; this keeps it honest about that.
   linux-arm64:
     runs-on: ubuntu-24.04-arm
     steps:

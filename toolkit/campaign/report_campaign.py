@@ -153,8 +153,9 @@ def main() -> int:
     w("=" * 72)
     w(f"  {manifest['candidate']['model_id']}  ·  {manifest['suite']['name']}"
       f"  ·  manifest {manifest['manifest_id']}")
-    w(f"  {manifest['serving']['engine']} on {manifest['serving']['hardware']['name']}"
-      f"  ·  {manifest['serving']['quantization']}")
+    serving = manifest.get("serving", {})
+    w(f"  {serving.get('engine', '?')} on {serving.get('hardware', {}).get('name', '?')}"
+      + (f"  ·  {serving['quantization']}" if serving.get("quantization") else ""))
     w(f"  budget: {manifest['budgets']['max_turns']} turns,"
       f" {manifest['budgets']['task_wall_timeout_seconds']}s wall"
       f"  ·  channel {manifest['harness']['initial_channel']}")

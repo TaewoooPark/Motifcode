@@ -78,20 +78,19 @@ all 173 GB for every chunk. That reordering means reimplementing the body of
 `MotifModel.forward`, which is why `test_streaming.py` builds a tiny Motif and
 requires both paths to produce the same output.
 
-## Serving
+## Campaign tooling
 
-`serving/build_plugin.py` makes an unforked vLLM able to load Motif-3. The
-vendor ships a fork and an amd64-only container; on aarch64 neither is usable,
-and the fork's Motif support turns out to be five Python files that import
-nothing the installed vLLM lacks. See `docs/model_guide.md` §9.
+`campaign/make_manifest.py` writes the immutable eval manifest a `motif-suite
+run` is scored against, reading every hash from the thing it describes; the
+serving side is the hosted endpoint, so it is identified by engine name and
+model id rather than by a repository revision. `campaign/report_campaign.py`
+turns a campaign's rows and journals into the score table, over the manifest's
+planned denominator.
 
-```bash
-python toolkit/serving/build_plugin.py --out ~/motif-prune/vllm_motif
-PYTHONPATH=~/motif-prune/vllm_motif vllm serve <checkpoint>
-```
-
-The copied files are the vendor's, under their repository's licence; the script
-records the fork revision it took them from in `motif_vllm/SOURCE`.
+The bring-up scripts that once stood Motif-3 up on a single GB10 — the vLLM
+fork build, the plugin extractor, the GGUF fetch and serve scripts, the kernel
+patches — were removed when the model moved to a hosted endpoint. They are in
+the history before that change if the hardware ever comes back.
 
 ## Benchmark toolchains
 

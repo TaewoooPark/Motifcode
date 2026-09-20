@@ -11,7 +11,17 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { AgentRegistry, AgentScheduler, BUILTIN_AGENTS, concurrencyFor } from "@motifcode/agents";
-import { HttpTransport, relaxNodeHttpTimeouts, runLoop, type LoopEvent } from "@motifcode/core";
+import {
+  DEFAULT_ENDPOINT,
+  DEFAULT_MODEL,
+  HttpTransport,
+  defaultDotenvPaths,
+  relaxNodeHttpTimeouts,
+  resolveEndpointConfig,
+  runLoop,
+  withholdSecrets,
+  type LoopEvent,
+} from "@motifcode/core";
 import { DEFAULT_HOOKS } from "@motifcode/hooks";
 import {
   approve as approveTrust,
@@ -236,7 +246,7 @@ function toolsHash(names: readonly string[]): string {
 const HELP = `motif ${VERSION} — a coding agent built for Motif-3
 
   motif "<task>"            run a session
-  motif doctor              check the endpoint and the server flags
+  motif doctor              check the endpoint, the credentials and what the server produces
   motif sessions            list recorded sessions
   motif resume <file>       resume an interrupted session
   motif skills              list available skills
@@ -250,8 +260,9 @@ const HELP = `motif ${VERSION} — a coding agent built for Motif-3
   motif corpus-render       render a corpus JSONL to prompt text, as the harness would
 
 Flags
-  --endpoint <url>          model server (default http://127.0.0.1:8080)
-  --model <name>            model id to request
+  --endpoint <url>          model server (default ${DEFAULT_ENDPOINT}; a trailing /v1 is accepted)
+  --model <name>            model id to request (default ${DEFAULT_MODEL})
+  --env-file <path>         read MOTIF_* settings from this file first
   --channel <id>            toolcall | object | raw (default toolcall)
   --channel-policy <p>      fixed | adaptive (default fixed)
   --max-turns <n>           turn ceiling (default 100)
@@ -265,6 +276,12 @@ distil flags
   --format <f>              trajectory-jsonl | profile-jsonl (default trajectory-jsonl)
   --filter <f>              grader-passed | grader-failed | all (default grader-passed)
   --include-children        also export subagent scopes
+
+Connection
+  MOTIF_API_KEY, MOTIF_ENDPOINT and MOTIF_MODEL are read from the environment,
+  then from ./.env, then from ~/.motif/.env — MOTIF_* keys only, and never into
+  the environment. The key is sent as a bearer token and is withheld from every
+  command the agent runs.
 
 A trajectory carries structured messages for training; a profile document
 carries one rendered text per line for the routing profiler. They are different
@@ -282,8 +299,18 @@ because the transcript formats are not interchangeable.
 async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2));
   const cwd = flagStr(args.flags, "cwd", process.cwd());
-  const endpoint = flagStr(args.flags, "endpoint", process.env["MOTIF_ENDPOINT"] ?? "http://127.0.0.1:8080");
-  const model = flagStr(args.flags, "model", process.env["MOTIF_MODEL"] ?? "Motif-Technologies/Motif-3");
+  const envFile = flagStr(args.flags, "env-file", "");
+  const connection = resolveEndpointConfig({
+    flags: {
+      ...(typeof args.flags["endpoint"] === "string" ? { endpoint: args.flags["endpoint"] } : {}),
+      ...(typeof args.flags["model"] === "string" ? { model: args.flags["model"] } : {}),
+    },
+    dotenvPaths: [...(envFile ? [envFile] : []), ...defaultDotenvPaths()],
+  });
+  const { endpoint, model, apiKey } = connection;
+  // Read once, then gone: every command the agent runs inherits this process's
+  // environment, and a credential in it is one `env` away from a tool result.
+  withholdSecrets(process.env);
   let resumeFrom: ResumeState | undefined;
 
   switch (args.command) {
@@ -440,7 +467,12 @@ async function main(): Promise<number> {
     }
 
     case "doctor": {
-      const checks = await doctor({ endpoint, model });
+      const checks = await doctor({
+        endpoint,
+        model,
+        ...(apiKey !== undefined ? { apiKey } : {}),
+        ...(connection.sources.apiKey !== undefined ? { apiKeySource: connection.sources.apiKey } : {}),
+      });
       process.stdout.write(formatChecks(checks) + "\n");
       return worstState(checks) === "fail" ? 1 : 0;
     }
@@ -609,7 +641,7 @@ async function main(): Promise<number> {
     return 2;
   }
 
-  const transport = new HttpTransport({ endpoint, model });
+  const transport = new HttpTransport({ endpoint, model, ...(apiKey !== undefined ? { apiKey } : {}) });
   const screen = new Screen();
   const runId = new Date().toISOString().replace(/[:.]/g, "-");
   // `--journal` so a benchmark runner knows where the record went without

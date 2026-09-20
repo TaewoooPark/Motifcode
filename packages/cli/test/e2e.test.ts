@@ -13,7 +13,7 @@
 
 import { spawn } from "node:child_process";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { mkdtempSync, readFileSync, readdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,6 +35,7 @@ class MockServer {
   private server!: Server;
   readonly bodies: ChatBody[] = [];
   readonly urls: string[] = [];
+  readonly headers: Record<string, string | string[] | undefined>[] = [];
   port = 0;
 
   constructor(private readonly script: (turn: number, body: ChatBody) => string) {}
@@ -46,6 +47,7 @@ class MockServer {
       req.on("end", () => {
         const raw = Buffer.concat(chunks).toString("utf8");
         this.urls.push(req.url ?? "");
+        this.headers.push(req.headers);
         let body: ChatBody = { messages: [] };
         try {
           body = JSON.parse(raw) as ChatBody;
@@ -87,12 +89,16 @@ interface RunResult {
   stderr: string;
 }
 
-function runCli(argv: string[], cwd: string): Promise<RunResult> {
+function runCli(argv: string[], cwd: string, env: Record<string, string> = {}): Promise<RunResult> {
+  // The key is stripped from the inherited environment so a developer's own
+  // MOTIF_API_KEY cannot make the unauthenticated cases pass by accident.
+  const { MOTIF_API_KEY: _dropped, ...inherited } = process.env;
+  void _dropped;
   return new Promise((resolveRun) => {
     const child = spawn(
       process.execPath,
       [join(REPO, "node_modules/tsx/dist/cli.mjs"), MAIN, ...argv],
-      { cwd, env: { ...process.env, NO_COLOR: "1" }, stdio: ["ignore", "pipe", "pipe"] },
+      { cwd, env: { ...inherited, NO_COLOR: "1", ...env }, stdio: ["ignore", "pipe", "pipe"] },
     );
     let stdout = "";
     let stderr = "";
@@ -215,6 +221,101 @@ describe("cli process end to end", () => {
     const r = await runCli(["   ", "--endpoint", server.endpoint, "--no-hero"], dir);
     expect(r.code).toBe(2);
     expect(server.bodies).toHaveLength(0);
+  }, 30_000);
+});
+
+describe("the credential", () => {
+  let dir: string;
+  let server: MockServer;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "motif-key-"));
+  });
+
+  afterEach(async () => {
+    await server?.stop();
+  });
+
+  const finish = (turn: number) =>
+    turn === 1 ? toolCall("done", { summary: "s" }) : toolCall("done", { summary: "s", confirm: true });
+
+  it("goes out as a bearer token when set in the environment", async () => {
+    server = new MockServer(finish);
+    await server.start();
+    const r = await runCli(["t", "--endpoint", server.endpoint, "--no-hero"], dir, { MOTIF_API_KEY: "sk-from-env" });
+    expect(r.code).toBe(0);
+    expect(server.headers[0]!["authorization"]).toBe("Bearer sk-from-env");
+  }, 30_000);
+
+  it("is read from a .env file in the invocation directory", async () => {
+    server = new MockServer(finish);
+    await server.start();
+    writeFileSync(join(dir, ".env"), "MOTIF_API_KEY=sk-from-dotenv\n", "utf8");
+    const r = await runCli(["t", "--endpoint", server.endpoint, "--no-hero"], dir);
+    expect(r.code).toBe(0);
+    expect(server.headers[0]!["authorization"]).toBe("Bearer sk-from-dotenv");
+  }, 30_000);
+
+  it("is read from --env-file, which outranks the directory's .env", async () => {
+    server = new MockServer(finish);
+    await server.start();
+    writeFileSync(join(dir, ".env"), "MOTIF_API_KEY=sk-from-dotenv\n", "utf8");
+    const file = join(dir, "other.env");
+    writeFileSync(file, "MOTIF_API_KEY=sk-from-flag\n", "utf8");
+    const r = await runCli(["t", "--endpoint", server.endpoint, "--no-hero", "--env-file", file], dir);
+    expect(r.code).toBe(0);
+    expect(server.headers[0]!["authorization"]).toBe("Bearer sk-from-flag");
+  }, 30_000);
+
+  it("is absent from the header when nothing configures it", async () => {
+    server = new MockServer(finish);
+    await server.start();
+    await runCli(["t", "--endpoint", server.endpoint, "--no-hero"], dir);
+    expect(server.headers[0]!["authorization"]).toBeUndefined();
+  }, 30_000);
+
+  it("never reaches the commands the agent runs", async () => {
+    // A model that runs `env` to look around would otherwise put the key into
+    // a tool result, and tool results are journalled and sent back as context.
+    server = new MockServer((turn) =>
+      turn === 1
+        ? toolCall("bash", { command: 'echo "K=${MOTIF_API_KEY:-unset}"' })
+        : turn === 2
+          ? toolCall("done", { summary: "s" })
+          : toolCall("done", { summary: "s", confirm: true }),
+    );
+    await server.start();
+    const r = await runCli(["t", "--endpoint", server.endpoint, "--no-hero"], dir, { MOTIF_API_KEY: "sk-hidden" });
+    expect(r.code).toBe(0);
+    // The header carried it; the tool result did not.
+    expect(server.headers[0]!["authorization"]).toBe("Bearer sk-hidden");
+    const toolResult = server.bodies[1]!.messages.find((m) => m.role === "tool");
+    expect(toolResult?.content).toContain("K=unset");
+    expect(JSON.stringify(server.bodies)).not.toContain("sk-hidden");
+    const sessions = join(dir, ".motif", "sessions");
+    const journal = readFileSync(join(sessions, readdirSync(sessions)[0]!), "utf8");
+    expect(journal).not.toContain("sk-hidden");
+  }, 30_000);
+
+  it("writes the call back into history with its result", async () => {
+    // The server extracts nothing here — the mock returns text — but the
+    // history the CLI sends on turn two must still pair the call with the
+    // tool result, or a server-side template renders an answer to nothing.
+    server = new MockServer((turn) =>
+      turn === 1
+        ? toolCall("bash", { command: "echo hi" })
+        : turn === 2
+          ? toolCall("done", { summary: "s" })
+          : toolCall("done", { summary: "s", confirm: true }),
+    );
+    await server.start();
+    await runCli(["t", "--endpoint", server.endpoint, "--no-hero"], dir);
+    const second = server.bodies[1]!.messages;
+    const assistant = second.find((m) => m.role === "assistant") as { tool_calls?: { id: string; function: { name: string } }[] };
+    expect(assistant.tool_calls?.[0]?.function.name).toBe("bash");
+    const tool = second.find((m) => m.role === "tool") as { tool_call_id?: string; content?: string };
+    expect(tool.tool_call_id).toBe(assistant.tool_calls![0]!.id);
+    expect(tool.content).toBe("hi");
   }, 30_000);
 });
 

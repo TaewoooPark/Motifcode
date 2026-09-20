@@ -52,7 +52,12 @@ export interface CompletionResponse {
   /** Raw body, kept so the client-side repair ladder can re-examine it. */
   rawText: string;
   finishReason?: string;
-  usage?: { promptTokens?: number; completionTokens?: number };
+  usage?: {
+    promptTokens?: number;
+    completionTokens?: number;
+    /** Prompt tokens the server says it served from its prefix cache, when it says. */
+    cachedTokens?: number;
+  };
   /** Wall-clock for the request, used for the tok/s readout. */
   ms: number;
 }

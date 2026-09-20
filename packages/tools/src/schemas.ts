@@ -153,7 +153,7 @@ export const CORE_TOOLS: readonly Tool[] = Object.freeze([
     function: {
       name: "task",
       description:
-        "Delegate a self-contained piece of work to a subagent with its own context. On a local single-GPU endpoint these run one at a time.",
+        "Delegate a self-contained piece of work to a subagent with its own context. Several may run at once.",
       parameters: {
         type: "object",
         properties: {

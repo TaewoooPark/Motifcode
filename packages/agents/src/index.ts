@@ -11,10 +11,11 @@
  * takes the first N of the canonical list instead, which is why that list is
  * ordered by how universally a tool is needed.
  *
- * **They run one at a time by default.** A cloud harness fans out freely; a
- * local endpoint is one GPU and vLLM serialises anyway, so parallel spawning
- * buys queueing latency and a frozen-looking screen. The concurrency is a knob,
- * defaulting to 1 for a local endpoint.
+ * **Concurrency follows the endpoint.** A hosted endpoint admits several
+ * requests at once, and subagents fan out there. A local endpoint is one GPU
+ * and the engine serialises anyway, so parallel spawning there buys queueing
+ * latency and a frozen-looking screen. The concurrency is a knob, defaulting
+ * to 1 for a local endpoint and 4 otherwise.
  */
 
 import type { Tool } from "@motifcode/protocol";
@@ -96,9 +97,9 @@ function describe(value: unknown): string {
 /**
  * Runs subagents with a concurrency cap.
  *
- * Default of one is the honest setting for a single local GPU: the requests
- * would queue in the server anyway, and doing it here means the queue is
- * visible on screen instead of appearing as a stall.
+ * One is the honest setting for a single local GPU: the requests would queue
+ * in the server anyway, and doing it here means the queue is visible on
+ * screen instead of appearing as a stall. A hosted endpoint gets more.
  */
 export class AgentScheduler {
   private readonly queue: QueueEntry[] = [];
@@ -150,9 +151,10 @@ export class AgentScheduler {
 
 /** Concurrency that suits the endpoint. */
 export function concurrencyFor(endpoint: string): number {
-  // Anything pointing at localhost or a machine on the LAN is one box with one
-  // model loaded; fanning out there is counterproductive.
-  const local = /localhost|127\.0\.0\.1|\.local\b|zgx|::1/i.test(endpoint);
+  // Anything pointing at this machine or one on the LAN is one box with one
+  // model loaded; fanning out there is counterproductive. Everything else is
+  // a hosted endpoint with its own queue.
+  const local = /localhost|127\.0\.0\.1|\.local\b|::1/i.test(endpoint);
   return local ? 1 : 4;
 }
 

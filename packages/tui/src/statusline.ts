@@ -1,17 +1,19 @@
 /**
  * The instrument panel.
  *
- * Every reading here is something a hosted API cannot show you and a local
- * deployment can. That is the whole selection rule:
+ * Every reading here is something about this model's protocol or this
+ * session's cost, chosen because a generic chat client shows none of it:
  *
  *   ch          which action channel is live, and whether it downgraded
  *   parse       tool-call parse failures over attempts — the model's documented
  *               weak spot, surfaced rather than buried in a log
- *   prefix      prompt-cache reuse. No hosted API reports this; here the tool
- *               list is frozen precisely to keep it high, so it is worth seeing
+ *   prefix      prompt-cache reuse. Textual overlap computed here, and beside
+ *               it the server's own cached-token count when the endpoint
+ *               reports one; the tool list is frozen precisely to keep both
+ *               high, so they are worth seeing
  *   ctx / kv    tokens and the actual KV bytes, which are computable because
  *               the model's MLA geometry is known
- *   tok/s       there is no dollar cost on local hardware; speed is the price
+ *   tok/s       request-effective throughput; speed is the price
  */
 
 import type { Instruments } from "./cells.js";
@@ -48,7 +50,10 @@ function prefixReading(inst: Instruments): Reading {
   // — which on this model usually means the tool list changed.
   const severity: Severity = pct >= 80 ? "ok" : pct >= 50 ? "warn" : "bad";
   const mark = severity === "ok" ? "✓" : "✗";
-  return { label: "prefix", value: `${mark} ${pct}%`, severity };
+  // The server's count, when it gives one, is the actual cache measurement;
+  // the percentage is only what this process can compute from the text.
+  const cached = inst.cachedTokens !== undefined ? ` · cached ${fmtTokens(inst.cachedTokens)}` : "";
+  return { label: "prefix", value: `${mark} ${pct}%${cached}`, severity };
 }
 
 function contextReading(inst: Instruments): Reading {

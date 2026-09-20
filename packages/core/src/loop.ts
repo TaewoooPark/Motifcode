@@ -23,9 +23,10 @@
  *      it is finished. It is not evidence that the work is correct — that comes
  *      from a grader outside this loop.
  *
- *   5. A dead server is an expected event, not an exception. A single local GPU
- *      serving this checkpoint falls over, and the loop distinguishes "the
- *      socket refused" from "the request was wrong".
+ *   5. A dead or busy server is an expected event, not an exception. A hosted
+ *      endpoint rate-limits and a local engine falls over, and the loop
+ *      distinguishes "the socket refused" and "come back in ten seconds" from
+ *      "the request was wrong".
  */
 
 import {
@@ -42,6 +43,7 @@ import {
   type ChannelId,
   type ChannelParse,
   type CompletionRequest,
+  type SerializedCall,
   type Tool,
 } from "@motifcode/protocol";
 import { BreakageBudget, LoopGuard, nextChannel, type BudgetState } from "./budget.js";
@@ -109,7 +111,7 @@ export interface LoopOptions {
    * worth more in wall clock than in score.
    */
   noActionLimit?: number;
-  /** Retries for a server that died mid-session; GB10 makes this routine. */
+  /** Retries for a server that died or rate-limited mid-session. */
   maxServerRetries?: number;
   /** Output cap per model step. Sent on the wire, not merely assumed. */
   maxOutputTokens?: number;
@@ -441,7 +443,12 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
           return finish("transport_error");
         }
         attempt++;
-        const delay = backoffDelay(attempt, opts.random ? { random: opts.random } : {});
+        // The server's own ask outranks the backoff schedule: a 429 that said
+        // ten seconds and was retried after half of one is a 429 again.
+        const delay = Math.max(
+          backoffDelay(attempt, opts.random ? { random: opts.random } : {}),
+          te.retryAfterMs ?? 0,
+        );
         emit({
           type: "notice",
           level: "warn",
@@ -473,6 +480,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
       kvBytes: session.usage().kvBytes,
       promptTokens: response.usage?.promptTokens,
       completionTokens: response.usage?.completionTokens,
+      ...(response.usage?.cachedTokens !== undefined ? { cachedTokens: response.usage.cachedTokens } : {}),
       requestMs: response.ms,
     });
 
@@ -493,11 +501,30 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
       emit({ type: "parse_failure", kind: "rejected", sample: sample.slice(0, 200) });
     }
 
-    /** Record the model's turn and a harness reply, in this channel's format. */
-    const handBack = (text: string): void => {
-      session.appendAll(codec.serializeAssistant(split.content, split.reasoning, parsed));
+    /**
+     * Record the model's turn and a harness reply, in this channel's format.
+     *
+     * `calls` are the turn's actions, with ids, when it had any. They go into
+     * history even when nothing ran — a refused batch, a `done` proposal —
+     * because the reply that follows refers to them, and on a server that
+     * extracts tool calls the body alone no longer contains them.
+     */
+    const handBack = (text: string, calls?: readonly SerializedCall[]): void => {
+      session.appendAll(codec.serializeAssistant(split.content, split.reasoning, parsed, calls));
       session.appendAll(codec.serializeHarnessTurn(text));
     };
+
+    /** The turn's actions as calls, ids assigned in order. */
+    const callsOf = (actions: readonly Action[]): SerializedCall[] =>
+      actions.map((a) =>
+        a.kind === "done"
+          ? {
+              id: nextId(),
+              name: "done",
+              arguments: { summary: a.summary, ...(a.confirm !== undefined ? { confirm: a.confirm } : {}) },
+            }
+          : { id: nextId(), name: a.name, arguments: a.arguments },
+      );
 
     // No actions: either the model leaked broken syntax, or it tried to answer
     // in prose. Both are non-terminal here.
@@ -621,7 +648,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
         emit({ type: "parse_failure", kind: "rejected", sample: `${r.kind}: ${r.detail}`.slice(0, 200) });
       }
       if (budget.exhausted) return finish("breakage_limit");
-      handBack(refusalPrompt(refusals, channel));
+      handBack(refusalPrompt(refusals, channel), callsOf(parsed.actions));
       emit({ type: "repair", kind: "refusal", reason: refusals[0]!.kind, attempt: 1, max: 1 });
       await lifecycle("OnRepair", refusals[0]!.detail);
       checkpoint();
@@ -641,9 +668,10 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
     // the model answered a different question than the one it was asked.
     const doneAction = doneActions[0];
     if (doneAction) {
+      const doneCalls = callsOf([doneAction]);
       if (pendingDone === null) {
         pendingDone = normalizeSummary(doneAction.summary);
-        handBack(confirmationChallenge(doneAction.summary, channel));
+        handBack(confirmationChallenge(doneAction.summary, channel), doneCalls);
         emit({ type: "notice", level: "info", text: "completion proposed; awaiting confirmation" });
         checkpoint();
         continue;
@@ -652,6 +680,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
         handBack(
           "That was not a confirmation. To end the session, repeat the same summary with " +
             "`confirm: true`. To keep working, take the next action instead.",
+          doneCalls,
         );
         emit({ type: "notice", level: "warn", text: "completion not confirmed; session continues" });
         checkpoint();
@@ -665,6 +694,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
         handBack(
           `The confirmation did not match the summary you proposed:\n\n${proposed}\n\n` +
             "Repeat that summary verbatim with `confirm: true`, or keep working.",
+          doneCalls,
         );
         emit({ type: "notice", level: "warn", text: "confirmation summary did not match" });
         checkpoint();
@@ -684,7 +714,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
       validated: true,
     }));
 
-    session.appendAll(codec.serializeAssistant(split.content, split.reasoning, parsed));
+    session.appendAll(codec.serializeAssistant(split.content, split.reasoning, parsed, calls));
 
     let anyFailure = false;
     let combinedOutput = "";

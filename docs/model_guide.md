@@ -6,7 +6,7 @@
 | last verified | 2026-08-20 |
 | source checkpoint | `Motif-Technologies/Motif-3-NVFP4` @ `3a4416f7b555720d36e41f93207b826003ffe327` |
 | reference architecture | `Motif-Technologies/Motif-3` @ `883d5c441fe3bb994c7b57e60f49e26147f85512` |
-| serving runtime | Motif vLLM fork @ `4cd9eb4129883565e69d508038d783d59ee01867` (not yet built here) |
+| serving runtime | none here — the harness talks to the hosted endpoint; local bring-up retired, see §9 |
 | implementation | `toolkit/prune/`, tested by `toolkit/prune/test_*.py` |
 
 This is the normative plan. It is tracked in git so that a change to the code
@@ -508,146 +508,20 @@ recorded.
 
 ---
 
-## 9. GB10 bring-up
+## 9. GB10 bring-up — retired
 
-The fork is verified by its authors on 2×B200. `FACT` — the model card. GB10 is
-a different architecture and a different memory model, and results there are
-evidence about GB10 only.
+The harness no longer serves the model itself. Motif-3 is reached through a
+hosted OpenAI-compatible endpoint, and the bring-up work this section held —
+the vLLM fork build, the plugin extractor, the deep_gemm shim, the host
+guardrails, the context ladder and the upstream issue list — was removed along
+with `toolkit/serving/`. The section as it stood, with its `MEASURED` claims
+from 2026-08-20, is in the history before that change.
 
-### Getting a vLLM that knows what a Motif is
-
-`MEASURED`, 2026-08-20. Neither of the vendor's two distribution routes runs
-here: the container `ghcr.io/motiftechnologies/vllm:v0.20.2-motif3.rc3`
-publishes a single `linux/amd64` manifest and this host is aarch64, and the
-image tag's version is misleading — the fork's HEAD requires torch 2.11.0 and
-is nine days old, not a year.
-
-The first attempt was to register the fork's five Motif files into the
-installed vLLM 0.26 from outside (`toolkit/serving/build_plugin.py`). Their
-module-level imports all resolve, which is what made it look cheap. That test
-was too weak: the imports that matter are inside `__init__`, and running the
-model found the next drift each time — two quantization config classes upstream
-does not have, then `MoERunner.local_num_experts`, and no reason to think that
-was the last. Each patch risks being subtly wrong rather than loudly broken,
-and a MoE that computes almost the right thing yields a plausible bad model
-rather than an error. The plugin script is kept because its extraction and
-import-rewriting are useful reading, but it is not the supported path.
-
-`toolkit/serving/build_fork.sh` builds the fork itself. `MEASURED` — 28 minutes
-of nvcc on 20 cores, and afterwards `MotifForCausalLM`, `MotifMTPModel` and
-`modelopt_nvfp4` are all native. Four things it handles that are not obvious:
-
-- `VLLM_USE_PRECOMPILED=1` fetches an x86_64 wheel, so only the
-  architecture-neutral `cumem_allocator` lands and `vllm._C` is absent. The
-  installed vLLM 0.26's `_C_stable_libtorch` is a different extension under a
-  different name and is not a substitute.
-- `pip install -e .` returns in four seconds once the editable install exists,
-  having compiled nothing.
-- CMake's FindPython needs development headers this host cannot install, and
-  does not read `CPATH`; the extracted `.deb` under `~/local/pydev` has to be
-  passed as CMake arguments.
-- pip resolves transformers 4.57 on its own. The checkpoint's tokenizer is
-  `TokenizersBackend`, which is transformers 5.x, and the fork's own
-  constraint allows 5.6+.
-
-### The deep_gemm shim, and what it does not prove
-
-`MEASURED` — the fork's mHC path calls `tf32_hc_prenorm_gemm` with no fallback,
-so DeepGEMM is required whatever the quantization. The fork vendors a prebuilt
-`deep_gemm/_C...so` and no source for it; the kernel headers ship alongside,
-including an `sm120` variant, because DeepGEMM compiles kernels at runtime.
-
-That binary was built against an older torch than the fork's own requirements
-demand. Of the 428 symbols it imports, **427 resolve against torch 2.11.0**.
-The one that does not is
-`c10::ValueError::ValueError(SourceLocation, std::string)` — and
-`c10::Error::Error(SourceLocation, std::string)`, its base, is exported. The
-subclass gained `using Error::Error`, which makes the inherited constructor
-implicit and inline, so nothing is emitted. That is a source change, not an ABI
-break.
-
-`toolkit/serving/c10_valueerror_shim.cpp` emits that one symbol.
-`LD_PRELOAD`ed, deep_gemm imports and its hyperconnection kernel resolves.
-
-The shim asserts that the only difference between the two torches, as far as
-this binary is concerned, is where that constructor lives. 427 of 428 resolving
-is evidence for that and not proof: a struct whose layout changed silently
-would corrupt rather than fail. **Nothing computed through this path is
-believable until V3 has compared it against the reference implementation**, and
-that gate is not optional here in the way it might be elsewhere.
-
-`BLOCKED` — the tiny synthetic checkpoint now reaches the DeepGEMM kernel and
-fails an internal `dim == 2 or dim == 3` assertion. The tiny model has already
-produced two false alarms of this kind — MLA head dimensions no kernel
-implements, and a bf16 path the real checkpoint never takes — so this is
-recorded rather than chased. The decisive test is the pruned checkpoint, which
-is the real shape and the real quantization.
-
-### Host guardrails come first### Host guardrails come first
-
-Before any large allocation: a cgroup memory cap, a watchdog that can kill the
-server on `MemAvailable` crossing a pre-registered reserve, and health logging.
-Unified memory means the model weights, CUDA workspaces, KV cache, the engine's
-own RSS, page cache and every other process share one pool —
-`gpu_memory_utilization` is not a host-wide hard cap, and treating it as one is
-how a machine becomes unreachable.
-
-`vllm serve` may support `--kv-cache-memory-bytes` for an explicit KV budget.
-`FACT` for [upstream](https://docs.vllm.ai/en/latest/cli/serve/); parity in the
-Motif fork is unverified and must be checked at startup rather than assumed.
-
-### The ladder
-
-One variable at a time. Each step has to pass before the next begins.
-
-| step | configuration | acceptance |
-|---|---|---|
-| 1 | host guardrails only | watchdog kills a synthetic hog; host stays reachable |
-| 2 | tiny dense model | base vLLM works on ARM64 |
-| 3 | tiny synthetic Motif, BF16 | architecture, attention, router, PolyNorm |
-| 4 | tiny synthetic Motif, NVFP4 + sidecar | custom loader, calibrated scales, a known numeric fixture |
-| 5 | real pruned model, 4K, eager, `--max-num-seqs 1`, MTP off, prefix cache off, no graph capture | near-full prefill, fixed output tokens, correctness smoke, memory recorded |
-| 6 | 32K → 64K → 128K → 256K | each: near-full prefill, fixed output, correctness, memory, zero engine errors |
-| 7 | prefix cache, then MTP, then graphs, then chunked prefill | one at a time, each against step 6's baseline |
-| 8 | 1h smoke, then a pre-registered long soak | request success, latency and memory drift recorded, not just crash-free time |
-
-A server that starts is not a passed step. "256K works" requires a near-full
-prefill and a fixed number of output tokens actually generated at that length.
-
-### The backend gate
-
-Confirm from the startup and request logs that the Motif NVFP4 direct-load path
-is in use and that the sidecar was read. An unintended Marlin fallback is a
-different model with different numerics, and a memory or latency figure measured
-there says nothing about the intended configuration.
-
-### Known upstream issues
-
-To be re-checked immediately before the campaign; a closed issue is not
-necessarily a fixed one.
-
-| issue | symptom | why it matters here |
-|---|---|---|
-| [vLLM #50925](https://github.com/vllm-project/vllm/issues/50925) | GB10 NVFP4 MoE: published build falls back to Marlin | the backend gate above |
-| [vLLM #46307](https://github.com/vllm-project/vllm/issues/46307) | UMA startup peak; `gpu_memory_utilization` is not a host cap | the watchdog |
-| [vLLM #50011](https://github.com/vllm-project/vllm/issues/50011) | sleep/wake EngineCore failures | keep sleep mode off |
-| [vLLM #49926](https://github.com/vllm-project/vllm/issues/49926) | GB10 NVFP4/Marlin long-run instability | the soak step |
-| [vLLM #50067](https://github.com/vllm-project/vllm/issues/50067) | related EngineCore path | record the disposition; closed ≠ fixed |
-
-These are upstream vLLM issues. None is evidence about Motif's fork, whose
-custom PolyNorm and NVFP4 paths differ; each needs a local reproducer and a
-backend log.
-
-### Performance
-
-`HYPOTHESIS` and nothing more: the "13 → 21 tok/s from dense FP8" figure in
-earlier drafts had no measurement behind it and has been removed. The fork's own
-source keeps dense FP8 off by default and notes roughly +2% observed throughput.
-
-Report TTFT, prefill tok/s, decode tok/s, inter-token latency, p50 and p95, and
-raw samples. `completion_tokens / request wall time` is request-effective
-throughput and must be labelled as such — it includes prefill and queueing,
-which on a long context is most of it.
+What survives it is the reason it existed: a pruned checkpoint is only a
+result once a runtime loads it, takes the intended quantisation path, and
+produces the same tokens as the reference. That gate (V4 in §7) is unchanged.
+It is now blocked on hardware rather than on software, and nothing in this
+guide should be read as if it had passed.
 
 ---
 
@@ -665,13 +539,14 @@ which on a long context is most of it.
 | S5 | criterion and ratio selection | not_started | S4 | `select_experts.py` | keep-lists | dev comparison, controls included |
 | S6 | surgery | not_started | S5 | `surgery.py --apply` | pruned checkpoint | 612 sliced, manifest hashes |
 | S7 | structural verification | not_started | S6 | `verify.py` | V1 report | V1 and V2 pass |
-| S8 | runtime bring-up | blocked | S6 | Motif vLLM | serving logs | §9 ladder |
+| S8 | runtime bring-up | blocked | S6 | — | — | retired with the local serving stack, see §9 |
 | S9 | dev evaluation | blocked | S7, S8 | `packages/eval` | dev results | candidate chosen |
 | S10 | sealed evaluation | blocked | S9 | `packages/eval` | paired stats | non-inferiority in §8 |
 | S11 | recovery tuning | blocked | S10 | — | — | see below |
 | S12 | mixed dense FP8 | blocked | S10 | — | — | see below |
 
-S8's blocker is that the Motif vLLM fork has not been built here. S11 and S12
+S8's blocker is that there is no longer a machine here to serve a pruned
+checkpoint on. S11 and S12
 are blocked on S10 deliberately: both are ways to make a pruned model better,
 and running either before the unhealed baseline is measured makes it impossible
 to say what the pruning itself cost.

@@ -52,6 +52,25 @@ export interface SessionView {
   render(): string;
 }
 
+/**
+ * A call the loop is about to run, or has refused, with the id its result
+ * will carry.
+ *
+ * Needed by the native channel and ignored by the body channels. On the
+ * native channel the transcript is the OpenAI shape, and a server that runs a
+ * tool-call parser lifts the calls out of the body — so the body alone no
+ * longer says what the model did. Writing the assistant turn back without its
+ * `tool_calls` produced, from turn two, a history in which every tool result
+ * answered a call that was not there: the template rendered an empty
+ * assistant turn followed by a `<tool_response>`. The model never saw its own
+ * actions.
+ */
+export interface SerializedCall {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
 /** A tool call and its result, for the codec to write down. */
 export interface Observation {
   callId: string;
@@ -82,8 +101,17 @@ export interface ChannelCodec {
    * native function calling keep it verbatim: a parser-normalised
    * reconstruction is not what the model wrote, and the difference is visible
    * to the model on the next turn.
+   *
+   * `calls` are the actions of this turn with the ids their results will
+   * carry. The native channel writes them as `tool_calls`; the body channels
+   * already have them in `body` and ignore the argument.
    */
-  serializeAssistant(body: string, reasoning: string | undefined, parsed: ChannelParse): Message[];
+  serializeAssistant(
+    body: string,
+    reasoning: string | undefined,
+    parsed: ChannelParse,
+    calls?: readonly SerializedCall[],
+  ): Message[];
   /** How a tool result is written into history. */
   serializeObservation(obs: Observation): Message[];
   /** How a harness-authored prompt (repair, confirmation challenge) is written. */
@@ -121,9 +149,27 @@ class ToolCallCodec implements ChannelCodec {
     return getChannel("toolcall").parse(response.content, ctx, response.toolCalls);
   }
 
-  serializeAssistant(body: string, reasoning: string | undefined, parsed: ChannelParse): Message[] {
-    const msg: Message = { role: "assistant", content: parsed.content || body };
+  serializeAssistant(
+    body: string,
+    reasoning: string | undefined,
+    parsed: ChannelParse,
+    calls?: readonly SerializedCall[],
+  ): Message[] {
+    const hasCalls = calls !== undefined && calls.length > 0;
+    // With calls, the content is the prose around them: the calls themselves
+    // are rendered by the template from `tool_calls`, and leaving the raw
+    // `<tool_call>` text in the content as well would show the model each
+    // action twice. Without calls the turn produced nothing usable, and the
+    // body — broken syntax included — is exactly what the model needs to see.
+    const msg: Message = { role: "assistant", content: hasCalls ? parsed.content : parsed.content || body };
     if (reasoning) msg.reasoning_content = reasoning;
+    if (hasCalls) {
+      msg.tool_calls = calls.map((c) => ({
+        id: c.id,
+        type: "function" as const,
+        function: { name: c.name, arguments: c.arguments },
+      }));
+    }
     return [msg];
   }
 

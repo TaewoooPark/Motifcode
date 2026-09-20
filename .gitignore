@@ -1,6 +1,11 @@
 node_modules/
 dist/
 *.tsbuildinfo
+
+# The endpoint credential. `.env.example` is the committed shape.
+.env
+.env.*
+!.env.example
 .venv/
 __pycache__/
 *.pyc

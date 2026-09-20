@@ -205,38 +205,39 @@ did, it is not a skill — it is a comment.`,
 
   /* ---------------------------------------------------------------- */
   `---
-name: motif-serving
-description: Diagnose and fix the Motif-3 endpoint when output quality looks wrong
-budget: 1000
+name: motif-endpoint
+description: Diagnose the Motif-3 endpoint when tool calls or output quality look wrong
+budget: 900
 tags: ops motif
 ---
-Bad output from this model is very often a server misconfiguration rather than
-the model. Check these before blaming the weights.
+Bad output from this model is very often the endpoint rather than the model.
+Motif-3 is reached through a hosted OpenAI-compatible endpoint, so the server
+flags are not yours to set — but what they produce is observable, and
+\`motif doctor\` measures it. Read its output before blaming the weights.
 
-**The fork.** Stock vLLM with the stock Hermes tool parser silently drops any
-turn whose tool-call JSON is malformed, and this model produces malformed JSON
-often enough that it matters. The server must run the Motif fork with
-\`--tool-call-parser motif --reasoning-parser motif\`. Without them the repair
-ladder is simply absent and turns disappear.
+**Tool calls must arrive structured.** A correctly served Motif-3 returns
+\`tool_calls\` with \`content: null\`, because the server runs the vendor's
+tool-call parser and its repair ladder over the raw token stream. The harness
+has a client-side ladder for calls that arrive as \`<tool_call>\` text, but it
+only sees what is left in the body; if \`doctor\` reports text-form calls,
+parse failures will rise and the breakage budget will bind sooner.
 
-**Prefix caching.** \`--enable-prefix-caching\` must be on. The tool list here is
-frozen and canonically ordered specifically to keep the cached prefix alive; if
-caching is off, that design buys nothing and time-to-first-token stays bad.
+**Reasoning must arrive separated.** The generation prompt always leaves
+\`<think>\` open, and the endpoint returns the reasoning as its own field. If
+it arrives inline the harness splits it, but that is a fallback.
 
-**Sampling.** The published evaluations run at \`temperature 1.0\`,
-\`top_p 0.95\`. Near-greedy settings are a different regime and will not
-reproduce the model card's numbers.
+**Sampling.** \`temperature 1.0\`, \`top_p 0.95\` — the published evaluation
+regime. Near-greedy settings are a different regime and will not reproduce the
+model card's numbers.
 
-**Speculative decoding.** The checkpoint carries an MTP head; passing
-\`--speculative-config\` with one speculative token is free throughput.
+**Credentials and limits.** A 401 means the key is missing or rejected: set
+\`MOTIF_API_KEY\` in the environment or in a \`.env\` file, and note that the
+harness never passes it to the commands it runs. A 429 is retried after the
+endpoint's \`Retry-After\`; a 5xx is retried on backoff.
 
-**On GB10 specifically.** Unified memory means an over-large KV cache does not
-fail with a CUDA error — it consumes host RAM until the kernel OOM killer
-arrives. Cap it explicitly. NVFP4 on ARM64 GB10 also has open upstream issues;
-if the engine dies on startup, check that before assuming a bad checkpoint.
-
-Run \`motif doctor\` first — it checks all of the above and prints what is
-missing.`,
+**Only the native channel.** The hosted endpoint has no \`/v1/completions\`,
+so the \`object\` and \`raw\` channels cannot run against it. If a task needs
+them, it needs a different server.`,
 
   /* ---------------------------------------------------------------- */
   `---

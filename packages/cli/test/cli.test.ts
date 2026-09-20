@@ -8,7 +8,7 @@ import { BUILTIN_SKILLS, SkillRegistry } from "@motifcode/skills";
 import { CORE_TOOLS, toolPrefix } from "@motifcode/tools";
 import { readinessMarker, readinessProbe, ToolExecutor, patchHint, patchPaths } from "../src/executor.js";
 import { buildAgentPrompt, buildSystemPrompt } from "../src/prompt.js";
-import { doctor, formatChecks, worstState } from "../src/doctor.js";
+import { doctor, formatChecks, worstState, type Check } from "../src/doctor.js";
 
 const skills = new SkillRegistry();
 skills.registerAll(BUILTIN_SKILLS);
@@ -333,67 +333,171 @@ describe("executor", () => {
 });
 
 describe("doctor", () => {
-  const models = (id: string, maxLen?: number) =>
-    async () =>
-      new Response(JSON.stringify({ data: [{ id, ...(maxLen ? { max_model_len: maxLen } : {}) }] }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
+  const MOTIF = {
+    id: "motif/motif-3",
+    context_length: 262_144,
+    supports_function_calling: true,
+    min_prompt_price: 0,
+    min_completion_price: 0,
+    providers: [{ provider_slug: "motif" }],
+  };
+  const OTHER = { id: "someone/else", context_length: 8192 };
 
-  it("reports a healthy endpoint", async () => {
-    const checks = await doctor({
-      endpoint: "http://x",
-      fetchImpl: models("Motif-Technologies/Motif-3", 262_144) as unknown as typeof fetch,
-    });
-    expect(checks.find((c) => c.name === "endpoint")!.state).toBe("ok");
-    expect(checks.find((c) => c.name === "model family")!.state).toBe("ok");
-    expect(checks.find((c) => c.name === "context length")!.state).toBe("ok");
-  });
+  interface Scripted {
+    models?: unknown[];
+    chat?: { status?: number; body?: unknown };
+    completions?: { status?: number; body?: unknown };
+    /** Every request, for asserting on headers and bodies. */
+    seen: { url: string; init: RequestInit }[];
+  }
 
-  it("warns about a non-Motif model", async () => {
-    const checks = await doctor({
-      endpoint: "http://x",
-      fetchImpl: models("meta-llama/Llama-3") as unknown as typeof fetch,
-    });
-    expect(checks.find((c) => c.name === "model family")!.state).toBe("warn");
-  });
+  /** A stand-in for a router: three routes, each scripted. */
+  function router(script: Omit<Scripted, "seen">): Scripted & { fetchImpl: typeof fetch } {
+    const s: Scripted = { ...script, seen: [] };
+    const json = (body: unknown, status = 200) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    const fetchImpl = (async (url: string, init: RequestInit = {}) => {
+      s.seen.push({ url, init });
+      if (url.endsWith("/v1/models")) return json({ data: s.models ?? [MOTIF, OTHER] });
+      if (url.endsWith("/v1/chat/completions")) {
+        const r = s.chat ?? {
+          body: {
+            choices: [
+              {
+                message: {
+                  content: null,
+                  reasoning: "call done",
+                  tool_calls: [{ id: "t1", type: "function", function: { name: "done", arguments: '{"summary":"ok"}' } }],
+                },
+              },
+            ],
+            usage: { prompt_tokens_details: { cached_tokens: 0 } },
+          },
+        };
+        return json(r.body ?? {}, r.status ?? 200);
+      }
+      if (url.endsWith("/v1/completions")) {
+        const r = s.completions ?? { status: 404, body: { error: "Not Found" } };
+        return json(r.body ?? {}, r.status ?? 200);
+      }
+      return new Response("no route", { status: 404 });
+    }) as unknown as typeof fetch;
+    return Object.assign(s, { fetchImpl });
+  }
 
-  it("names the server flags the API cannot report", async () => {
-    // The silent killers: without the fork's parser, malformed tool calls are
-    // dropped and the user blames the model.
-    const checks = await doctor({
-      endpoint: "http://x",
-      fetchImpl: models("Motif-3") as unknown as typeof fetch,
-    });
-    const text = formatChecks(checks);
-    expect(text).toContain("--tool-call-parser motif");
-    expect(text).toContain("--reasoning-parser motif");
-    expect(text).toContain("--enable-prefix-caching");
+  const by = (checks: Check[], name: string): Check => checks.find((c) => c.name === name)!;
+
+  it("reports a healthy hosted endpoint", async () => {
+    const r = router({});
+    const checks = await doctor({ endpoint: "http://x", model: "motif/motif-3", apiKey: "k", fetchImpl: r.fetchImpl });
+    expect(by(checks, "api key").state).toBe("ok");
+    expect(by(checks, "endpoint").state).toBe("ok");
+    expect(by(checks, "model").state).toBe("ok");
+    expect(by(checks, "model").detail).toContain("free tier");
+    expect(by(checks, "model family").state).toBe("ok");
+    expect(by(checks, "context length").state).toBe("ok");
+    expect(by(checks, "function calling").state).toBe("ok");
+    expect(by(checks, "tool-call parser").state).toBe("ok");
+    expect(by(checks, "reasoning parser").state).toBe("ok");
+    expect(by(checks, "prefix caching").state).toBe("ok");
     expect(worstState(checks)).not.toBe("fail");
+  });
+
+  it("sends the key on every probe", async () => {
+    const r = router({});
+    await doctor({ endpoint: "http://x", model: "motif/motif-3", apiKey: "sk-test", fetchImpl: r.fetchImpl });
+    expect(r.seen.length).toBeGreaterThanOrEqual(3);
+    for (const { init } of r.seen) {
+      expect((init.headers as Record<string, string>)["authorization"]).toBe("Bearer sk-test");
+    }
+  });
+
+  it("accepts a base URL that already ends in /v1", async () => {
+    const r = router({});
+    await doctor({ endpoint: "http://x/v1/", model: "motif/motif-3", apiKey: "k", fetchImpl: r.fetchImpl });
+    expect(r.seen[0]!.url).toBe("http://x/v1/models");
+  });
+
+  it("finds the requested model by id, not by position", async () => {
+    // A router lists hundreds of models; the first one is not ours.
+    const r = router({ models: [OTHER, MOTIF] });
+    const checks = await doctor({ endpoint: "http://x", model: "motif/motif-3", apiKey: "k", fetchImpl: r.fetchImpl });
+    expect(by(checks, "model").state).toBe("ok");
+    expect(by(checks, "model family").state).toBe("ok");
+  });
+
+  it("warns when the id is not advertised, and about a non-Motif id", async () => {
+    const r = router({ models: [MOTIF] });
+    const checks = await doctor({ endpoint: "http://x", model: "meta-llama/Llama-3", apiKey: "k", fetchImpl: r.fetchImpl });
+    expect(by(checks, "model").state).toBe("warn");
+    expect(by(checks, "model family").state).toBe("warn");
+  });
+
+  it("warns, rather than failing, when no key is configured", async () => {
+    const r = router({});
+    const checks = await doctor({ endpoint: "http://x", model: "motif/motif-3", fetchImpl: r.fetchImpl });
+    expect(by(checks, "api key").state).toBe("warn");
+    expect(by(checks, "api key").fix).toContain("MOTIF_API_KEY");
+    // No header when there is no key: an empty bearer is a different error.
+    expect((r.seen[0]!.init.headers as Record<string, string>)["authorization"]).toBeUndefined();
+  });
+
+  it("fails on a rejected key and stops probing", async () => {
+    const r = router({ chat: { status: 401, body: { error: { message: "The token status is not available" } } } });
+    const checks = await doctor({ endpoint: "http://x", model: "motif/motif-3", apiKey: "bad", fetchImpl: r.fetchImpl });
+    const auth = by(checks, "authentication");
+    expect(auth.state).toBe("fail");
+    expect(auth.detail).toContain("401");
+    expect(worstState(checks)).toBe("fail");
+    expect(checks.map((c) => c.name)).not.toContain("completions endpoint");
+  });
+
+  it("measures the parsers from what comes back rather than reciting flags", async () => {
+    // A server without the vendor's parser leaves the call as text and the
+    // reasoning inline. Both are visible from one response.
+    const r = router({
+      chat: {
+        body: {
+          choices: [{ message: { content: '<think>x</think><tool_call>{"name":"done","arguments":{"summary":"ok"}}</tool_call>' } }],
+          usage: { prompt_tokens: 10 },
+        },
+      },
+    });
+    const checks = await doctor({ endpoint: "http://x", model: "motif/motif-3", apiKey: "k", fetchImpl: r.fetchImpl });
+    expect(by(checks, "tool-call parser").state).toBe("warn");
+    expect(by(checks, "reasoning parser").state).toBe("warn");
+    expect(by(checks, "prefix caching").state).toBe("unknown");
+    const text = formatChecks(checks);
+    expect(text).not.toContain("--tool-call-parser");
+  });
+
+  it("says the body channels cannot run when there is no completions route", async () => {
+    const r = router({});
+    const checks = await doctor({ endpoint: "http://x", model: "motif/motif-3", apiKey: "k", fetchImpl: r.fetchImpl });
+    const c = by(checks, "completions endpoint");
+    expect(c.state).toBe("warn");
+    expect(c.fix).toContain("toolcall");
+  });
+
+  it("reports the body channels available when the route answers", async () => {
+    const r = router({ completions: { status: 200, body: { choices: [{ text: "h" }] } } });
+    const checks = await doctor({ endpoint: "http://x", model: "motif/motif-3", apiKey: "k", fetchImpl: r.fetchImpl });
+    expect(by(checks, "completions endpoint").state).toBe("ok");
   });
 
   it("fails cleanly when nothing is listening", async () => {
     const checks = await doctor({
       endpoint: "http://x",
+      model: "motif/motif-3",
+      apiKey: "k",
       fetchImpl: (async () => {
         throw new Error("ECONNREFUSED");
       }) as unknown as typeof fetch,
     });
     expect(worstState(checks)).toBe("fail");
-    // The sandbox check does not depend on a server and is reported either
-    // way: a user who first learns the explorer cannot run commands at the
-    // moment it refuses one has been told too late.
-    expect(checks.map((c) => c.name)).toEqual(["sandbox", "endpoint"]);
-  });
-
-  it("warns when the box cannot hold the full checkpoint", async () => {
-    const checks = await doctor({
-      endpoint: "http://x",
-      fetchImpl: models("Motif-3") as unknown as typeof fetch,
-      deviceMemoryBytes: 121.6 * 2 ** 30,
-    });
-    const mem = checks.find((c) => c.name === "memory")!;
-    expect(mem.state).toBe("warn");
-    expect(mem.fix).toContain("pruned coding checkpoint");
+    // The sandbox and credential checks do not depend on a server and are
+    // reported either way: a user who first learns the explorer cannot run
+    // commands at the moment it refuses one has been told too late.
+    expect(checks.map((c) => c.name)).toEqual(["sandbox", "api key", "endpoint"]);
   });
 });

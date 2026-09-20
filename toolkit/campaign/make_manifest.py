@@ -44,12 +44,20 @@ def main() -> int:
     ap.add_argument("--instances", required=True, help="motif-suite build JSON")
     ap.add_argument("--corpus-spec", required=True, help="motif corpus-spec JSON")
     ap.add_argument("--benchmark", required=True, help="polyglot checkout")
-    # The harness repository lives on the workstation, not on the box the
-    # campaign runs on, so its revision is threaded across rather than read
-    # here. Still a measured value — just measured somewhere else.
+    # The harness revision is threaded across rather than read here, so the
+    # manifest can be written from anywhere. Still a measured value — just
+    # measured somewhere else.
     ap.add_argument("--harness-git-sha", required=True)
-    ap.add_argument("--serving-repo", required=True)
-    ap.add_argument("--model-id", default="motif-3")
+    # The serving side is a hosted endpoint now, so there is no repository to
+    # read a revision from; what identifies it is the endpoint and the model
+    # id it routes to. Anything more specific the operator knows goes in too.
+    ap.add_argument("--engine", default="hosted (llm.onerouter.pro)")
+    ap.add_argument("--serving-git-sha", default="")
+    ap.add_argument("--quantization", default="")
+    ap.add_argument("--hardware", default="hosted")
+    ap.add_argument("--hardware-count", type=int, default=1)
+    ap.add_argument("--config-id", default="motif3-hosted")
+    ap.add_argument("--model-id", default="motif/motif-3")
     ap.add_argument("--checkpoint-sha256", default="")
     ap.add_argument("--manifest-id", required=True)
     ap.add_argument("--channel", default="toolcall")
@@ -87,7 +95,7 @@ def main() -> int:
             },
         },
         "candidate": {
-            "config_id": "motif3-mq87-ds4dfm",
+            "config_id": a.config_id,
             "role": "candidate",
             "model_id": a.model_id,
             **({"checkpoint_sha256": a.checkpoint_sha256} if a.checkpoint_sha256 else {}),
@@ -107,10 +115,10 @@ def main() -> int:
             },
         },
         "serving": {
-            "engine": "ds4-dfm",
-            "git_sha": git_sha(Path(a.serving_repo)),
-            "quantization": "MQ87-88-FIT (IQ2_XXS/Q2_K routed experts, Q8_0 dense)",
-            "hardware": {"name": "NVIDIA GB10 (HP ZGX Nano)", "count": 1},
+            "engine": a.engine,
+            **({"git_sha": a.serving_git_sha} if a.serving_git_sha else {}),
+            **({"quantization": a.quantization} if a.quantization else {}),
+            "hardware": {"name": a.hardware, "count": a.hardware_count},
         },
         "sampling": {
             # The server applies its own defaults in thinking mode; recorded as
@@ -151,7 +159,7 @@ def main() -> int:
     print(f"  instances      : {len(instances)}")
     print(f"  instances_sha  : {manifest['suite']['instances_sha256'][:16]}…")
     print(f"  harness git_sha: {manifest['harness']['git_sha'][:12]}")
-    print(f"  serving git_sha: {manifest['serving']['git_sha'][:12]}")
+    print(f"  serving        : {manifest['serving']['engine']}")
     return 0
 
 

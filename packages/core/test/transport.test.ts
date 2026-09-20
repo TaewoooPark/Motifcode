@@ -16,6 +16,7 @@ import {
   HttpTransport,
   TransportError,
   backoffDelay,
+  parseRetryAfter,
   runLoop,
   sleep,
   type Executor,
@@ -68,11 +69,43 @@ describe("failure kinds", () => {
     expect(((await four.complete(req).catch((e: unknown) => e)) as TransportError).retryable).toBe(false);
   });
 
-  it("does not silently retry a 429", async () => {
-    // Retrying without honouring Retry-After is how a rate limit becomes a
-    // self-inflicted outage.
+  it("retries a 429, and carries the server's Retry-After", async () => {
+    // A shared hosted endpoint rate-limits as a matter of course. Retrying on
+    // the ordinary sub-second backoff would hit the limit three more times;
+    // not retrying at all would end the session on a transient.
+    const t = transportWith(
+      async () => new Response("slow down", { status: 429, headers: { "retry-after": "7" } }),
+    );
+    const err = (await t.complete(req).catch((e: unknown) => e)) as TransportError;
+    expect(err.retryable).toBe(true);
+    expect(err.retryAfterMs).toBe(7000);
+  });
+
+  it("waits a default when a 429 carries no Retry-After", async () => {
     const t = transportWith(async () => new Response("slow down", { status: 429 }));
-    expect(((await t.complete(req).catch((e: unknown) => e)) as TransportError).retryable).toBe(false);
+    const err = (await t.complete(req).catch((e: unknown) => e)) as TransportError;
+    expect(err.retryable).toBe(true);
+    expect(err.retryAfterMs).toBe(5000);
+  });
+
+  it("says which side a 401 is on", async () => {
+    // The one failure whose fix is never on the server.
+    const without = transportWith(async () => new Response('{"error":{"message":"No token provided"}}', { status: 401 }));
+    const w = (await without.complete(req).catch((e: unknown) => e)) as TransportError;
+    expect(w.retryable).toBe(false);
+    expect(w.message).toContain("no API key was sent");
+    expect(w.message).toContain("MOTIF_API_KEY");
+
+    const withKey = new HttpTransport({
+      endpoint: "http://x",
+      model: "m",
+      apiKey: "sk-bad",
+      fetchImpl: (async () => new Response('{"error":{"message":"The token status is not available"}}', { status: 401 })) as unknown as typeof fetch,
+    });
+    const k = (await withKey.complete(req).catch((e: unknown) => e)) as TransportError;
+    expect(k.message).toContain("rejected the API key");
+    // The key itself never appears in an error message.
+    expect(k.message).not.toContain("sk-bad");
   });
 
   it("treats a 2xx that is not a completion as a protocol error", async () => {
@@ -121,7 +154,66 @@ describe("failure kinds", () => {
   });
 });
 
+describe("Retry-After", () => {
+  it("reads seconds and HTTP dates, and caps both", () => {
+    expect(parseRetryAfter("3")).toBe(3000);
+    expect(parseRetryAfter("  12 ")).toBe(12_000);
+    const now = Date.parse("Wed, 21 Oct 2015 07:28:00 GMT");
+    expect(parseRetryAfter("Wed, 21 Oct 2015 07:28:30 GMT", now)).toBe(30_000);
+    expect(parseRetryAfter("Wed, 21 Oct 2015 07:27:00 GMT", now)).toBe(0);
+    expect(parseRetryAfter("100000")).toBe(120_000);
+  });
+
+  it("treats an unparseable value as absent, never as zero", () => {
+    expect(parseRetryAfter("soon")).toBeUndefined();
+    expect(parseRetryAfter("")).toBeUndefined();
+    expect(parseRetryAfter(null)).toBeUndefined();
+  });
+});
+
 describe("what goes in the body", () => {
+  it("sends the key as a bearer token, and nothing when there is none", async () => {
+    const headers: Record<string, string>[] = [];
+    const fetchImpl = (async (_u: string, init: { headers: Record<string, string> }) => {
+      headers.push(init.headers);
+      return jsonResponse({ choices: [{ message: { content: "" } }] });
+    }) as unknown as typeof fetch;
+    await new HttpTransport({ endpoint: "http://x", model: "m", apiKey: "sk-1", fetchImpl }).complete(req);
+    await new HttpTransport({ endpoint: "http://x", model: "m", fetchImpl }).complete(req);
+    expect(headers[0]!["authorization"]).toBe("Bearer sk-1");
+    expect(headers[1]!["authorization"]).toBeUndefined();
+  });
+
+  it("accepts a base URL that already ends in /v1", async () => {
+    // The OpenAI SDKs take the base URL with `/v1`, so that is what gets
+    // pasted from a vendor's example.
+    const urls: string[] = [];
+    const t = new HttpTransport({
+      endpoint: "http://x/v1/",
+      model: "m",
+      fetchImpl: (async (u: string) => {
+        urls.push(u);
+        return jsonResponse({ choices: [{ message: { content: "" } }] });
+      }) as unknown as typeof fetch,
+    });
+    await t.complete(req);
+    expect(urls[0]).toBe("http://x/v1/chat/completions");
+  });
+
+  it("keeps the server's cached-token count when it reports one", async () => {
+    // The hosted endpoint says how much of the prompt came from its prefix
+    // cache — the first direct measurement of what the frozen tool order buys.
+    const t = transportWith(async () =>
+      jsonResponse({
+        choices: [{ message: { content: "", reasoning: "r" } }],
+        usage: { prompt_tokens: 300, completion_tokens: 20, prompt_tokens_details: { cached_tokens: 256 } },
+      }),
+    );
+    const r = await t.complete(req);
+    expect(r.usage).toEqual({ promptTokens: 300, completionTokens: 20, cachedTokens: 256 });
+    expect(r.reasoningContent).toBe("r");
+  });
+
   it("sends the explicit output cap, seed and stop sequences", async () => {
     const seen: Record<string, unknown>[] = [];
     const t = transportWith(async (_u: string, init: { body: string }) => {
@@ -237,6 +329,26 @@ describe("the loop's retry policy", () => {
     ]);
     const r = await runLoop({ ...base, transport: t });
     expect(r.reason).toBe("transport_error");
+  });
+
+  it("waits at least Retry-After on a rate limit", async () => {
+    vi.useFakeTimers();
+    try {
+      const t = new ScriptedTransport([
+        new TransportError("429 slow down", { kind: "http", status: 429, retryAfterMs: 10_000 }),
+        doneBody("d"),
+        doneBody("d", { confirm: true }),
+      ]);
+      // Zero jitter: the ordinary schedule would retry immediately.
+      const run = runLoop({ ...base, transport: t, random: () => 0 });
+      await vi.advanceTimersByTimeAsync(9_000);
+      expect(t.seen).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(2_000);
+      const r = await run;
+      expect(r.reason).toBe("done");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("sleeps between attempts rather than hammering", async () => {

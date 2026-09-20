@@ -61,6 +61,14 @@ export interface RunnerOptions {
   agentCommand: string[];
   endpoint: string;
   model: string;
+  /**
+   * Credential for the endpoint, handed to each agent through its environment.
+   *
+   * Explicit rather than inherited: the campaign process may have read it from
+   * a `.env` file, in which case it is not in the environment to inherit. The
+   * agent reads it and withholds it from the commands it runs.
+   */
+  apiKey?: string;
   /** Where agent checkouts and journals go. Removed per row unless kept. */
   workRoot: string;
   keepArtifacts?: boolean;
@@ -148,7 +156,11 @@ async function runAgent(
     const child = spawn(opts.agentCommand[0]!, argv, {
       stdio: ["ignore", "ignore", "pipe"],
       detached: true,
-      env: { ...process.env, NO_COLOR: "1" },
+      env: {
+        ...process.env,
+        NO_COLOR: "1",
+        ...(opts.apiKey !== undefined ? { MOTIF_API_KEY: opts.apiKey } : {}),
+      },
     });
     let timedOut = false;
     const timer = setTimeout(() => {

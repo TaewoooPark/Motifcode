@@ -166,6 +166,23 @@ describe("live tail", () => {
 });
 
 describe("instruments", () => {
+  it("shows the server's cached-token count beside the prefix overlap", () => {
+    // The percentage is textual overlap computed here; the count is the
+    // endpoint's own claim, and appears only once an endpoint has made one.
+    const before = fold(SESSION);
+    expect(readings(before.instruments).find((r) => r.label === "prefix")!.value).not.toContain("cached");
+    const after = reduce(before, {
+      type: "usage",
+      contextTokens: 4700,
+      kvBytes: 1,
+      promptTokens: 4700,
+      completionTokens: 10,
+      cachedTokens: 4000,
+      requestMs: 100,
+    });
+    expect(readings(after.instruments).find((r) => r.label === "prefix")!.value).toContain("cached 4K");
+  });
+
   it("reports the local-only readings", () => {
     const state = fold(SESSION);
     expect(statusLine(state.instruments)).toMatchSnapshot();

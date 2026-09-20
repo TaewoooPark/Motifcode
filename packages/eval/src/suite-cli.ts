@@ -7,7 +7,11 @@
  *     motif-suite build   --benchmark <checkout> --out <dir> [--languages ...]
  *     motif-suite verify  --benchmark <checkout> --out <dir> [--languages ...]
  *     motif-suite run     --manifest <json> --benchmark <checkout> --out <dir> \
- *                         --agent <path to motif.js> --endpoint <url> --model <id>
+ *                         --agent <path to motif.js> [--endpoint <url>] [--model <id>]
+ *
+ * The endpoint, the model and the API key resolve the way `motif` resolves
+ * them — flags, then `MOTIF_*` in the environment, then `.env` — so a campaign
+ * and the sessions it spawns talk to the same server with the same credential.
  *
  * `verify` asks two different questions and keeps their answers apart.
  *
@@ -37,6 +41,7 @@ import { execFileSync } from "node:child_process";
 import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { resolveEndpointConfig, withholdSecrets } from "@motifcode/core";
 import { validateManifest } from "./manifest.js";
 import { countStatuses, formatCounts, materialize, passed, planRuns, resolvedRate } from "./results.js";
 import { runAll } from "./runner.js";
@@ -138,7 +143,7 @@ async function main(): Promise<number> {
     process.stderr.write(
       "usage: motif-suite <build|verify> --benchmark <polyglot checkout> --out <dir>\n" +
         "       [--languages python,javascript] [--limit N] [--node-path <node_modules>]\n" +
-        "  run also takes --manifest, --agent, --model, [--endpoint] [--results] [--exclude] [--concurrency N] [--keep]\n",
+        "  run also takes --manifest, --agent, [--model] [--endpoint] [--results] [--exclude] [--concurrency N] [--keep]\n",
     );
     return 2;
   }
@@ -307,8 +312,15 @@ async function campaign(
 ): Promise<number> {
   const manifestPath = str(flags, "manifest");
   const agent = str(flags, "agent");
-  const endpoint = str(flags, "endpoint", "http://127.0.0.1:8080");
-  const model = str(flags, "model");
+  const connection = resolveEndpointConfig({
+    flags: {
+      ...(str(flags, "endpoint") ? { endpoint: str(flags, "endpoint") } : {}),
+      ...(str(flags, "model") ? { model: str(flags, "model") } : {}),
+    },
+  });
+  const { endpoint, model, apiKey } = connection;
+  // The agents get the key explicitly; nothing else spawned from here should.
+  withholdSecrets(process.env);
   const results = str(flags, "results", "results.jsonl");
   const exclude = new Set(str(flags, "exclude").split(",").filter(Boolean));
   const concurrency = Number(str(flags, "concurrency", "1"));
@@ -316,8 +328,8 @@ async function campaign(
   // right default for a campaign of hundreds and the wrong one the first time a
   // status shows up that nobody expected.
   const keepArtifacts = flags["keep"] === true || str(flags, "keep") === "true";
-  if (!manifestPath || !agent || !model) {
-    process.stderr.write("run needs --manifest, --agent and --model\n");
+  if (!manifestPath || !agent) {
+    process.stderr.write("run needs --manifest and --agent\n");
     return 2;
   }
 
@@ -357,6 +369,7 @@ async function campaign(
       agentCommand: agent.split(" "),
       endpoint,
       model,
+      ...(apiKey !== undefined ? { apiKey } : {}),
       workRoot,
       concurrency,
       keepArtifacts,

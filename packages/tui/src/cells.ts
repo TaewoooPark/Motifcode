@@ -59,6 +59,13 @@ export interface Instruments {
    * needs streaming, which the action path deliberately does not use.
    */
   requestTokensPerSecond: number;
+  /**
+   * Prompt tokens the server said it served from cache on the last request.
+   *
+   * The `prefix` reading is textual overlap computed here; this is the
+   * server's own count, and undefined until a server has reported one.
+   */
+  cachedTokens?: number;
   turn: number;
 }
 
@@ -220,6 +227,7 @@ export function reduce(state: ViewState, event: LoopEvent): ViewState {
       if (out > 0 && event.requestMs > 0) {
         inst.requestTokensPerSecond = (out / event.requestMs) * 1000;
       }
+      if (event.cachedTokens !== undefined) inst.cachedTokens = event.cachedTokens;
       break;
     }
 

@@ -10,7 +10,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, chmodSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, chmodSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -247,5 +247,20 @@ describe("runner", () => {
 
     await runRow(options(agent, true), planned, instance());
     expect(existsSync(join(workRoot, "c--calc-1--1--0", "session.jsonl"))).toBe(true);
+  });
+
+  it("hands the agent the endpoint credential through its environment", async () => {
+    // The campaign may have read the key from a `.env` the agents never see,
+    // so it travels explicitly. Kept artifacts are the only way to look.
+    const agent = fakeAgent(
+      `printf '%s' "\${MOTIF_API_KEY:-unset}" > "$cwd/key.txt"\n${SESSION_END("done")}`,
+    );
+    const row = await runRow({ ...options(agent, true), apiKey: "sk-campaign" }, { ...planned, seed: 7 }, instance());
+    expect(row.status).toBe("completed");
+    const rowDir = join(workRoot, "c--calc-1--7--0");
+    expect(readFileSync(join(rowDir, "checkout", "key.txt"), "utf8")).toBe("sk-campaign");
+    // Kept on purpose above; not left for the tests after this one.
+    git(["worktree", "remove", "--force", join(rowDir, "checkout")]);
+    rmSync(rowDir, { recursive: true, force: true });
   });
 });
