@@ -209,22 +209,26 @@ export async function doctor(opts: DoctorOptions): Promise<Check[]> {
   // misread. What comes back says whether the server runs a tool-call parser
   // and a reasoning parser — the two things that, absent, make every session
   // look like a model that cannot follow the format.
+  // The same body both times, so the second request's prefix is byte-identical
+  // to the first's — which is the only way the server has anything to report a
+  // cache hit against.
+  const probeBody = JSON.stringify({
+    model: opts.model,
+    temperature: SAMPLING_DEFAULTS.temperature,
+    top_p: SAMPLING_DEFAULTS.top_p,
+    stream: false,
+    max_tokens: 256,
+    messages: [
+      { role: "system", content: "You are a coding agent. Finish by calling the `done` tool." },
+      { role: "user", content: 'Call `done` now with the summary "ok". Do nothing else.' },
+    ],
+    tools: [PROBE_TOOL],
+  });
   try {
     const res = await fetchImpl(`${endpoint}/v1/chat/completions`, {
       method: "POST",
       headers,
-      body: JSON.stringify({
-        model: opts.model,
-        temperature: SAMPLING_DEFAULTS.temperature,
-        top_p: SAMPLING_DEFAULTS.top_p,
-        stream: false,
-        max_tokens: 256,
-        messages: [
-          { role: "system", content: "You are a coding agent. Finish by calling the `done` tool." },
-          { role: "user", content: 'Call `done` now with the summary "ok". Do nothing else.' },
-        ],
-        tools: [PROBE_TOOL],
-      }),
+      body: probeBody,
     });
     if (res.status === 401 || res.status === 403) {
       const text = (await res.text().catch(() => "")).trim().slice(0, 200);
@@ -281,20 +285,49 @@ export async function doctor(opts: DoctorOptions): Promise<Check[]> {
               }
             : { name: "reasoning parser", state: "unknown", detail: "no reasoning in the probe response" },
       );
-      const cached = json.usage?.prompt_tokens_details?.cached_tokens;
+      // A single cold probe always reports zero cached tokens, which reads as
+      // "caching is off" when it is merely the first request. So the same body
+      // goes out a second time: on a caching server the shared prefix — the
+      // tools block and the system turn, the bytes the frozen tool order exists
+      // to keep alive — now comes back as a hit. `prompt_tokens_details` absent
+      // altogether means the API does not report it at all.
+      let cached = json.usage?.prompt_tokens_details?.cached_tokens;
+      const reports = cached !== undefined;
+      try {
+        const again = await fetchImpl(`${endpoint}/v1/chat/completions`, {
+          method: "POST",
+          headers,
+          body: probeBody,
+        });
+        if (again.ok) {
+          const json2 = (await again.json()) as ProbeResponse;
+          const c2 = json2.usage?.prompt_tokens_details?.cached_tokens;
+          if (typeof c2 === "number") cached = c2;
+        }
+      } catch {
+        // The first probe already answered the questions that matter; a failed
+        // warm-up just leaves the cache figure as the cold one.
+      }
       checks.push(
-        typeof cached === "number"
+        typeof cached === "number" && cached > 0
           ? {
               name: "prefix caching",
               state: "ok",
-              detail: `the endpoint reports cached prompt tokens (${cached} on this probe)`,
+              detail: `the endpoint served ${cached} prompt tokens from its prefix cache on a repeated request`,
             }
-          : {
-              name: "prefix caching",
-              state: "unknown",
-              detail: "not reported by the API",
-              fix: "the frozen, canonically ordered tool list exists to keep the cached prefix alive; whether the server caches cannot be seen from here",
-            },
+          : reports
+            ? {
+                name: "prefix caching",
+                state: "unknown",
+                detail: "the endpoint reports cached tokens but served none on this probe",
+                fix: "a two-request probe cannot always warm the cache; in a real session the frozen tool order keeps the prefix alive across turns",
+              }
+            : {
+                name: "prefix caching",
+                state: "unknown",
+                detail: "not reported by the API",
+                fix: "the frozen, canonically ordered tool list exists to keep the cached prefix alive; whether the server caches cannot be seen from here",
+              },
       );
     }
   } catch (err) {

@@ -501,7 +501,7 @@ export function repairContext(tools: Tool[] | undefined): RepairContext {
  * travels with the value.
  */
 export interface RepairInfo {
-  kind: "none" | "envelope" | "escape" | "quote" | "bracket" | "truncation";
+  kind: "none" | "envelope" | "escape" | "quote" | "bracket" | "truncation" | "detag";
   /** A reading was guessed where more than one was possible. */
   lossy: boolean;
   /** The payload was structurally whole; nothing was invented to close it. */
@@ -732,4 +732,66 @@ export function looksLikeLeakedToolCall(result: ParseResult): boolean {
   if (result.calls.length > 0) return false;
   if (result.unrecoverable.length > 0) return true;
   return /<tool_call>|<\/tool_call>/.test(result.content);
+}
+
+/** Strip a single surrounding ```json … ``` (or bare ```) fence, if the whole string is one. */
+function stripLoneFence(s: string): string {
+  const m = /^```(?:json|tool_call)?\s*([\s\S]*?)\s*```$/.exec(s.trim());
+  return m ? (m[1] ?? "").trim() : s.trim();
+}
+
+/**
+ * Recover a tool call the model emitted as a bare object, with no `<tool_call>`
+ * wrapper for the server's parser to find.
+ *
+ * MEASURED on the hosted endpoint, 2026-09-20: on a minority of turns Motif-3
+ * writes the call straight into the body — `{"name": "bash", "arguments":
+ * {…}}` — and the server, which lifts calls out of `<tool_call>` tags, leaves
+ * it in `content` with `tool_calls` empty. To a stock harness that is an empty
+ * turn and the action is lost, which on this model is indistinguishable from a
+ * final answer. The payload is not malformed: it is the right call missing its
+ * envelope, so recovering it is the same job the ladder does for malformed JSON
+ * *inside* the tags — and it is done through the same ladder, so a bare call
+ * that is *also* slightly malformed still recovers.
+ *
+ * Deliberately strict about scope: the whole trimmed body (optionally one code
+ * fence) must BE the object, and its `name` must be a registered tool. A call
+ * object quoted in the middle of an explanation is not this — that is
+ * `contentLeaksToolCall`, which asks the loop to re-prompt rather than run
+ * something the model was only describing.
+ */
+export function recoverBareToolCall(content: string, ctx: RepairContext): ParsedToolCall | null {
+  const body = stripLoneFence(content);
+  if (!body.startsWith("{") || !body.endsWith("}")) return null;
+  const strict = strictLoad(body);
+  const outcome: RepairOutcome =
+    strict !== null ? { value: coerceArgumentsWrapper(strict), info: CLEAN } : repairBlockDetailed(body, ctx);
+  if (outcome.value === null) return null;
+  const name = typeof outcome.value["name"] === "string" ? (outcome.value["name"] as string) : "";
+  // Only a registered name: a lone `{"name": "foo"}` where `foo` is not a tool
+  // is likely prose that happens to be JSON, not a dropped call.
+  if (name === "" || !ctx.specs.has(name)) return null;
+  return {
+    name,
+    arguments: asArguments(outcome.value["arguments"]),
+    repaired: true,
+    repair: { kind: "detag", lossy: outcome.info.lossy, complete: outcome.info.complete },
+  };
+}
+
+/**
+ * Does this body carry a tool call the parser did not lift out?
+ *
+ * Two shapes: a literal `<tool_call>` fragment (the classic leak), or a bare
+ * JSON object naming a registered tool sitting among otherwise-prose content —
+ * the tagless leak. This is only a signal to *re-prompt*, never a licence to
+ * execute: a call the model merely described in prose must not run. A whole-body
+ * bare call is handled first, and executed, by `recoverBareToolCall`.
+ */
+export function contentLeaksToolCall(content: string, ctx: RepairContext): boolean {
+  if (/<\/?tool_call>/.test(content)) return true;
+  for (const m of content.matchAll(/\{[^{}]*"name"\s*:\s*"([a-z_]+)"[\s\S]*?\}/g)) {
+    if (ctx.specs.has(m[1]!)) return true;
+  }
+  return false;
 }

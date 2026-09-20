@@ -32,6 +32,7 @@
 import {
   ToolValidator,
   callDigest,
+  contentLeaksToolCall,
   formatErrors,
   getCodec,
   looksLikeLeakedToolCall,
@@ -644,7 +645,9 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
         parsed.unrecoverable.length > 0 ||
         parsed.truncated ||
         (parsed.invalidArguments?.length ?? 0) > 0 ||
-        (channel === "toolcall" && looksLikeLeakedToolCall(parseToolCalls(split.content, ctx)));
+        (channel === "toolcall" &&
+          (looksLikeLeakedToolCall(parseToolCalls(split.content, ctx)) ||
+            contentLeaksToolCall(split.content, ctx)));
       if (replyEnds && !leaked && response.finishReason !== "length") {
         session.appendAll(codec.serializeAssistant(split.content, split.reasoning, parsed));
         checkpoint();
@@ -683,6 +686,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
         channel,
         consecutiveNoAction,
         lastObservation,
+        !leaked,
       );
       if (consecutiveNoAction === 1) {
         handBack(nudge);
@@ -964,15 +968,26 @@ function refusalPrompt(refusals: readonly Refusal[], channel: ChannelId): string
  * It carries state. An instruction that repeats the format rules gives a stuck
  * model nothing to act on; the tail of the last tool output is the thing it was
  * about to respond to.
+ *
+ * `cleanReply` is the turn that parsed fine and simply carried no action — a
+ * greeting, an answer, or the announce-then-stop failure — as opposed to broken
+ * syntax. There the format lecture is noise and, worse, an invitation to invent
+ * work: the observed harm is a model with no real task running `bash` around the
+ * filesystem to find something to do. So it is steered to `done` first, and told
+ * in as many words not to go looking.
  */
 function repairPrompt(
   problem: string,
   channel: ChannelId,
   attempt = 1,
   lastObservation = "",
+  cleanReply = false,
 ): string {
-  const how =
-    channel === "toolcall"
+  const how = cleanReply
+    ? "If the task is already complete, or the message only needs an answer, call `done` now" +
+      " with that answer as the summary. Otherwise take the next concrete step toward the task" +
+      " above — do not read files or run commands looking for unrelated work to do."
+    : channel === "toolcall"
       ? "Emit a well-formed `<tool_call>` block. Watch backslashes: inside JSON strings, shell `$` and regex metacharacters must be escaped or avoided."
       : channel === "object"
         ? "Reply with a single well-formed JSON object matching the schema you were given."

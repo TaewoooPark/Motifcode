@@ -117,3 +117,50 @@ describe("server-extracted calls", () => {
     expect(r.actions[0]).toEqual({ kind: "done", summary: "s", confirm: true });
   });
 });
+
+describe("toolcall channel — a call written without its tags", () => {
+  const bareTools: Tool[] = [
+    {
+      type: "function",
+      function: {
+        name: "term",
+        parameters: {
+          type: "object",
+          properties: { keystrokes: { type: "string" }, duration_s: { type: "number" } },
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "done",
+        parameters: {
+          type: "object",
+          properties: { summary: { type: "string" }, confirm: { type: "boolean" } },
+          additionalProperties: false,
+        },
+      },
+    },
+  ];
+  const bareCtx = repairContext(bareTools);
+
+  it("turns a bare tool-call object into a tool action", () => {
+    const r = toolcall.parse('{"name": "term", "arguments": {"keystrokes": "ls\\n", "duration_s": 1}}', bareCtx);
+    expect(r.actions).toEqual([
+      { kind: "tool", name: "term", arguments: { keystrokes: "ls\n", duration_s: 1 }, repaired: true, repair: { kind: "detag", lossy: false, complete: true } },
+    ]);
+    expect(r.content).toBe("");
+  });
+
+  it("turns a bare done object into a done action, confirmation flag and all", () => {
+    const r = toolcall.parse('{"name": "done", "arguments": {"summary": "s", "confirm": true}}', bareCtx);
+    expect(r.actions[0]).toMatchObject({ kind: "done", summary: "s", confirm: true });
+  });
+
+  it("leaves genuine prose alone", () => {
+    const r = toolcall.parse("All done — the tests pass.", bareCtx);
+    expect(r.actions).toEqual([]);
+    expect(r.content).toBe("All done — the tests pass.");
+  });
+});

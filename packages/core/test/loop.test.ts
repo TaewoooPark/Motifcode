@@ -824,6 +824,42 @@ describe("the conversational ending", () => {
   });
 });
 
+describe("a tool call the model wrote without its tags", () => {
+  it("runs a whole-body bare call instead of losing the turn", async () => {
+    // The model wrote the call object straight into the body, no `<tool_call>`
+    // wrapper, and a parser server left it in `content`. Recovering it turns a
+    // silently dropped action into the call the model asked for.
+    const { events, emit } = collect();
+    const transport = new ScriptedTransport([
+      '</think>{"name": "bash", "arguments": {"command": "ls"}}',
+      doneBody("d"),
+      doneBody("d", { confirm: true }),
+    ]);
+    const r = await runLoop({ ...base, transport, executor: okExecutor, emit });
+    expect(r.reason).toBe("done");
+    const started = kinds(events, "tool_start") as Extract<LoopEvent, { type: "tool_start" }>[];
+    expect(started).toHaveLength(1);
+    expect(started[0]!.call.name).toBe("bash");
+    expect(started[0]!.call.arguments).toEqual({ command: "ls" });
+    expect(started[0]!.call.repaired).toBe(true);
+  });
+
+  it("re-prompts, rather than answering, when a call is only quoted in prose", async () => {
+    // A call the model described is not a call it made. In a conversation it
+    // must not be shown to the person as the answer, and it must not run.
+    const { events, emit } = collect();
+    const transport = new ScriptedTransport([
+      '</think>Here is the plan: {"name": "bash", "arguments": {"command": "ls"}} — I will run it next.',
+      doneBody("d"),
+    ]);
+    const r = await runLoop({ ...base, transport, executor: okExecutor, emit, replyEnds: true, confirmDone: false });
+    expect(r.reason).toBe("done");
+    expect(transport.seen).toHaveLength(2);
+    expect(kinds(events, "tool_start")).toHaveLength(0);
+    expect(kinds(events, "repair").length).toBeGreaterThan(0);
+  });
+});
+
 describe("server-extracted tool calls", () => {
   it("uses tool_calls the server lifted out of the body", async () => {
     // A server running a tool-call parser — which is what

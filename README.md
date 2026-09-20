@@ -291,6 +291,24 @@ injecting the misbehaviour: invalid escapes, truncated tool calls, unparseable
 bodies, empty turns and a dead server are all faults the suite produces on
 purpose, and the ones the real model produced are in it because it did.
 
+### Measured against the hosted endpoint
+
+Checked directly against `llm.onerouter.pro`, 2026-09-20, and what each finding
+forced:
+
+| What the endpoint does | What it means here |
+|---|---|
+| Returns `tool_calls`, `reasoning` and `usage.prompt_tokens_details.cached_tokens` as their own fields | The native `toolcall` channel is the one that runs; the client repair ladder is a second line of defence behind the server's own |
+| Renders an assistant turn's `reasoning_content` back into the prompt, and reuses the frozen tools-and-system prefix from the second identical request onward | Reasoning continuity and the frozen tool order are load-bearing, not decoration — real sessions run 90–98% of each prompt from cache |
+| Has no `/v1/completions` | The `object` and `raw` channels, the adaptive downgrade and `toolkit/prune/` need a local completions-capable server; they do not run here |
+| Occasionally writes a tool call as a bare object with no `<tool_call>` tags | Recovered and run rather than shown as an answer — the same job the ladder does for malformed JSON *inside* the tags |
+
+The three protocols the router exposes — `/v1/chat/completions`,
+`/v1/responses` and Anthropic-style `/v1/messages` — mean Motif-3 is reachable
+from Codex, Claude Code and other harnesses too; what this one adds is a prompt
+laid out for the model's own template, a much smaller per-request context, and
+handling for the turn the model drops.
+
 ### Motif-3 links
 
 | | |

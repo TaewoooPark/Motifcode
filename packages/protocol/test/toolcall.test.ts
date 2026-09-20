@@ -10,8 +10,10 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  contentLeaksToolCall,
   looksLikeLeakedToolCall,
   parseToolCalls,
+  recoverBareToolCall,
   repairBlock,
   repairContext,
   repairInvalidEscapes,
@@ -321,5 +323,47 @@ describe("truncation is not the same as a missing tag", () => {
     const r = parseToolCalls('<tool_call>{"name": "run_code", "arguments": {"cmd": "ls"}</tool_call>', ctx);
     expect(r.calls).toHaveLength(1);
     expect(r.calls[0]!.repair).toMatchObject({ complete: false });
+  });
+});
+
+describe("a tool call written without its tags", () => {
+  // MEASURED on the hosted endpoint: on some turns the model writes the call
+  // object straight into the body, no `<tool_call>` wrapper, and the server's
+  // parser leaves it in `content` with `tool_calls` empty. That is a dropped
+  // call, not an answer, and recovering it is the same job as repairing one
+  // inside the tags.
+  it("recovers a whole-body object naming a registered tool", () => {
+    const call = recoverBareToolCall('{"name": "run_code", "arguments": {"cmd": "ls"}}', ctx);
+    expect(call).toMatchObject({ name: "run_code", arguments: { cmd: "ls" }, repaired: true });
+    expect(call!.repair).toMatchObject({ kind: "detag" });
+  });
+
+  it("recovers through the ladder when the bare object is also malformed", () => {
+    const call = recoverBareToolCall('{"name": "search", "arguments": {"queries": ["a", "b"}}', ctx);
+    expect(call).toMatchObject({ name: "search", arguments: { queries: ["a", "b"] } });
+  });
+
+  it("strips a lone ```json fence around the object", () => {
+    const call = recoverBareToolCall('```json\n{"name": "note", "arguments": {"text": "hi"}}\n```', ctx);
+    expect(call).toMatchObject({ name: "note", arguments: { text: "hi" } });
+  });
+
+  it("does not recover a name that is not a registered tool", () => {
+    expect(recoverBareToolCall('{"name": "delete_everything", "arguments": {}}', ctx)).toBeNull();
+  });
+
+  it("does not recover a call quoted in the middle of prose", () => {
+    // A described call is not a dropped one; running it would be running
+    // something the model was only talking about.
+    const prose = 'I would call {"name": "run_code", "arguments": {"cmd": "ls"}} but let me check first.';
+    expect(recoverBareToolCall(prose, ctx)).toBeNull();
+  });
+
+  it("flags an embedded registered-tool object as a leak to re-prompt", () => {
+    const prose = 'Here is the plan: {"name": "run_code", "arguments": {"cmd": "ls"}} — proceeding.';
+    expect(contentLeaksToolCall(prose, ctx)).toBe(true);
+    expect(contentLeaksToolCall("Let me write the file directly:", ctx)).toBe(false);
+    expect(contentLeaksToolCall('{"name": "unknown_thing", "arguments": {}}', ctx)).toBe(false);
+    expect(contentLeaksToolCall("stray </tool_call> tag", ctx)).toBe(true);
   });
 });

@@ -21,7 +21,7 @@
  * The core loop is channel-agnostic: every channel yields the same `Action[]`.
  */
 
-import { parseToolCalls, type RepairContext, type RepairInfo } from "./toolcall.js";
+import { parseToolCalls, recoverBareToolCall, type RepairContext, type RepairInfo } from "./toolcall.js";
 import { toolCallParts, unwrapTool, type Tool, type ToolCall } from "./types.js";
 
 export type ChannelId = "toolcall" | "object" | "raw";
@@ -195,6 +195,33 @@ class ToolCallChannel implements Channel {
             ...(c.repair ? { repair: c.repair } : {}),
           },
     );
+    // No `<tool_call>` block and no server-extracted call, but the body may
+    // still BE a call the model wrote without the tags. Recovering it turns a
+    // silently lost turn into the action the model asked for; it then flows
+    // through the same validation and permission gate as any other call.
+    if (actions.length === 0) {
+      const bare = recoverBareToolCall(r.content, ctx);
+      if (bare) {
+        const action: Action =
+          bare.name === "done"
+            ? {
+                kind: "done",
+                summary: String(bare.arguments["summary"] ?? ""),
+                ...(typeof bare.arguments["confirm"] === "boolean"
+                  ? { confirm: bare.arguments["confirm"] as boolean }
+                  : {}),
+                ...(bare.repair ? { repair: bare.repair } : {}),
+              }
+            : {
+                kind: "tool",
+                name: bare.name,
+                arguments: bare.arguments,
+                repaired: true,
+                ...(bare.repair ? { repair: bare.repair } : {}),
+              };
+        return { actions: [action], content: "", unrecoverable: [], truncated: false };
+      }
+    }
     return {
       actions,
       content: r.content.trim(),

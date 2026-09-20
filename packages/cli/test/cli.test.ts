@@ -403,7 +403,7 @@ describe("doctor", () => {
                 },
               },
             ],
-            usage: { prompt_tokens_details: { cached_tokens: 0 } },
+            usage: { prompt_tokens_details: { cached_tokens: 128 } },
           },
         };
         return json(r.body ?? {}, r.status ?? 200);
