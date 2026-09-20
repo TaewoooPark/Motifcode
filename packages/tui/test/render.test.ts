@@ -140,6 +140,18 @@ describe("transcript", () => {
     expect(out).toContain("  ⎿  applied");
   });
 
+  it("shows paths under the working directory relative to it", () => {
+    const state = fold([
+      { type: "tool_start", call: { id: "w", name: "write", arguments: { content: "x", path: "/work/repo/src/a.ts" }, repaired: false, validated: true } },
+      { type: "tool_end", id: "w", ok: true, output: "created /work/repo/src/a.ts (1 lines, 1 bytes)", ms: 1 },
+      { type: "tool_start", call: { id: "b", name: "bash", arguments: { command: "cd /work/repo && ls /work/repo/src" }, repaired: false, validated: true } },
+      { type: "tool_end", id: "b", ok: true, output: "a.ts", ms: 1 },
+    ]);
+    const out = renderTranscript(state, { ...OPTS, cwd: "/work/repo" });
+    expect(out).toContain("⏺ Write(src/a.ts)");
+    expect(out).toContain("⏺ Bash(ls src)");
+  });
+
   it("shows a tool as its title, its argument, and what came back under a corner", () => {
     const state = fold([
       { type: "tool_start", call: { id: "x", name: "bash", arguments: { command: "ls -la" }, repaired: false, validated: true } },

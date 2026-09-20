@@ -31,6 +31,14 @@ export interface RenderOptions {
   /** Cap on tool output lines shown inline. */
   outputLines?: number;
   /**
+   * The working directory, so a path under it is shown relative to it.
+   *
+   * The model writes absolute paths, and an absolute path under a long
+   * temporary directory is all a head line can hold. The transcript shows
+   * what the person would type.
+   */
+  cwd?: string;
+  /**
    * Show keyboard hints.
    *
    * False unless a key handler is actually attached. Printing a hint when
@@ -84,8 +92,20 @@ function clip(text: string, maxLines: number): { lines: string[]; hidden: number
   return { lines: all.slice(0, maxLines), hidden: all.length - maxLines };
 }
 
+/** `s` with every mention of the working directory shortened to a relative path. */
+export function relativise(s: string, cwd: string | undefined): string {
+  if (!cwd) return s;
+  const base = cwd.replace(/\/+$/, "");
+  if (base === "") return s;
+  return s.split(`${base}/`).join("").split(base).join(".");
+}
+
 /** The one argument worth showing in a tool's head line, on one line. */
-function headArg(name: string, args: Record<string, unknown>): string {
+function headArg(name: string, args: Record<string, unknown>, cwd?: string): string {
+  return relativise(headArgRaw(name, args), cwd);
+}
+
+function headArgRaw(name: string, args: Record<string, unknown>): string {
   const entries = Object.entries(args);
   if (entries.length === 0) return "";
   if (name === "task") {
@@ -105,11 +125,11 @@ function headArg(name: string, args: Record<string, unknown>): string {
 }
 
 /** `⏺ Bash(ls -la)`, fitted to the width. */
-function toolHead(cell: Extract<Cell, { kind: "tool" }>, width: number): string {
+function toolHead(cell: Extract<Cell, { kind: "tool" }>, width: number, cwd?: string): string {
   const title = TOOL_TITLES[cell.name] ?? cell.name;
   const suffix = cell.repaired ? " · repaired" : "";
   const room = Math.max(8, width - displayWidth(`${BULLET} ${title}()${suffix}`));
-  const arg = truncateToWidth(headArg(cell.name, cell.args), room);
+  const arg = truncateToWidth(headArg(cell.name, cell.args, cwd), room);
   return `${BULLET} ${title}(${arg})${suffix}`;
 }
 
@@ -234,7 +254,7 @@ function renderCellRaw(cell: Cell, opts: RenderOptions): StyledLine[] {
       return [...proseLines(cell.text, `${BULLET} `), blank];
 
     case "tool": {
-      const out: StyledLine[] = [line(toolHead(cell, width), "bullet")];
+      const out: StyledLine[] = [line(toolHead(cell, width, opts.cwd), "bullet")];
       // A patch is worth seeing as a diff, whatever it did.
       if (cell.name === "apply_patch" && typeof cell.args["patch"] === "string") {
         out.push(...diffLines(cell.args["patch"], Math.max(outputLines, 12)));

@@ -227,6 +227,15 @@ describe("cli process end to end", () => {
     expect(r.stdout).toBe("The answer is 42.\n");
     expect(server.bodies).toHaveLength(1);
     expect(String(server.bodies[0]!.messages[0]!.content)).toContain("A reply with no tool call ends your turn");
+    // The short spelling, which a single-dash parser used to read as the task.
+    const short = await runCli(["-p", "what is the answer?", "--endpoint", server.endpoint], dir);
+    expect(short.code).toBe(0);
+    expect(short.stdout).toBe("The answer is 42.\n");
+    expect(server.bodies[1]!.messages[1]!.content).toBe("what is the answer?");
+    // A boolean flag before the task must not eat the task.
+    const flagFirst = await runCli(["--no-hero", "--print", "what is the answer?", "--endpoint", server.endpoint], dir);
+    expect(flagFirst.code).toBe(0);
+    expect(server.bodies[2]!.messages[1]!.content).toBe("what is the answer?");
   }, 30_000);
 
   it("prints help and exits 2 for an empty task", async () => {

@@ -55,6 +55,8 @@ export interface ScreenOptions {
   showThinking?: boolean;
   /** Show tool output in full rather than clipped. Off by default. */
   verbose?: boolean;
+  /** The working directory, so paths under it are shown relative to it. */
+  cwd?: string;
   /** Prefer the shaded small hero over the plain one. */
   shadedHero?: boolean;
   /**
@@ -101,7 +103,8 @@ const SPINNER = ["✻", "✼", "✽", "✾"];
 /** The keys, for the panel `?` opens. */
 const SHORTCUTS = [
   "enter send · \\ + enter newline · esc interrupt or clear · ctrl-c twice quit · ctrl-d quit",
-  "↑ ↓ history · tab show or hide reasoning · ctrl-o full tool output · ctrl-l redraw · / commands · ? hide this",
+  "↑ ↓ history · tab show or hide reasoning · ctrl-o full tool output · ctrl-l redraw · shift-tab permissions",
+  "@ attach a file · ! run a shell line · # add a project note · / commands · ? hide this",
 ];
 
 /**
@@ -144,6 +147,7 @@ export class Screen {
   private streamTimer: NodeJS.Timeout | null = null;
   private showThinking: boolean;
   private verbose = false;
+  private cwd: string | undefined;
   private readonly shadedHero: boolean;
   private readonly interactive: boolean;
   private readonly now: () => number;
@@ -155,6 +159,7 @@ export class Screen {
     this.rowCount = opts.rows ?? (() => process.stdout.rows || 24);
     this.showThinking = opts.showThinking ?? false;
     this.verbose = opts.verbose ?? false;
+    this.cwd = opts.cwd;
     this.shadedHero = opts.shadedHero ?? false;
     this.interactive = opts.interactive ?? Boolean(process.stdout.isTTY);
     this.now = opts.now ?? (() => Date.now());
@@ -181,6 +186,7 @@ export class Screen {
       width: this.columns(),
       showThinking: this.showThinking,
       ...(this.verbose ? { outputLines: 1000 } : {}),
+      ...(this.cwd !== undefined ? { cwd: this.cwd } : {}),
       // Only advertise the key when something is listening for it.
       showShortcuts: this.detachInput !== null,
     };
@@ -406,6 +412,14 @@ export class Screen {
     return code ? paint(l.text, code) : l.text;
   }
 
+  /** Paths under this directory are shown relative to it from now on. */
+  setCwd(cwd: string): void {
+    this.cwd = cwd;
+    this.commits.reset();
+    this.clearFooter();
+    this.paint();
+  }
+
   /** Show tool output whole, or clipped to a few lines. Ctrl-O in the session. */
   toggleVerbose(): void {
     this.verbose = !this.verbose;
@@ -449,7 +463,7 @@ export class Screen {
    */
   private settledLines(): StyledLine[] {
     const opts = this.renderOptions;
-    const key = `${opts.width}|${opts.showThinking ? 1 : 0}|${opts.outputLines ?? ""}|${opts.showShortcuts ? 1 : 0}`;
+    const key = `${opts.width}|${opts.showThinking ? 1 : 0}|${opts.outputLines ?? ""}|${opts.showShortcuts ? 1 : 0}|${opts.cwd ?? ""}`;
     if (this.settledMemo && this.settledMemo.cells === this.state.cells && this.settledMemo.key === key) return this.settledMemo.lines;
     const lines = renderSettledStyled(this.state, opts);
     this.settledMemo = { cells: this.state.cells, key, lines };

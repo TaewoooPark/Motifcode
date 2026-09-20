@@ -50,6 +50,7 @@ import {
   mentionAt,
   mentionsIn,
   menuItemsFor,
+  relativise,
   type ComposerView,
   type Key,
   type MenuItem,
@@ -131,7 +132,7 @@ const CTRL_C_WINDOW_MS = 2000;
  * `/channel` would leave the next task reading a transcript in the wrong
  * format. Waiting, or interrupting, is the honest answer.
  */
-const BLOCKED_WHILE_RUNNING = new Set(["new", "clear", "channel", "resume", "cwd"]);
+const BLOCKED_WHILE_RUNNING = new Set(["new", "clear", "channel", "resume", "cwd", "compact"]);
 
 const MENU_ITEMS: MenuItem[] = COMMANDS.map((c) => ({
   name: c.name,
@@ -161,8 +162,8 @@ export class Chat {
   private shellSequence = 0;
   /** A `!command` in flight; tasks sent meanwhile wait behind it. */
   private shellBusy = false;
-  /** A tool call waiting for the person's yes or no. */
-  private pendingConfirm: { call: ToolInvocation; resolve: (v: "allow" | "deny") => void } | null = null;
+  /** A tool call waiting for the person's yes or no, and which of the three answers is selected. */
+  private pendingConfirm: { call: ToolInvocation; resolve: (v: "allow" | "deny") => void; selected: number } | null = null;
   /** Tools the person allowed for the rest of the session with `a`. */
   private readonly alwaysAllowed = new Set<string>();
   private active: ActiveTask | null = null;
@@ -452,31 +453,38 @@ export class Chat {
   /**
    * The person's answer to a pending tool call.
    *
-   * `y` or Enter allows it once, `a` allows that tool for the rest of the
-   * session, `n` or Esc declines. Anything else is ignored: the question
-   * stays until it is answered, and typing cannot slip past it.
+   * Three numbered answers, as in Claude Code's dialog: 1 runs it once, 2
+   * runs that tool without asking for the rest of the session, 3 declines.
+   * Up and down move between them and Enter takes the selected one; Esc
+   * declines; `y` and `n` stand for 1 and 3. Every other key is ignored:
+   * the question stays until it is answered, and typing cannot slip past
+   * it — a letter meant for the draft must not be able to grant a tool for
+   * the whole session, which a bare `a` once could.
    */
   private answerConfirm(key: Key): void {
     const pending = this.pendingConfirm;
     if (!pending) return;
-    let verdict: "allow" | "deny" | null = null;
-    if (key.type === "enter") verdict = "allow";
-    else if (key.type === "escape") verdict = "deny";
+    let choice: number | null = null;
+    if (key.type === "enter") choice = pending.selected;
+    else if (key.type === "escape") choice = 3;
+    else if (key.type === "up") pending.selected = pending.selected === 1 ? 3 : pending.selected - 1;
+    else if (key.type === "down") pending.selected = pending.selected === 3 ? 1 : pending.selected + 1;
     else if (key.type === "text") {
       const k = key.text.toLowerCase();
-      if (k === "y") verdict = "allow";
-      else if (k === "n") verdict = "deny";
-      else if (k === "a") {
-        this.alwaysAllowed.add(pending.call.name);
-        verdict = "allow";
-      }
+      if (k === "1" || k === "y") choice = 1;
+      else if (k === "2") choice = 2;
+      else if (k === "3" || k === "n") choice = 3;
     } else if (key.type === "ctrl" && key.key === "c") {
-      verdict = "deny";
       this.interrupt();
+      return;
     }
-    if (verdict === null) return;
+    if (choice === null) {
+      this.refresh();
+      return;
+    }
+    if (choice === 2) this.alwaysAllowed.add(pending.call.name);
     this.pendingConfirm = null;
-    pending.resolve(verdict);
+    pending.resolve(choice === 3 ? "deny" : "allow");
     this.refresh();
   }
 
@@ -484,15 +492,15 @@ export class Chat {
   private confirm(call: ToolInvocation): Promise<"allow" | "deny"> {
     if (this.settings.permissions === "auto" || this.alwaysAllowed.has(call.name)) return Promise.resolve("allow");
     return new Promise((resolve) => {
-      this.pendingConfirm = { call, resolve };
+      this.pendingConfirm = { call, resolve, selected: 1 };
       this.refresh();
     });
   }
 
   /** The question the panel shows for a call. */
-  private confirmView(call: ToolInvocation): { title: string; lines: string[]; choices: string } {
+  private confirmView(call: ToolInvocation, selected: number): { title: string; lines: string[]; choices: string } {
     const a = call.arguments;
-    const text = (k: string): string => (typeof a[k] === "string" ? (a[k] as string) : "");
+    const text = (k: string): string => relativise(typeof a[k] === "string" ? (a[k] as string) : "", this.settings.cwd);
     const preview = (s: string, max: number): string[] => {
       const lines = s.replace(/\s+$/, "").split("\n");
       return lines.length > max ? [...lines.slice(0, max), `… +${lines.length - max} lines`] : lines;
@@ -520,7 +528,12 @@ export class Chat {
         title = `Run ${call.name}?`;
         lines = preview(JSON.stringify(a), 4);
     }
-    return { title, lines, choices: `[y] yes   [a] always for ${call.name} this session   [n] no` };
+    const options = ["1 Yes", `2 Yes, and don't ask again for ${call.name} this session`, "3 No, and tell the model what to do instead"];
+    return {
+      title,
+      lines,
+      choices: options.map((o, i) => `${i + 1 === selected ? "❯" : " "} ${o}`).join("   "),
+    };
   }
 
   private menuItems(): MenuItem[] {
@@ -541,7 +554,7 @@ export class Chat {
     const view: ComposerView = {
       draft: this.composer.snapshot(),
       placeholder: PLACEHOLDER,
-      ...(this.pendingConfirm ? { confirm: this.confirmView(this.pendingConfirm.call) } : {}),
+      ...(this.pendingConfirm ? { confirm: this.confirmView(this.pendingConfirm.call, this.pendingConfirm.selected) } : {}),
       ...(items.length > 0 && !this.pendingConfirm
         ? { menu: { items, selected: clampSelection(this.menuSelected, items.length), prefix: this.mentionOpen() ? "@" : "/" } }
         : {}),
@@ -551,7 +564,7 @@ export class Chat {
   }
 
   private hintText(): string {
-    if (this.pendingConfirm) return "waiting for your answer";
+    if (this.pendingConfirm) return "1 2 3 or ↑↓ enter · esc declines";
     if (this.ctrlCArmedAt > 0 && this.now() - this.ctrlCArmedAt <= CTRL_C_WINDOW_MS) return "ctrl-c again to quit";
     if (this.queued.length > 0) {
       const first = this.queued[0]!.split("\n")[0]!;
@@ -859,11 +872,28 @@ export class Chat {
     for (const w of waiters) w();
   }
 
+  /**
+   * Stop the running task.
+   *
+   * Messages queued behind it are not sent: an interruption says stop, and
+   * launching the next task on its heels is the opposite. They go into the
+   * composer's history instead, where ↑ brings them back to be sent again or
+   * changed — Claude Code's "press up to edit queued messages".
+   */
   private interrupt(): void {
     if (this.pendingConfirm) {
       const pending = this.pendingConfirm;
       this.pendingConfirm = null;
       pending.resolve("deny");
+    }
+    if (this.queued.length > 0) {
+      const held = this.queued.splice(0);
+      this.composer.seedHistory(held);
+      this.screen.append({
+        kind: "notice",
+        level: "info",
+        text: `${held.length} queued message${held.length === 1 ? "" : "s"} not sent; ↑ brings ${held.length === 1 ? "it" : "them"} back`,
+      });
     }
     this.active?.abort.abort();
   }
@@ -1212,6 +1242,7 @@ export class Chat {
     if (this.active) return ["a task is running; wait for it or interrupt it first"];
     this.executor.close();
     this.settings.cwd = target;
+    this.screen.setCwd(target);
     this.executor = this.makeExecutor(target);
     return [`working directory is now ${target}`, "the persistent shell was restarted there"];
   }

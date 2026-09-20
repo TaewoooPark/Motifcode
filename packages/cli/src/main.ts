@@ -75,15 +75,45 @@ interface Args {
   flags: Record<string, string | boolean>;
 }
 
+/** One-letter spellings, as Claude Code has them: `-p` for `--print`, `-c` for `--continue`. */
+const SHORT_FLAGS: Record<string, string> = { p: "print", c: "continue", i: "interactive", v: "verbose", h: "help" };
+
+/**
+ * Flags that never take a value.
+ *
+ * The parser used to hand any flag the word after it, so `motif -p "fix the
+ * tests"` made the task the value of `--print` and ran with no task at all.
+ * Claude Code's most common invocation is flag first, then the prompt.
+ */
+const BOOLEAN_FLAGS = new Set([
+  "print",
+  "interactive",
+  "chat",
+  "continue",
+  "no-hero",
+  "thinking",
+  "verbose",
+  "experimental-channel",
+  "include-children",
+]);
+
 function parseArgs(argv: string[]): Args {
   const flags: Record<string, string | boolean> = {};
   const rest: string[] = [];
   let command = "run";
   for (let i = 0; i < argv.length; i++) {
-    const a = argv[i]!;
+    let a = argv[i]!;
+    // A short flag is its long form; the task text itself never starts with
+    // a dash and a single letter.
+    if (/^-[a-z]$/.test(a) && SHORT_FLAGS[a.slice(1)]) a = `--${SHORT_FLAGS[a.slice(1)]}`;
+    if (a === "--help") {
+      command = "help";
+      continue;
+    }
     if (a.startsWith("--")) {
       const eq = a.indexOf("=");
       if (eq !== -1) flags[a.slice(2, eq)] = a.slice(eq + 1);
+      else if (BOOLEAN_FLAGS.has(a.slice(2))) flags[a.slice(2)] = true;
       else if (argv[i + 1] && !argv[i + 1]!.startsWith("-")) flags[a.slice(2)] = argv[++i]!;
       else flags[a.slice(2)] = true;
     } else if (rest.length === 0 && ["doctor", "sessions", "resume", "skills", "agents", "plugins", "config", "lint", "distil", "metrics", "trust", "redact", "corpus-spec", "corpus-render", "help", "version"].includes(a)) {
@@ -785,7 +815,7 @@ async function main(): Promise<number> {
   }
   if ((wantsChat || !task) && tty && !resumeFrom) {
     const chat = new Chat({
-      screen: new Screen({ showThinking, verbose: args.flags["verbose"] === true }),
+      screen: new Screen({ showThinking, verbose: args.flags["verbose"] === true, cwd }),
       stdin: process.stdin,
       settings: {
         model,
@@ -868,7 +898,7 @@ async function main(): Promise<number> {
   }
 
   const transport = new HttpTransport({ endpoint, model, ...(apiKey !== undefined ? { apiKey } : {}) });
-  const screen = new Screen({ showThinking, verbose: args.flags["verbose"] === true });
+  const screen = new Screen({ showThinking, verbose: args.flags["verbose"] === true, cwd });
   const runId = new Date().toISOString().replace(/[:.]/g, "-");
   // `--journal` so a benchmark runner knows where the record went without
   // scraping a directory for the newest file. Two rows finishing in the same

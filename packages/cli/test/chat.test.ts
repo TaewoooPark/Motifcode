@@ -77,7 +77,7 @@ function session(transport: Transport, extra: Partial<ConstructorParameters<type
   const cwd = mkdtempSync(join(tmpdir(), "motif-chat-"));
   let now = 1_000_000;
   const chat = new Chat({
-    screen: new Screen({ write: (s) => out.push(s), columns: () => 100, interactive: true }),
+    screen: new Screen({ write: (s) => out.push(s), columns: () => 100, interactive: true, cwd }),
     stdin: stdin as unknown as NodeJS.ReadStream,
     settings: { model: "motif/motif-3", endpoint: "https://llm.onerouter.pro", channel: "toolcall", maxTurns: 20, cwd, theme: "motif", compactAt: 0.75, permissions: "auto" },
     channelPolicy: "fixed",
@@ -284,6 +284,20 @@ describe("interactive session", () => {
     expect(String(summaryRequest.messages[summaryRequest.messages.length - 1]!.content)).toContain("CONTEXT CHECKPOINT COMPACTION");
   });
 
+  it("refuses to compact while a task runs, since the task would hand back the old transcript", async () => {
+    const t = new GateTransport([...reply("later")]);
+    t.gated = true;
+    const s = session(t);
+    open.push(s);
+    s.type("go\r");
+    await vi.waitFor(() => expect(s.chat.running).toBe(true));
+    s.type("/compact\r");
+    await vi.waitFor(() => expect(s.screen()).toContain("/compact changes the conversation"));
+    expect(t.seen).toHaveLength(1);
+    t.open();
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+  });
+
   it("compacts on its own once a request crosses the threshold", async () => {
     // The fake endpoint reports 100 prompt tokens; a threshold below that
     // makes every task cross it, so the compaction runs right after.
@@ -411,8 +425,10 @@ describe("interactive session", () => {
     s.type("go\r");
     await vi.waitFor(() => expect(s.screen()).toContain("Run this command?"));
     expect(s.screen()).toContain("echo allowed-output");
-    expect(s.screen()).toContain("[y] yes");
-    s.type("y");
+    expect(s.screen()).toContain("❯ 1 Yes");
+    // Letters meant for a draft cannot answer; only the answers can.
+    s.type("hello");
+    s.type("1");
     await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
     expect(s.screen()).toContain("⎿  allowed-output");
   });
@@ -428,15 +444,34 @@ describe("interactive session", () => {
     open.push(s);
     s.type("go\r");
     await vi.waitFor(() => expect(s.screen()).toContain("Run this command?"));
-    s.type("n");
+    // Down twice lands on 3, No; Enter takes it.
+    s.type(`${ESC}[B${ESC}[B\r`);
     await vi.waitFor(() => expect(s.screen()).toContain("echo second"));
     // The model heard about the refusal in the tool result.
     const declined = t.seen[1]!.messages.find((m) => m.role === "tool");
     expect(String(declined?.content)).toContain("declined");
-    s.type("a");
+    s.type("2");
     // The third call ran without a question — a question would wait forever here.
     await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
     expect(s.screen()).toContain("⎿  third");
+  });
+
+  it("holds queued messages back when the task is interrupted, and ↑ brings them back", async () => {
+    const t = new GateTransport([...done("never"), ...reply("later")]);
+    t.gated = true;
+    const s = session(t);
+    open.push(s);
+    s.type("long one\r");
+    await vi.waitFor(() => expect(s.chat.running).toBe(true));
+    s.type("then this\r");
+    await vi.waitFor(() => expect(s.screen()).toContain("queued: then this"));
+    s.type(ESC);
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    expect(s.screen()).toContain("1 queued message not sent");
+    // Nothing was sent on the heels of the interruption.
+    expect(t.seen).toHaveLength(1);
+    s.type(`${ESC}[A`);
+    await vi.waitFor(() => expect(s.screen()).toContain("> then this"));
   });
 
   it("toggles permissions with shift-tab and says so", async () => {

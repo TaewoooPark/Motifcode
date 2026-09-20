@@ -102,7 +102,7 @@ const KEYS: readonly [string, string][] = [
   ["tab", "complete the selected command; on an empty prompt, show or hide reasoning"],
   ["?", "on an empty prompt, show or hide the key list"],
   ["shift-tab", "toggle permissions: ask before tools run, or run everything"],
-  ["y / a / n", "when asked about a tool call: allow once, allow that tool for the session, decline"],
+  ["1 / 2 / 3", "when asked about a tool call: run it once, stop asking for that tool this session, decline (↑↓ enter and esc work too)"],
   ["ctrl-o", "show tool output in full, or clipped again"],
   ["ctrl-l", "redraw the screen"],
   ["@path", "attach a file or directory to the message; @skill:name attaches a skill's instructions"],
@@ -315,7 +315,7 @@ export const COMMANDS: readonly SlashCommand[] = [
       if (args === "") {
         return ok("/permissions", [
           ctx.settings.permissions === "ask"
-            ? "ask: bash, write, apply_patch, term and mcp wait for a yes; y allows once, a allows that tool for the session, n declines"
+            ? "ask: bash, write, apply_patch, term and mcp wait for an answer; 1 runs it once, 2 stops asking for that tool this session, 3 declines"
             : "auto: every tool call runs without asking",
         ]);
       }
