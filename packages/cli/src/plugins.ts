@@ -4,11 +4,11 @@
  * The layout Claude Code uses, because a plugin written for it should drop
  * in here unchanged where the pieces overlap:
  *
- *     <root>/plugins/<name>/plugin.json       { "name", "description", "version" }
- *     <root>/plugins/<name>/skills/<s>/SKILL.md
- *     <root>/plugins/<name>/agents/<a>.md
+ *     {root}/plugins/{name}/plugin.json       { "name", "description", "version" }
+ *     {root}/plugins/{name}/skills/{s}/SKILL.md
+ *     {root}/plugins/{name}/agents/{a}.md
  *
- * with `<root>` being `~/.motif` for the person's plugins and `<repo>/.motif`
+ * with `{root}` being `~/.motif` for the person's plugins and `{repo}/.motif`
  * for the project's. A plugin's skills and agents register under their own
  * names; a plugin that ships a `commit` skill shadows the built-in one, and
  * a project plugin shadows a user plugin, the precedence everything else
@@ -44,7 +44,7 @@ export interface LoadedPlugins {
 function readManifest(dir: string): { name: string; description: string; version?: string } | null {
   const file = join(dir, "plugin.json");
   if (!existsSync(file)) return null;
-  const raw = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+  const raw = JSON.parse(readFileSync(file, "utf8")) as { [key: string]: unknown };
   const name = typeof raw["name"] === "string" && raw["name"] !== "" ? raw["name"] : null;
   if (!name) throw new Error(`${file}: plugin.json needs a name`);
   return {
@@ -54,7 +54,7 @@ function readManifest(dir: string): { name: string; description: string; version
   };
 }
 
-/** Load every plugin under `<root>/plugins`, in directory order. */
+/** Load every plugin under `{root}/plugins`, in directory order. */
 export function loadPluginsFrom(root: string, source: PluginInfo["source"]): LoadedPlugins {
   const out: LoadedPlugins = { plugins: [], skills: [], agents: [], problems: [] };
   const dir = join(root, "plugins");
@@ -124,13 +124,18 @@ export function loadPlugins(opts: { cwd: string; home: string }): LoadedPlugins 
 }
 
 export function describePlugins(loaded: LoadedPlugins): string[] {
-  if (loaded.plugins.length === 0) return ["no plugins; add one under ~/.motif/plugins/<name>/ or .motif/plugins/<name>/ with a plugin.json"];
-  const lines = loaded.plugins.map(
-    (p) =>
+  // Keep the install hint only when nothing was found and nothing failed.
+  // Malformed manifests still need their diagnostics when zero plugins loaded.
+  if (loaded.plugins.length === 0 && loaded.problems.length === 0) {
+    return ["no plugins; add one under ~/.motif/plugins/{name}/ or .motif/plugins/{name}/ with a plugin.json"];
+  }
+  const lines = loaded.plugins.map(function (p) {
+    return (
       `${p.name.padEnd(16)} ${p.description}${p.version ? ` (${p.version})` : ""}  ·  ${p.source}  ·  ` +
       `${p.skills.length} skill(s)${p.skills.length ? `: ${p.skills.join(", ")}` : ""}` +
-      `${p.agents.length ? `  ·  ${p.agents.length} agent(s): ${p.agents.join(", ")}` : ""}`,
-  );
+      `${p.agents.length ? `  ·  ${p.agents.length} agent(s): ${p.agents.join(", ")}` : ""}`
+    );
+  });
   for (const p of loaded.problems) lines.push(`! ${p}`);
   return lines;
 }

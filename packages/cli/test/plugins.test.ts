@@ -42,6 +42,9 @@ describe("plugins", () => {
     const loaded = loadPlugins({ cwd, home });
     expect(loaded.plugins).toEqual([]);
     expect(loaded.problems[0]).toContain("needs a name");
+    const lines = describePlugins(loaded);
+    expect(lines.some((line) => line.startsWith("!") && line.includes("needs a name"))).toBe(true);
+    expect(lines.join("\n")).not.toContain("no plugins");
   });
 
   it("says so when there are none", () => {
