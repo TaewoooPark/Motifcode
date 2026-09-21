@@ -287,3 +287,35 @@ describe("fault injection", () => {
     expect(res.finishReason).toBe("length");
   });
 });
+
+describe("recorded retry policy", () => {
+  it.each([
+    { status: 503, retryable: false, retryAfterMs: undefined },
+    { status: 429, retryable: true, retryAfterMs: 10000 },
+    { status: 429, retryable: true, retryAfterMs: 0 },
+  ])("preserves retry metadata through JSONL ($status, $retryable, $retryAfterMs)", async policy => {
+    const { TransportError } = await import("@motifcode/core");
+    const error = new TransportError("synthetic failure", { kind: "http", body: "fixture", ...policy });
+    const recording = new RecordingTransport(new ScriptedTransport([error]));
+    const request = { messages: [], tools: [] };
+    await expect(recording.complete(request)).rejects.toBe(error);
+    const replay = ReplayTransport.fromJSONL(toJSONL(recording.exchanges));
+    await expect(replay.complete(request)).rejects.toMatchObject({
+      name: "TransportError", message: "synthetic failure", kind: "http", body: "fixture", ...policy,
+    });
+  });
+
+  it("keeps the existing defaults for recordings without retry fields", async () => {
+    const { TransportError } = await import("@motifcode/core");
+    const recording = new RecordingTransport(new ScriptedTransport([
+      new TransportError("old failure", { kind: "http", status: 503 }),
+    ]));
+    const request = { messages: [], tools: [] };
+    await expect(recording.complete(request)).rejects.toThrow("old failure");
+    const exchange = JSON.parse(JSON.stringify(recording.exchanges[0]));
+    delete exchange.response.error.retryable;
+    delete exchange.response.error.retryAfterMs;
+    const replay = ReplayTransport.fromJSONL(toJSONL([exchange]));
+    await expect(replay.complete(request)).rejects.toMatchObject({ retryable: true, retryAfterMs: undefined });
+  });
+});
