@@ -56,6 +56,8 @@ export interface RecordedRequest {
 }
 
 export interface RecordedError {
+  retryable?: boolean;
+  retryAfterMs?: number;
   name: string;
   message: string;
   kind?: string;
@@ -319,7 +321,7 @@ export class RecordingTransport implements Transport {
       // A failed turn is part of the session. Recording only the successes
       // means a replay never exercises the retry path, which is the path this
       // stack spends the most time in.
-      const e = err as { name?: string; message?: string; kind?: string; status?: number; body?: string };
+      const e = err as Partial<RecordedError>;
       this.exchanges.push({
         scopeId: this.scopeId,
         turn: this.turn,
@@ -333,6 +335,8 @@ export class RecordingTransport implements Transport {
             ...(e.kind !== undefined ? { kind: e.kind } : {}),
             ...(e.status !== undefined ? { status: e.status } : {}),
             ...(e.body !== undefined ? { body: e.body } : {}),
+            ...(e.retryable !== undefined ? { retryable: e.retryable } : {}),
+            ...(e.retryAfterMs !== undefined ? { retryAfterMs: e.retryAfterMs } : {}),
           },
         },
       });
@@ -414,11 +418,13 @@ export class ReplayTransport implements Transport {
       // Rebuilt with the real error type rather than an approximation of it.
       // Re-deriving retryability here would be a second copy of the policy,
       // and the copy would be wrong the moment the policy changed.
-      const { kind, status, body, message } = e.response.error;
+      const { kind, status, body, message, retryable, retryAfterMs } = e.response.error;
       throw new TransportError(message, {
         kind: (kind ?? "protocol") as TransportError["kind"],
         ...(status !== undefined ? { status } : {}),
         ...(body !== undefined ? { body } : {}),
+        ...(retryable !== undefined ? { retryable } : {}),
+        ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
       });
     }
     return e.response.value;
