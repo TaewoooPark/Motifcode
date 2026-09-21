@@ -26,6 +26,17 @@
   <img src="https://img.shields.io/badge/alpha-000000?style=flat-square&labelColor=000000&color=000000" alt="alpha">
 </p>
 
+<table align="center">
+  <tr>
+    <td align="center" width="912">
+      <h2>OpenLab</h2>
+      <p>Motifcode와 Taewoo Park의 오픈소스 프로젝트를 함께 만드는 커뮤니티입니다.<br>질문하고, 만든 것을 공유하고, 첫 기여를 시작해 보세요.</p>
+      <p><a href="https://discord.gg/5d99wCtzc"><img src="https://img.shields.io/badge/Join_OpenLab-Discord-5865F2?style=for-the-badge&amp;logo=discord&amp;logoColor=white&amp;labelColor=000000" alt="OpenLab Discord 참여하기"></a></p>
+      <sub>AI agents · Scientific computing · Open-source tools</sub>
+    </td>
+  </tr>
+</table>
+
 > **2026년 9월까지 무료.** Motif-3는 [Infron](https://infron.ai)에서 **Motif: Motif 3 (Free)** 로
 > 제공됩니다. 입력·출력 모두 100만 토큰당 $0, 262,144 토큰 컨텍스트 전체가 열려 있고,
 > 2026년 9월 말까지 무료 제공이 공지되어 있습니다. 계정과 API 키만 있으면 됩니다.
