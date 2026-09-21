@@ -335,20 +335,28 @@ async function runBash(
   return { ok: r.code === 0, output: r.output.trim() || `(exit ${r.code})` };
 }
 
+function toLogicalLines(text: string): string[] {
+  if (text === "") return [];
+  const normalized = text.endsWith("\n") ? text.slice(0, -1) : text;
+  return normalized.split("\n");
+}
+
 function readSlice(path: string, cwd: string, offset?: number, limit?: number): ToolResult {
   try {
     const text = readFileSync(resolve(cwd, path), "utf8");
-    const lines = text.split("\n");
+    const lines = toLogicalLines(text);
     const start = Math.max(0, (offset ?? 1) - 1);
     const end = limit !== undefined ? start + limit : lines.length;
     const slice = lines.slice(start, end);
     const numbered = slice.map((l, i) => `${start + i + 1}\t${l}`).join("\n");
-    const more = end < lines.length ? `\n… ${lines.length - end} more lines` : "";
+    const remaining = Math.max(0, lines.length - end);
+    const more = remaining > 0 ? (numbered ? `\n… ${remaining} more lines` : `… ${remaining} more lines`) : "";
     return { ok: true, output: numbered + more };
   } catch (err) {
     return { ok: false, output: String(err) };
   }
 }
+
 
 /**
  * Write a file whole, without a shell anywhere in the path.

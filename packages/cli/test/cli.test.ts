@@ -141,6 +141,57 @@ describe("executor", () => {
     expect(r.output).not.toContain("1\ta");
   });
 
+  it("determines logical lines without phantom terminal newline or fabricated lines", async () => {
+    const ex = new ToolExecutor({ cwd });
+
+    // Empty file -> 0 logical lines
+    writeFileSync(join(cwd, "empty.txt"), "", "utf8");
+    let r = await ex.run({ id: "1", name: "read", arguments: { path: "empty.txt" }, repaired: false, validated: true });
+    expect(r.ok).toBe(true);
+    expect(r.output).toBe("");
+
+    // Missing final newline -> 1 line
+    writeFileSync(join(cwd, "no_nl.txt"), "a", "utf8");
+    r = await ex.run({ id: "2", name: "read", arguments: { path: "no_nl.txt" }, repaired: false, validated: true });
+    expect(r.ok).toBe(true);
+    expect(r.output).toBe("1\ta");
+
+    // Single final newline -> 1 line (not 2)
+    writeFileSync(join(cwd, "single_nl.txt"), "a\n", "utf8");
+    r = await ex.run({ id: "3", name: "read", arguments: { path: "single_nl.txt" }, repaired: false, validated: true });
+    expect(r.ok).toBe(true);
+    expect(r.output).toBe("1\ta");
+
+    // Genuine empty line -> 1 line: empty
+    writeFileSync(join(cwd, "blank_line.txt"), "\n", "utf8");
+    r = await ex.run({ id: "4", name: "read", arguments: { path: "blank_line.txt" }, repaired: false, validated: true });
+    expect(r.ok).toBe(true);
+    expect(r.output).toBe("1\t");
+
+    // Repeated final newline -> 2 lines (line 2 empty)
+    writeFileSync(join(cwd, "double_nl.txt"), "a\n\n", "utf8");
+    r = await ex.run({ id: "5", name: "read", arguments: { path: "double_nl.txt" }, repaired: false, validated: true });
+    expect(r.ok).toBe(true);
+    expect(r.output).toBe("1\ta\n2\t");
+
+    // Range beyond EOF -> succeeds with no numbered lines
+    r = await ex.run({ id: "6", name: "read", arguments: { path: "single_nl.txt", offset: 10 }, repaired: false, validated: true });
+    expect(r.ok).toBe(true);
+    expect(r.output).toBe("");
+
+    // limit: 0 -> reports remaining lines without numbered output or leading newline
+    writeFileSync(join(cwd, "multi.txt"), "1\n2\n3\n", "utf8");
+    r = await ex.run({ id: "7", name: "read", arguments: { path: "multi.txt", offset: 1, limit: 0 }, repaired: false, validated: true });
+    expect(r.ok).toBe(true);
+    expect(r.output).toBe("… 3 more lines");
+
+    // Ensure file contents are never modified by read
+    expect(readFileSync(join(cwd, "single_nl.txt"), "utf8")).toBe("a\n");
+
+    ex.close();
+  });
+
+
   it("keeps state between term calls", async () => {
     // The difference between being able to drive a REPL and not. Stateless
     // bash cannot do this, and Terminal-Bench 74.9 was scored on a session
