@@ -15,6 +15,8 @@
  * one event, verbatim.
  */
 
+import { StringDecoder } from "node:string_decoder";
+
 export type Key =
   | { type: "text"; text: string }
   /** A bracketed paste, newlines and all. */
@@ -106,14 +108,21 @@ function controlKey(code: number): Key {
 }
 
 export class KeyDecoder {
+  // Byte boundaries and escape-sequence boundaries are separate concerns.
+  private utf8 = new StringDecoder("utf8");
   private pasting = false;
   private paste = "";
   /** An escape sequence cut off by the end of a read; completed by the next one. */
   private pending = "";
 
   feed(chunk: string | Buffer): Key[] {
+    return this.parse(typeof chunk === "string" ? chunk : this.utf8.write(chunk));
+  }
+
+  /** Parse decoded text only; recursive paste parsing must not touch buffered bytes. */
+  private parse(chunk: string): Key[] {
     const out: Key[] = [];
-    let s = this.pending + (typeof chunk === "string" ? chunk : chunk.toString("utf8"));
+    let s = this.pending + chunk;
     this.pending = "";
 
     if (this.pasting) {
@@ -156,7 +165,7 @@ export class KeyDecoder {
           this.pasting = true;
           const rest = s.slice(i + PASTE_START.length);
           // Re-enter through the paste branch for the remainder.
-          const tail = this.feed(rest);
+          const tail = this.parse(rest);
           out.push(...tail);
           return out;
         }

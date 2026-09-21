@@ -99,3 +99,40 @@ describe("key decoding", () => {
     expect(keys).toEqual([{ type: "paste", text: "/not a command\r" }]);
   });
 });
+
+describe("UTF-8 byte chunks", () => {
+  const text = "A한🙂Z";
+  const bytes = Buffer.from(text);
+  const textOf = (events: Key[]) => events.map(event => event.type === "text" ? event.text : "").join("");
+
+  it("preserves text at every two-chunk byte boundary", () => {
+    for (let split = 1; split < bytes.length; split++) {
+      const decoder = new KeyDecoder();
+      expect(textOf([...decoder.feed(bytes.subarray(0, split)), ...decoder.feed(bytes.subarray(split))])).toBe(text);
+    }
+  });
+
+  it("preserves one-byte-at-a-time input", () => {
+    const decoder = new KeyDecoder();
+    expect(textOf([...bytes].flatMap(byte => decoder.feed(Buffer.from([byte]))))).toBe(text);
+  });
+
+  it("preserves split UTF-8 inside bracketed paste and subsequent keys", () => {
+    const decoder = new KeyDecoder();
+    // The start marker and an incomplete character arrive together, so the
+    // paste branch must not decode its already-decoded remainder again.
+    const payload = Buffer.from(`${ESC}[200~한🙂\nZ${ESC}[201~\r${ESC}[A`);
+    const split = Buffer.byteLength(`${ESC}[200~`) + 1;
+    expect([
+      ...decoder.feed(payload.subarray(0, split)),
+      ...decoder.feed(payload.subarray(split)),
+    ]).toEqual([{ type: "paste", text: "한🙂\nZ" }, { type: "enter" }, { type: "up" }]);
+  });
+
+  it("preserves one-byte paste content and a split terminator", () => {
+    const decoder = new KeyDecoder();
+    const events = decoder.feed(`${ESC}[200~`);
+    for (const byte of Buffer.from(`${text}${ESC}[201~`)) events.push(...decoder.feed(Buffer.from([byte])));
+    expect(events).toEqual([{ type: "paste", text }]);
+  });
+});
