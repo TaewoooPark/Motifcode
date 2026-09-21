@@ -378,7 +378,7 @@ function writeFile(path: string, content: string, cwd: string): ToolResult {
     const lines = content === "" ? 0 : content.split("\n").length;
     return {
       ok: true,
-      output: `${existed ? "replaced" : "created"} ${path} (${lines} lines, ${content.length} bytes)`,
+      output: `${existed ? "replaced" : "created"} ${path} (${lines} lines, ${Buffer.byteLength(content, "utf8")} bytes)`,
     };
   } catch (err) {
     return { ok: false, output: String(err) };

@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -328,6 +328,37 @@ describe("executor", () => {
     ex.close();
     expect(r.output).toContain("replaced");
     expect(readFileSync(join(dir, "a.txt"), "utf8")).toBe("new\n");
+  });
+
+  it.each([
+    ["ASCII", "plain text"],
+    ["Korean", "한글"],
+    ["emoji", "🙂"],
+    ["mixed text", "ASCII 한글 🙂\nsecond line"],
+    ["empty content", ""],
+  ])("reports UTF-8 bytes for %s when creating and replacing a file", async (_label, content) => {
+    const dir = mkdtempSync(join(tmpdir(), "motifcode-write-bytes-"));
+    const path = join(dir, "a.txt");
+    const ex = new ToolExecutor({ cwd: dir });
+    const invocation = {
+      name: "write" as const,
+      arguments: { path: "a.txt", content },
+      repaired: false as const,
+      validated: true as const,
+    };
+    const lines = content === "" ? 0 : content.split("\n").length;
+    const bytes = Buffer.byteLength(content, "utf8");
+
+    const created = await ex.run({ id: "1", ...invocation });
+    expect(created.output).toBe(`created a.txt (${lines} lines, ${bytes} bytes)`);
+    expect(readFileSync(path, "utf8")).toBe(content);
+    expect(statSync(path).size).toBe(bytes);
+
+    const replaced = await ex.run({ id: "2", ...invocation });
+    ex.close();
+    expect(replaced.output).toBe(`replaced a.txt (${lines} lines, ${bytes} bytes)`);
+    expect(readFileSync(path, "utf8")).toBe(content);
+    expect(statSync(path).size).toBe(bytes);
   });
 
   it("applies a patch with miscounted hunks and no trailing newline", async () => {
