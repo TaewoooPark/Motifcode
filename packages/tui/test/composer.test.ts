@@ -145,3 +145,52 @@ describe("rendering", () => {
     expect(r).toMatchObject({ cursorRow: 1, cursorCol: 2 });
   });
 });
+
+describe("pasted prompt history", () => {
+  const block = Array.from({ length: 9 }, (_, i) => `line ${i}`).join("\n");
+
+  it("recalls the expanded paste after its placeholder map is cleared", () => {
+    const c = new Composer();
+    c.paste(block);
+    expect(c.submit()).toBe(block);
+    expect(c.up()).toBe(true);
+    expect(c.submit()).toBe(block);
+    expect(c.historyEntries).toEqual([block]);
+  });
+
+  it("round-trips normal text and multiple pasted blocks", () => {
+    const c = new Composer();
+    c.insert("first: ");
+    c.paste(block);
+    c.insert("second: ");
+    c.paste(block.toUpperCase());
+    c.insert("done");
+    const expected = `first: ${block} second: ${block.toUpperCase()} done`;
+    expect(c.submit()).toBe(expected);
+    c.up();
+    expect(c.submit()).toBe(expected);
+  });
+
+  it("deduplicates identical content despite different placeholder identifiers", () => {
+    const c = new Composer();
+    c.paste(block);
+    c.submit();
+    c.paste(block);
+    c.submit();
+    expect(c.historyEntries).toEqual([block]);
+  });
+
+  it("preserves an unsent pasted draft when returning from history", () => {
+    const c = new Composer();
+    c.paste(block);
+    c.submit();
+    c.insert("draft: ");
+    c.paste(block.toUpperCase());
+    const shown = c.text;
+    expect(c.up()).toBe(true);
+    expect(c.text).toBe(block);
+    expect(c.down()).toBe(true);
+    expect(c.text).toBe(shown);
+    expect(c.submit()).toBe(`draft: ${block.toUpperCase()}`);
+  });
+});
