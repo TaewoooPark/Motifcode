@@ -238,7 +238,7 @@ describe("cli process end to end", () => {
     expect(server.bodies[2]!.messages[1]!.content).toBe("what is the answer?");
   }, 30_000);
 
-  it("restores the checkpoint transcript when resuming in print mode", async () => {
+  it.each(["--print", "-p"])("restores the checkpoint transcript when resuming with %s", async (printFlag) => {
     writeFileSync(join(dir, "resume-marker.txt"), "RESUME_MARKER");
     server = new MockServer((turn) =>
       turn === 1
@@ -265,12 +265,17 @@ describe("cli process end to end", () => {
       .join("\n") + "\n";
     writeFileSync(journal, unfinished);
     const resumed = await runCli(
-      ["resume", journal, "--print", "--endpoint", server.endpoint],
+      ["resume", journal, printFlag, "--endpoint", server.endpoint],
       dir,
     );
     expect(resumed.code, `${resumed.stdout}\n${resumed.stderr}`).toBe(0);
-    expect(resumed.stdout).toContain("Resumed from the checkpoint.\n");
-    expect(server.bodies[1]!.messages.some((m) => String(m.content).includes("RESUME_MARKER"))).toBe(true);
+    expect(resumed.stdout).toBe("Resumed from the checkpoint.\n");
+    expect(resumed.stderr).toMatch(/^resuming .+ from turn 1\n$/);
+    const messages = server.bodies[1]!.messages;
+    expect(messages.map((m) => m.role)).toEqual(["system", "user", "assistant", "tool"]);
+    expect(messages.filter((m) => m.role === "user" && m.content === "continue the task")).toHaveLength(1);
+    expect(messages[2]!.tool_calls).toMatchObject([{ function: { name: "read" } }]);
+    expect(messages[3]!.content).toContain("RESUME_MARKER");
   }, 30_000);
 
   it("prints help and exits 2 for an empty task", async () => {

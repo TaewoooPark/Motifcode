@@ -834,6 +834,7 @@ async function main(): Promise<number> {
   const activeToolNames = CORE_TOOL_NAMES.slice(0, activeTools.length);
   const schemaHash = toolSchemaHash(activeTools);
   const promptHash = systemPromptHash(systemFor(channel));
+  const printOnly = args.flags["print"] === true || args.flags["p"] === true;
 
   // Resume, or start. A resume keeps the recorded task: continuing someone
   // else's transcript with a different task is a new run wearing the old one's
@@ -850,7 +851,7 @@ async function main(): Promise<number> {
       return 2;
     }
     task = resumeFrom.task ?? "";
-    process.stdout.write(
+    (printOnly ? process.stderr : process.stdout).write(
       `resuming ${resumeFrom.header.runId} from turn ${resumeFrom.checkpoint!.turn}` +
         `${resumeFrom.truncatedTail ? " (last record was truncated)" : ""}\n`,
     );
@@ -862,7 +863,6 @@ async function main(): Promise<number> {
   // error. Without a terminal the old answer stands: a pipe cannot host a
   // prompt, and printing help is the honest response to an empty command.
   const wantsChat = args.flags["interactive"] === true || args.flags["chat"] === true || args.flags["continue"] === true;
-  const printOnly = args.flags["print"] === true || args.flags["p"] === true;
   const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
   if (wantsChat && !tty) {
     throw new UsageError("--interactive needs a terminal on stdin and stdout");
