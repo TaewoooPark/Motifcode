@@ -199,7 +199,8 @@ export class Composer {
   submit(): string {
     const shown = this.text.replace(/\s+$/, "");
     const text = this.expanded(shown);
-    if (shown !== "" && this.history[this.history.length - 1] !== shown) this.history.push(shown);
+    // History outlives the paste map, so retain content rather than display placeholders.
+    if (text !== "" && this.history[this.history.length - 1] !== text) this.history.push(text);
     this.clear();
     this.pastes.clear();
     return text;
