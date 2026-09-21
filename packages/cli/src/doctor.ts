@@ -292,7 +292,6 @@ export async function doctor(opts: DoctorOptions): Promise<Check[]> {
       // to keep alive — now comes back as a hit. `prompt_tokens_details` absent
       // altogether means the API does not report it at all.
       let cached = json.usage?.prompt_tokens_details?.cached_tokens;
-      const reports = cached !== undefined;
       try {
         const again = await fetchImpl(`${endpoint}/v1/chat/completions`, {
           method: "POST",
@@ -308,6 +307,7 @@ export async function doctor(opts: DoctorOptions): Promise<Check[]> {
         // The first probe already answered the questions that matter; a failed
         // warm-up just leaves the cache figure as the cold one.
       }
+      const reports = cached !== undefined;
       checks.push(
         typeof cached === "number" && cached > 0
           ? {
