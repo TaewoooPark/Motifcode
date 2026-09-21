@@ -1,6 +1,6 @@
 {
   "name": "motifcode",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "type": "module",
   "description": "Unofficial coding agent harness built for Motif-3: a Claude Code-style terminal session over the hosted endpoint",
   "keywords": [
