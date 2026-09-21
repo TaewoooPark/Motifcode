@@ -378,6 +378,7 @@ describe("doctor", () => {
   interface Scripted {
     models?: unknown[];
     chat?: { status?: number; body?: unknown };
+    chats?: { status?: number; body?: unknown }[];
     completions?: { status?: number; body?: unknown };
     /** Every request, for asserting on headers and bodies. */
     seen: { url: string; init: RequestInit }[];
@@ -386,13 +387,14 @@ describe("doctor", () => {
   /** A stand-in for a router: three routes, each scripted. */
   function router(script: Omit<Scripted, "seen">): Scripted & { fetchImpl: typeof fetch } {
     const s: Scripted = { ...script, seen: [] };
+    let chatIndex = 0;
     const json = (body: unknown, status = 200) =>
       new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
     const fetchImpl = (async (url: string, init: RequestInit = {}) => {
       s.seen.push({ url, init });
       if (url.endsWith("/v1/models")) return json({ data: s.models ?? [MOTIF, OTHER] });
       if (url.endsWith("/v1/chat/completions")) {
-        const r = s.chat ?? {
+        const r = s.chats?.[chatIndex++] ?? s.chat ?? {
           body: {
             choices: [
               {
@@ -418,6 +420,23 @@ describe("doctor", () => {
   }
 
   const by = (checks: Check[], name: string): Check => checks.find((c) => c.name === name)!;
+
+  it.each([
+    [undefined, 0, 200, "unknown", "reports cached tokens but served none"],
+    [undefined, 128, 200, "ok", "served 128 prompt tokens"],
+    [undefined, undefined, 200, "unknown", "not reported by the API"],
+    [0, undefined, 503, "unknown", "reports cached tokens but served none"],
+    [128, undefined, 503, "ok", "served 128 prompt tokens"],
+  ] as const)("preserves cache reporting across probes (%s, %s, %s)", async (first, second, status, state, detail) => {
+    const r = router({ chats: [
+      { body: { usage: { prompt_tokens_details: { cached_tokens: first } } } },
+      { status, body: { usage: { prompt_tokens_details: { cached_tokens: second } } } },
+    ] });
+    const checks = await doctor({ endpoint: "http://x", model: "motif/motif-3", apiKey: "k", fetchImpl: r.fetchImpl });
+    expect(by(checks, "prefix caching").state).toBe(state);
+    expect(by(checks, "prefix caching").detail).toContain(detail);
+    expect(r.seen.filter(({ url }) => url.endsWith("/v1/chat/completions"))).toHaveLength(2);
+  });
 
   it("reports a healthy hosted endpoint", async () => {
     const r = router({});
