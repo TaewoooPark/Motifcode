@@ -26,16 +26,9 @@
   <img src="https://img.shields.io/badge/alpha-000000?style=flat-square&labelColor=000000&color=000000" alt="alpha">
 </p>
 
-<table align="center">
-  <tr>
-    <td align="center" width="912">
-      <h2>OpenLab</h2>
-      <p>A shared community for Motifcode and Taewoo Park's open-source projects.<br>Ask questions, share what you build, and find your first contribution.</p>
-      <p><a href="https://discord.gg/5d99wCtzc"><img src="https://img.shields.io/badge/Join_OpenLab-Discord-5865F2?style=for-the-badge&amp;logo=discord&amp;logoColor=white&amp;labelColor=000000" alt="Join OpenLab on Discord"></a></p>
-      <sub>AI agents · Scientific computing · Open-source tools</sub>
-    </td>
-  </tr>
-</table>
+<p align="center">
+  <a href="https://discord.gg/5d99wCtzc"><img src="https://img.shields.io/badge/Join_OpenLab-Discord-5865F2?style=for-the-badge&amp;logo=discord&amp;logoColor=white&amp;labelColor=000000" alt="Join OpenLab on Discord"></a>
+</p>
 
 > **Free through September 2026.** Motif-3 is served by [Infron](https://infron.ai) as
 > **Motif: Motif 3 (Free)** — $0 per million tokens in and out, the full 262,144-token
