@@ -957,6 +957,7 @@ async function main(): Promise<number> {
         maxTurns,
         ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
         ...(seed !== undefined ? { seed } : {}),
+        ...(resumeFrom?.checkpoint ? { resume: resumeFrom.checkpoint } : {}),
         replyEnds: true,
         confirmDone: false,
       });
