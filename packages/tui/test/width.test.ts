@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { displayWidth, truncateEndToWidth, truncateToWidth, wrapToWidth } from "../src/width.js";
+import { displayWidth, padToWidth, truncateEndToWidth, truncateToWidth, wrapToWidth } from "../src/width.js";
 
 afterEach(() => vi.unstubAllEnvs());
 
@@ -40,5 +40,15 @@ describe("terminal width policy", () => {
     expect(wrapToWidth("a🚀b🫠", 3)).toEqual(["a🚀", "b🫠"]);
     expect(wrapToWidth("🚀", 1)).toEqual(["?"]);
     expect(truncateToWidth("ab🚀", 3)).toBe("ab…");
+  });
+
+  it("measures and projects tabs consistently without emitting terminal tab movement", () => {
+    expect(displayWidth("a\tb")).toBe(6);
+    expect(wrapToWidth("a\tb", 3)).toEqual(["a  ", "  b"]);
+    expect(wrapToWidth("\t", 1)).toEqual([" ", " ", " ", " "]);
+    expect(truncateToWidth("a\tb", 6)).toBe("a    b");
+    expect(truncateToWidth("a\tb", 4)).toBe("a  …");
+    expect(truncateEndToWidth("a\tb", 4)).toBe("…  b");
+    expect(padToWidth("a\tb", 7)).toBe("a    b ");
   });
 });

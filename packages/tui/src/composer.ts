@@ -14,7 +14,7 @@
  * is not text.
  */
 
-import { displayWidth, truncateToWidth } from "./width.js";
+import { displayWidth, expandTabs, truncateToWidth } from "./width.js";
 
 export interface ComposerSnapshot {
   text: string;
@@ -316,25 +316,30 @@ export function renderComposer(state: ComposerSnapshot, opts: ComposerRenderOpti
   };
 
   for (const ch of state.text) {
-    if (index === state.cursor) {
-      cursorRow = rows.length;
-      cursorCol = prefixWidth + used;
-    }
     if (ch === "\n") {
+      if (index === state.cursor) {
+        cursorRow = rows.length;
+        cursorCol = prefixWidth + used;
+      }
       flush();
       index += 1;
       continue;
     }
-    const shown = displayWidth(ch) > room ? "?" : ch;
-    const w = displayWidth(shown);
-    if (used + w > room && used > 0) flush();
-    if (index === state.cursor && used === 0) {
-      // The cursor character itself wrapped; follow it.
-      cursorRow = rows.length;
-      cursorCol = prefixWidth;
+    // A tab expands only in the display. Its spaces may span several rows,
+    // while it remains one editable code point in the original draft.
+    let first = true;
+    for (const part of expandTabs(ch)) {
+      const shown = displayWidth(part) > room ? "?" : part;
+      const w = displayWidth(shown);
+      if (used + w > room && used > 0) flush();
+      if (index === state.cursor && first) {
+        cursorRow = rows.length;
+        cursorCol = prefixWidth + used;
+      }
+      body += shown;
+      used += w;
+      first = false;
     }
-    body += shown;
-    used += w;
     index += 1;
   }
   // The cursor after the last character.

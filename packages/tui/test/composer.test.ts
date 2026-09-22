@@ -181,6 +181,23 @@ describe("narrow composer rendering", () => {
     expect(renderComposer({ text: "🚀", cursor: 1 }, { width: 1 }))
       .toMatchObject({ rows: [{ prefix: "", body: "?" }, { prefix: "", body: "" }], cursorRow: 1, cursorCol: 0 });
   });
+
+  it("expands a pasted tab across narrow rows without changing its source or cursor index", () => {
+    const c = new Composer();
+    c.paste("a\tb");
+    c.left();
+    expect(c.cursor).toBe(2);
+    expect(renderComposer(c.snapshot(), { width: 1 })).toMatchObject({
+      rows: ["a", " ", " ", " ", " ", "b"].map((body) => ({ prefix: "", body })),
+      cursorRow: 5, cursorCol: 0,
+    });
+    c.left();
+    expect(renderComposer(c.snapshot(), { width: 1 })).toMatchObject({ cursorRow: 1, cursorCol: 0 });
+    c.right();
+    c.right();
+    expect(renderComposer(c.snapshot(), { width: 7 })).toMatchObject({ cursorRow: 1, cursorCol: 3 });
+    expect(c.submit()).toBe("a\tb");
+  });
 });
 
 describe("pasted prompt history", () => {

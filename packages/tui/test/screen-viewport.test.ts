@@ -155,6 +155,27 @@ describe("physical footer viewport", () => {
       expect(cursorLine).toContain(kind === "confirmation" ? "Yes" : kind === "secret" ? "•" : "row 0");
     } finally { terminal.dispose(); }
   });
+
+  it.each([1, 2, 3, 7, 20, 80])("keeps pasted tabs and their caret within physical rows at %i columns", async (cols) => {
+    const frames = recording(cols, 12, (screen, frame) => {
+      screen.setComposer({ draft: { text: "a\tb", cursor: 2 } });
+      frame();
+      screen.setHint("repaint");
+      frame();
+    });
+    const terminal = new Terminal({ convertEol: true, allowProposedApi: true, cols, rows: 12 });
+    try {
+      for (const frame of frames) {
+        expect(frame).not.toContain("\t");
+        await write(terminal, frame);
+        const buffer = terminal.buffer.active;
+        expect(buffer.baseY).toBe(0);
+        for (let i = 0; i < buffer.length; i++) expect(buffer.getLine(i)!.isWrapped).toBe(false);
+        expect(buffer.getLine(buffer.cursorY)!.getCell(buffer.cursorX)!.getChars()).toBe("b");
+      }
+    } finally { terminal.dispose(); }
+  });
+
   it("keeps the selected menu item visible in a short viewport", async () => {
     const frames = recording(40, 8, (screen, frame) => {
       screen.setComposer({ draft: { text: "/", cursor: 1 }, menu: {
