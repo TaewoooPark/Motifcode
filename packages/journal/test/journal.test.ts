@@ -11,7 +11,9 @@ import { mkdtempSync, readFileSync, writeFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { LoopCheckpoint } from "@motifcode/core";
+import { resumeBlock, runLoop, type LoopCheckpoint } from "@motifcode/core";
+import { CORE_TOOLS } from "@motifcode/tools";
+import { ScriptedTransport, toolCallBody } from "@motifcode/replay";
 import {
   Journal,
   checkResumable,
@@ -320,6 +322,73 @@ describe("resume", () => {
     );
     expect(checkResumable(loadResume(j.path), current)).toBeNull();
   });
+
+  it.each([
+    ["write", false, true],
+    ["write", true, true],
+    ["apply_patch", false, true],
+    ["custom_mutation", true, true],
+    ["read", false, false],
+  ] as const)("agrees with core for %s with recorded mutating=%s", (name, mutating, blocked) => {
+    const state = loadResume(interrupted(checkpoint({
+      inFlightTool: { id: "root-c4", name, argumentsHash: "abc", mutating },
+    })).path);
+    expect(resumeBlock(state.checkpoint!, null) !== null).toBe(blocked);
+    const reason = checkResumable(state, current);
+    if (blocked) {
+      expect(reason).toContain(`\`${name}\``);
+      expect(reason).toContain("Inspect the working tree, then start a new run");
+    } else {
+      expect(reason).toBeNull();
+    }
+    expect(checkResumable({ ...state, corruption: "broken record" }, current)).toContain("corrupt");
+    expect(checkResumable(state, { ...current, model: "other" })).toContain("now other");
+  });
+
+  it.each(["before", "intent", "effect", "observation", "truncated", "complete"] as const)(
+    "uses the last recorded checkpoint when a write stops at %s",
+    async (stopAt) => {
+      const j = newJournal();
+      j.record(ROOT, { t: "scope_start", task: "write the marker", initialMessages: [] });
+      let executed = false;
+      const stopped = new Error("simulated interruption");
+      await expect(runLoop({
+        tools: [...CORE_TOOLS],
+        system: () => "You are motifcode.",
+        userTask: "write the marker",
+        transport: new ScriptedTransport([toolCallBody("write", { path: "marker", content: "written" })]),
+        executor: { run: async () => {
+          // The fake executor can have an effect before the observation reaches the journal.
+          executed = true;
+          if (stopAt === "effect") throw stopped;
+          return { ok: true, output: "written" };
+        } },
+        emit: (event) => {
+          j.sinkFor(ROOT)(event);
+          if (stopAt === "observation" && event.type === "tool_end") throw stopped;
+        },
+        onCheckpoint: (cp) => {
+          const completed = cp.messages.some((m) => m.role === "tool");
+          if (stopAt === "truncated" && completed) {
+            // A partially appended completion must leave the preceding intent authoritative.
+            writeFileSync(j.path, readFileSync(j.path, "utf8") + '{"v":2,"record":{"t":"checkpoint"');
+            throw stopped;
+          }
+          j.checkpointFor(ROOT)(cp);
+          if (stopAt === "before" || (stopAt === "intent" && cp.inFlightTool) || completed) throw stopped;
+        },
+      })).rejects.toBe(stopped);
+
+      const state = loadResume(j.path);
+      const uncertain = stopAt !== "before" && stopAt !== "complete";
+      expect(executed).toBe(stopAt !== "before" && stopAt !== "intent");
+      expect(state.truncatedTail).toBe(stopAt === "truncated");
+      expect(state.checkpoint!.messages.some((m) => m.role === "tool")).toBe(stopAt === "complete");
+      expect(resumeBlock(state.checkpoint!, null) !== null).toBe(uncertain);
+      expect(checkResumable(state, current) !== null).toBe(uncertain);
+      if (uncertain) expect(state.checkpoint!.inFlightTool).toMatchObject({ name: "write", mutating: true });
+    },
+  );
 
   it("refuses when no checkpoint was ever written", () => {
     const j = newJournal();

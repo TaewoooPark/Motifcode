@@ -166,7 +166,7 @@ describe("an uncertain command is not re-run", () => {
   });
 
   it("classifies which tools can change the world", () => {
-    for (const t of ["bash", "apply_patch", "term", "task", "mcp"]) {
+    for (const t of ["bash", "write", "apply_patch", "term", "task", "mcp"]) {
       expect(isMutating(t), t).toBe(true);
     }
     for (const t of ["read", "skill", "done"]) {
@@ -179,6 +179,20 @@ describe("an uncertain command is not re-run", () => {
       inFlightTool: { id: "root-c1", name: "apply_patch", argumentsHash: "x", mutating: true },
     } as LoopCheckpoint;
     expect(resumeBlock(cp, null)).toMatchObject({ kind: "execution_uncertain", tool: "apply_patch" });
+  });
+
+  it.each([
+    ["write", false],
+    ["write", true],
+    ["apply_patch", false],
+    ["custom_mutation", true],
+  ] as const)("blocks in-flight %s with recorded mutating=%s", (name, mutating) => {
+    const cp = {
+      inFlightTool: { id: "root-c1", name, argumentsHash: "x", mutating },
+    } as LoopCheckpoint;
+    expect(resumeBlock(cp, null)).toEqual({ kind: "execution_uncertain", tool: name, id: "root-c1" });
+    // A classification correction must not override compatibility checks.
+    expect(resumeBlock(cp, "schema changed")).toEqual({ kind: "incompatible", detail: "schema changed" });
   });
 
   it("allows a resume whose in-flight tool only read", () => {
