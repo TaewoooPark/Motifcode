@@ -1,0 +1,44 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { displayWidth, truncateEndToWidth, truncateToWidth, wrapToWidth } from "../src/width.js";
+
+afterEach(() => vi.unstubAllEnvs());
+
+describe("terminal width policy", () => {
+  it.each(["1", "2"])("matches Ambiguous-width=%s without widening combining marks", (policy) => {
+    vi.stubEnv("MOTIF_AMBIGUOUS_WIDTH", policy);
+    expect(displayWidth("·─…Ωé")).toBe(5 * Number(policy));
+    expect(displayWidth("e\u0301")).toBe(1);
+    expect(displayWidth("한글🙂🚀🫠⌚Ａ")).toBe(14);
+    expect(displayWidth("ascii")).toBe(5);
+  });
+
+  it("defaults to narrow ambiguous characters", () => {
+    vi.stubEnv("MOTIF_AMBIGUOUS_WIDTH", undefined);
+    expect(displayWidth("·─…Ωé")).toBe(5);
+  });
+
+  it("does not emit a two-column ellipsis into a one-column budget", () => {
+    vi.stubEnv("MOTIF_AMBIGUOUS_WIDTH", "2");
+    for (const truncate of [truncateToWidth, truncateEndToWidth]) {
+      expect(truncate("abcdef", 0)).toBe("");
+      expect(truncate("abcdef", 1)).toBe("");
+      expect(truncate("abcdef", 2)).toBe("…");
+      expect(truncate("abcdef", 1, ".")).toBe(".");
+    }
+    expect(truncateToWidth("abcdef", 4)).toBe("ab…");
+    expect(truncateEndToWidth("abcdef", 4)).toBe("…ef");
+  });
+
+  it("wraps ambiguous characters using the selected cell width", () => {
+    vi.stubEnv("MOTIF_AMBIGUOUS_WIDTH", "2");
+    expect(wrapToWidth("aΩb·", 3)).toEqual(["aΩ", "b·"]);
+    expect(wrapToWidth("한Ωa", 1)).toEqual(["?", "?", "a"]);
+  });
+
+  it("wraps and truncates wide emoji outside the legacy ranges", () => {
+    vi.stubEnv("MOTIF_AMBIGUOUS_WIDTH", "1");
+    expect(wrapToWidth("a🚀b🫠", 3)).toEqual(["a🚀", "b🫠"]);
+    expect(wrapToWidth("🚀", 1)).toEqual(["?"]);
+    expect(truncateToWidth("ab🚀", 3)).toBe("ab…");
+  });
+});

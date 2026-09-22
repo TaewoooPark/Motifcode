@@ -14,7 +14,7 @@
  * is not text.
  */
 
-import { displayWidth } from "./width.js";
+import { displayWidth, truncateToWidth } from "./width.js";
 
 export interface ComposerSnapshot {
   text: string;
@@ -286,14 +286,16 @@ const DEFAULT_PROMPT = "❯ ";
  * the next typed character would land.
  */
 export function renderComposer(state: ComposerSnapshot, opts: ComposerRenderOptions): ComposerRender {
-  const prompt = opts.prompt ?? DEFAULT_PROMPT;
+  const width = Math.max(1, opts.width);
+  // Leave an editable column even when the prompt is wider than the viewport.
+  const prompt = truncateToWidth(opts.prompt ?? DEFAULT_PROMPT, width - 1, "");
   const prefixWidth = displayWidth(prompt);
-  const room = Math.max(1, opts.width - prefixWidth);
+  const room = width - prefixWidth;
   const continuation = " ".repeat(prefixWidth);
 
   if (state.text === "") {
     return {
-      rows: [{ prefix: prompt, body: opts.placeholder ?? "" }],
+      rows: [{ prefix: prompt, body: truncateToWidth(opts.placeholder ?? "", room) }],
       cursorRow: 0,
       cursorCol: prefixWidth,
       placeholder: true,
@@ -323,14 +325,15 @@ export function renderComposer(state: ComposerSnapshot, opts: ComposerRenderOpti
       index += 1;
       continue;
     }
-    const w = displayWidth(ch);
+    const shown = displayWidth(ch) > room ? "?" : ch;
+    const w = displayWidth(shown);
     if (used + w > room && used > 0) flush();
     if (index === state.cursor && used === 0) {
       // The cursor character itself wrapped; follow it.
       cursorRow = rows.length;
       cursorCol = prefixWidth;
     }
-    body += ch;
+    body += shown;
     used += w;
     index += 1;
   }
