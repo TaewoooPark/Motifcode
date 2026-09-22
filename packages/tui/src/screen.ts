@@ -24,7 +24,8 @@
  * the terminal changes under it, and it has the cost it has there: Terminal
  * and iTerm keep the erased screen in scrollback, so each narrowing leaves a
  * copy behind. A widening costs nothing — no row that fitted before can wrap
- * now — so it is an ordinary repaint.
+ * now — so it is an ordinary repaint, unless the height also changes. A
+ * height change can clip rows below the composer cursor and needs a rebuild.
  *
  * The terminal's cursor is left inside the composer after each paint, so the
  * terminal's own input method composes where the text will land — Hangul
@@ -142,6 +143,8 @@ export class Screen {
   private cursorAt: { row: number; col: number } | null = null;
   /** The width the footer was painted at, to notice a resize. */
   private paintedWidth = 0;
+  /** A height change may clip the footer even when its contents are unchanged. */
+  private paintedHeight = 0;
   private composer: ComposerView | null = null;
   private hint = "";
   private label = "";
@@ -328,12 +331,12 @@ export class Screen {
       }
     };
     // A drag sends a burst of resizes; one repaint at the end is enough.
-    // Narrower than the last paint means a rebuild; wider is a repaint.
+    // Narrower or a different height means a rebuild; wider is a repaint.
     const onResize = (): void => {
       if (this.resizeTimer) clearTimeout(this.resizeTimer);
       this.resizeTimer = setTimeout(() => {
         this.resizeTimer = null;
-        if (this.columns() < this.paintedWidth) this.repaintAll();
+        if (this.columns() < this.paintedWidth || this.rowCount() !== this.paintedHeight) this.repaintAll();
         else this.paint();
       }, 40);
     };
@@ -451,9 +454,12 @@ export class Screen {
   }
 
   private paint(): void {
-    if (this.interactive && this.footer.length > 0 && this.columns() < this.paintedWidth) {
-      // Narrowed since the last paint, with or without a resize event: the
-      // rows on screen have been reflowed and cannot be counted over.
+    if (
+      this.interactive && this.footer.length > 0 &&
+      (this.columns() < this.paintedWidth || this.rowCount() !== this.paintedHeight)
+    ) {
+      // Resized since the last paint, with or without a resize event: rows
+      // may have reflowed or been clipped, so their old positions are stale.
       this.repaintAll();
       return;
     }
@@ -597,6 +603,7 @@ export class Screen {
     for (const r of rows) this.write(r.text + "\n");
     this.footer = rows;
     this.paintedWidth = width;
+    this.paintedHeight = this.rowCount();
     this.cursorAt = cursor;
 
     if (cursor) {

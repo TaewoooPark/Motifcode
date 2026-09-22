@@ -5,6 +5,7 @@
  * write, and a torn erase is two writes that should have been one update.
  */
 
+import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Screen } from "../src/screen.js";
 import { term } from "../src/theme.js";
@@ -37,6 +38,49 @@ describe("unchanged footer redraws", () => {
     vi.advanceTimersByTime(50);
 
     expect(out).toEqual([]);
+  });
+
+  it.each(["resize event", "paint before resize event"])("rebuilds on height changes via %s", (trigger) => {
+    vi.useFakeTimers();
+    let rows = 24;
+    const out: string[] = [];
+    const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: vi.fn() });
+    const s = new Screen({ write: (chunk) => out.push(chunk), columns: () => 80, rows: () => rows, interactive: true });
+    const draft = { text: "draft", cursor: 5 };
+    try {
+      s.attachInput(stdin as unknown as NodeJS.ReadStream, () => {});
+      s.setComposer({ draft });
+      s.setHint("resize hint");
+      s.append({ kind: "assistant", text: Array.from({ length: 45 }, (_, i) => `line ${i}`).join("\n") });
+
+      for (const height of [12, 24]) {
+        out.length = 0;
+        rows = height;
+        if (trigger === "resize event") process.stdout.emit("resize");
+        else s.setComposer({ draft });
+        vi.advanceTimersByTime(40);
+
+        const painted = out.join("");
+        expect(painted).toContain(term.clearScreen + term.home);
+        expect(painted).toContain("line 44");
+        expect(painted).not.toContain("line 0\n");
+        expect(painted).toContain("draft");
+        expect(painted).toContain("╰");
+        expect(painted).toContain("resize hint");
+        expect(painted).toContain(term.showCursor);
+        expect(painted.startsWith(term.beginSync)).toBe(true);
+        expect(painted.endsWith(term.endSync)).toBe(true);
+
+        out.length = 0;
+        process.stdout.emit("resize");
+        s.apply({ type: "stream", reasoning: "hidden" });
+        vi.advanceTimersByTime(40);
+        expect(out).toEqual([]);
+      }
+    } finally {
+      s.finish();
+      stdin.destroy();
+    }
   });
 
   it("does not repaint when setActivity is repeated, but the one-second tick does", () => {
