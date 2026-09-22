@@ -48,7 +48,15 @@ import {
 import { compactReadings, readings, statusLine } from "./statusline.js";
 import { CommitTracker } from "./stream.js";
 import { NO_COLOR, paint, severityColor, style, term } from "./theme.js";
-import { displayWidth, truncateToWidth, wrapToWidth } from "./width.js";
+import {
+  boundaryWidth,
+  displayWidth,
+  expandTabsToBoundary,
+  truncateToBoundary,
+  truncateToWidth,
+  wrapToBoundary,
+  wrapToWidth,
+} from "./width.js";
 import type { LoopEvent } from "@motifcode/core";
 
 export interface ScreenOptions {
@@ -138,6 +146,8 @@ export class Screen {
   private settledMemo: { cells: readonly unknown[]; key: string; lines: StyledLine[] } | null = null;
   /** The rows of the last painted footer, top to bottom. */
   private footer: Row[] = [];
+  /** Rows just cleared, so a redraw can reuse them without scrolling. */
+  private reservedFooterRows = 0;
   /** Where the cursor was left: the footer row index and column, or null when below the footer. */
   private cursorAt: { row: number; col: number } | null = null;
   /** The width the footer was painted at, to notice a resize. */
@@ -461,7 +471,18 @@ export class Screen {
     // that appears to have produced nothing.
     const settled = this.settledLines();
     const fresh = this.commits.take(settled.map((l) => l.text));
-    for (const line of settled.slice(settled.length - fresh.length)) this.write(this.colour(line) + "\n");
+    const freshLines = settled.slice(settled.length - fresh.length);
+    // Those lines are written where the footer just was. The reservation has
+    // to shrink by every row they can occupy at the safe boundary width, or
+    // the next footer may draw into rows the transcript already consumed.
+    const width = this.columns();
+    let emitted = 0;
+    for (const line of freshLines) {
+      const text = expandTabsToBoundary(line.text);
+      emitted += wrapToBoundary(text, width).length;
+      this.write(this.colour({ ...line, text }) + "\n");
+    }
+    this.reservedFooterRows = Math.max(0, this.reservedFooterRows - emitted);
     this.paintFooter();
   }
 
@@ -496,12 +517,13 @@ export class Screen {
     const settled = this.settledLines();
     const fresh = this.commits.take(settled.map((l) => l.text));
     void fresh;
-    const footer = this.buildFooter(width);
+    const footer = this.clipFooter(this.buildFooter(width));
     const physical: string[] = [];
     for (const l of settled) for (const t of wrapToWidth(l.text, width)) physical.push(this.colour({ ...l, text: t }));
     const keep = Math.max(0, this.rowCount() - footer.rows.length - 1);
     this.footer = [];
     this.cursorAt = null;
+    this.reservedFooterRows = 0;
     this.write(term.clearScreen + term.home);
     for (const line of physical.slice(Math.max(0, physical.length - keep))) this.write(line + "\n");
     this.writeFooter(footer, width);
@@ -516,7 +538,39 @@ export class Screen {
   private paintFooter(): void {
     if (!this.interactive) return;
     const width = this.columns();
-    this.writeFooter(this.buildFooter(width), width);
+    this.writeFooter(this.clipFooter(this.buildFooter(width)), width);
+  }
+
+  /**
+   * Drop rows that cannot fit above the last screen row.
+   *
+   * The kept rows are the bottom of the footer, so the newest tail text and
+   * the composer stay. The omitted prefix is not committed: it is still the
+   * unstable tail, and it appears once when the turn settles.
+   */
+  private clipFooter(footer: { rows: Row[]; cursor: { row: number; col: number } | null }): {
+    rows: Row[];
+    cursor: { row: number; col: number } | null;
+  } {
+    const limit = Math.max(1, this.rowCount() - 1);
+    if (footer.rows.length <= limit) return footer;
+    const dropped = footer.rows.length - limit;
+    const rows = footer.rows.slice(dropped);
+    if (!footer.cursor) return { rows, cursor: null };
+    return { rows, cursor: { row: Math.max(0, footer.cursor.row - dropped), col: footer.cursor.col } };
+  }
+
+  /**
+   * A footer row must stay one terminal row even where Ambiguous is width 2.
+   * Tabs are expanded first. Colour is kept when the original plain text fits;
+   * otherwise the row is cut as plain text rather than wrapped by the terminal.
+   */
+  private fitBoundary(row: Row, width: number): Row {
+    const plain = row.text.replace(/\x1b\[[0-9;]*m/g, "");
+    const expanded = expandTabsToBoundary(plain);
+    if (expanded === plain && boundaryWidth(plain) <= width) return row;
+    const fitted = truncateToBoundary(expanded, width);
+    return { text: fitted, width: displayWidth(fitted) };
   }
 
   /** The footer's rows for a width, and where the cursor belongs among them. */
@@ -532,7 +586,7 @@ export class Screen {
     if (this.activity) {
       const glyph = SPINNER[this.tick % SPINNER.length]!;
       const seconds = Math.max(0, Math.floor((this.now() - this.activity.since) / 1000));
-      const text = `${glyph} ${this.activity.text} (esc to interrupt · ${seconds}s)`;
+      const text = `${glyph} ${this.activity.text} (esc to interrupt | ${seconds}s)`;
       rows.push(...this.rows(truncateToWidth(text, width), (t) => paint(t, style.faint)));
     }
 
@@ -554,42 +608,71 @@ export class Screen {
   }
 
   private writeFooter(footer: { rows: Row[]; cursor: { row: number; col: number } | null }, width: number): void {
-    const { rows, cursor } = footer;
+    const rows = footer.rows.map((row) => this.fitBoundary(row, width));
+    const cursor = footer.cursor;
+    const reserved = this.reservedFooterRows;
+    this.reservedFooterRows = 0;
+    // A same-height redraw moves with CUU/CUD. LF is only the growth, and only
+    // as many as the new rows: one LF per row is what scrolls a copy into scrollback.
+    const growth = Math.max(0, rows.length - reserved);
+    if (growth > 0) {
+      if (reserved > 0) this.write(term.down(reserved));
+      this.write("\n".repeat(growth));
+      this.write(term.up(reserved + growth));
+    }
     if (this.composer) this.write(term.hideCursor);
-    for (const r of rows) this.write(r.text + "\n");
+    for (let i = 0; i < rows.length; i++) {
+      this.write(rows[i]!.text + term.lineStart);
+      if (i < rows.length - 1) this.write(term.down(1));
+    }
     this.footer = rows;
     this.paintedWidth = width;
     this.cursorAt = cursor;
 
-    if (cursor) {
-      // The cursor sits on the empty line below the footer; lift it into the
-      // composer so the terminal's input method composes in the right place.
-      this.write(term.up(rows.length - cursor.row) + term.column(cursor.col) + term.showCursor);
+    if (cursor && rows.length > 0) {
+      // The cursor is on the last footer row. Lift it into the composer so the
+      // terminal's input method composes in the right place.
+      this.write(term.up(rows.length - 1 - cursor.row) + term.column(cursor.col) + term.showCursor);
+    } else if (rows.length > 0) {
+      this.write(term.down(1) + term.lineStart);
     }
   }
 
   /**
    * The composer block: a bordered box around the editor rows, then the menu.
    *
-   * Every box row is exactly the terminal width, so the right edge lines up
-   * and nothing wraps. Returns where the cursor belongs among the rows.
+   * The box is ASCII, not box-drawing. Those glyphs are East Asian Width
+   * Ambiguous, and a row of them counted as one column wraps on a terminal
+   * that draws them as two. The last column is left empty so the following
+   * cursor move cannot trip a pending wrap. A terminal narrower than the box
+   * gets one truncated row instead. Returns where the cursor belongs.
    */
   private composerRows(view: ComposerView, width: number): { rows: Row[]; cursorRow: number; cursorCol: number } {
-    const inner = Math.max(4, width - 4);
+    const limit = Math.max(1, width - 1);
+    // One visible column per input code point keeps the renderer's cursor index
+    // valid while preventing a pasted tab from moving to a terminal tab stop.
+    const draftText = view.secret ? "*".repeat([...view.draft.text].length) : view.draft.text.replace(/\t/g, " ");
+    if (limit < 7) {
+      const shown = truncateToWidth(draftText === "" ? "> " : `> ${draftText}`, limit);
+      return {
+        rows: [{ text: paint(shown, style.faint), width: displayWidth(shown) }],
+        cursorRow: 0,
+        cursorCol: Math.min(displayWidth(shown), Math.max(0, limit - 1)),
+      };
+    }
+    const inner = limit - 4;
     // The box takes four columns: its edges and a space inside each.
-    const draft = view.secret
-      ? { text: "•".repeat([...view.draft.text].length), cursor: view.draft.cursor }
-      : view.draft;
+    const draft = { ...view.draft, text: draftText };
     const render = renderComposer(draft, {
       width: inner,
       prompt: view.secret ? view.secret.prompt : "> ",
       ...(view.placeholder !== undefined && !view.secret ? { placeholder: view.placeholder } : {}),
     });
     const border = (l: string, r: string): Row => ({
-      text: paint(`${l}${"─".repeat(inner + 2)}${r}`, style.faint),
+      text: paint(`${l}${"-".repeat(inner + 2)}${r}`, style.faint),
       width: inner + 4,
     });
-    const rows: Row[] = [border("╭", "╮")];
+    const rows: Row[] = [border("+", "+")];
     if (view.confirm) {
       const fit = (s: string): string => {
         const t = truncateToWidth(s, inner);
@@ -606,9 +689,9 @@ export class Screen {
                 ? paint(fit(l), style.accent)
                 : paint(fit(l), style.faint)
               : fit(l);
-        rows.push({ text: `${paint("│ ", style.faint)}${painted}${paint(" │", style.faint)}`, width: inner + 4 });
+        rows.push({ text: `${paint("| ", style.faint)}${painted}${paint(" |", style.faint)}`, width: inner + 4 });
       }
-      rows.push(border("╰", "╯"));
+      rows.push(border("+", "+"));
       // The cursor rests on the selected choice; there is nothing to type.
       const selectedLine = view.confirm.choices.findIndex((c) => c.startsWith("❯"));
       return { rows, cursorRow: 1 + firstChoice + Math.max(0, selectedLine), cursorCol: 2 };
@@ -626,27 +709,34 @@ export class Screen {
       body.push({ text: "", title: false });
       for (const { text, title } of body) {
         const painted = title ? paint(fit(text), style.bold) : paint(fit(text), style.faint);
-        rows.push({ text: `${paint("│ ", style.faint)}${painted}${paint(" │", style.faint)}`, width: inner + 4 });
+        rows.push({ text: `${paint("| ", style.faint)}${painted}${paint(" |", style.faint)}`, width: inner + 4 });
       }
       header = body.length;
     }
     for (const row of render.rows) {
-      const body = render.placeholder ? paint(row.body, style.faint) : row.body;
-      const plainWidth = displayWidth(row.prefix) + displayWidth(row.body);
-      const pad = " ".repeat(Math.max(0, inner - plainWidth));
+      let prefix = row.prefix;
+      let bodyText = row.body;
+      if (displayWidth(prefix) > inner) {
+        prefix = truncateToWidth(prefix, inner);
+        bodyText = "";
+      } else if (displayWidth(prefix) + displayWidth(bodyText) > inner) {
+        bodyText = truncateToWidth(bodyText, inner - displayWidth(prefix));
+      }
+      const body = render.placeholder ? paint(bodyText, style.faint) : bodyText;
+      const pad = " ".repeat(Math.max(0, inner - displayWidth(prefix) - displayWidth(bodyText)));
       rows.push({
-        text: `${paint("│ ", style.faint)}${paint(row.prefix, style.accent)}${body}${pad}${paint(" │", style.faint)}`,
+        text: `${paint("| ", style.faint)}${paint(prefix, style.accent)}${body}${pad}${paint(" |", style.faint)}`,
         width: inner + 4,
       });
     }
     // +1 for the top border, plus any header rows; +2 for the box's left edge.
     const cursorRow = 1 + header + render.cursorRow;
     const cursorCol = Math.min(2 + render.cursorCol, Math.max(0, width - 1));
-    rows.push(border("╰", "╯"));
+    rows.push(border("+", "+"));
     if (view.menu && view.menu.items.length > 0 && !view.secret) {
-      const menu = renderMenu(view.menu.items, view.menu.selected, { width, ...(view.menu.prefix ? { prefix: view.menu.prefix } : {}) });
+      const menu = renderMenu(view.menu.items, view.menu.selected, { width: limit, ...(view.menu.prefix ? { prefix: view.menu.prefix } : {}) });
       menu.rows.forEach((row, i) => {
-        const t = truncateToWidth(row, width);
+        const t = truncateToWidth(row, limit);
         rows.push({
           text: i === menu.selectedRow ? paint(t, style.accent + style.bold) : paint(t, style.faint),
           width: displayWidth(t),
@@ -664,7 +754,8 @@ export class Screen {
   private hintRows(width: number): Row[] {
     const left = this.hint === "" ? "? for shortcuts" : this.hint;
     const parts = compactReadings(this.state.instruments);
-    const rightPlain = [this.label, ...parts.map((r) => `${r.label} ${r.value}`)].filter(Boolean).join(" · ");
+    const sep = " | ";
+    const rightPlain = [this.label, ...parts.map((r) => `${r.label} ${r.value}`)].filter(Boolean).join(sep);
     const rightPainted = NO_COLOR
       ? rightPlain
       : [
@@ -672,9 +763,9 @@ export class Screen {
           ...parts.map((r) => paint(`${r.label} ${r.value}`, severityColor(r.severity))),
         ]
           .filter(Boolean)
-          .join(paint(" · ", style.dim));
-    const leftText = `  ${truncateToWidth(left, Math.max(1, width - 2))}`;
-    const gap = width - displayWidth(leftText) - displayWidth(rightPlain);
+          .join(paint(sep, style.dim));
+    const leftText = truncateToBoundary(`  ${left}`, Math.max(1, width));
+    const gap = width - boundaryWidth(leftText) - boundaryWidth(rightPlain);
     if (rightPlain === "" || gap < 2) return [{ text: paint(leftText, style.faint), width: displayWidth(leftText) }];
     return [{ text: `${paint(leftText, style.faint)}${" ".repeat(gap)}${rightPainted}`, width }];
   }
@@ -687,7 +778,7 @@ export class Screen {
         const body = r.label ? `${paint(r.label, style.dim)} ${r.value}` : r.value;
         return paint(body, severityColor(r.severity));
       })
-      .join(paint("  ·  ", style.dim));
+      .join(paint("  |  ", style.dim));
   }
 
   /**
@@ -709,9 +800,10 @@ export class Screen {
     this.write(term.up(total));
     for (let i = 0; i < total; i++) {
       this.write(term.clearLine + term.lineStart);
-      if (i < total - 1) this.write("\n");
+      if (i < total - 1) this.write(term.down(1));
     }
-    this.write(term.up(total - 1));
+    if (total > 1) this.write(term.up(total - 1));
+    this.reservedFooterRows = total;
     this.footer = [];
   }
 

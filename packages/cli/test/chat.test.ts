@@ -568,7 +568,7 @@ describe("interactive session", () => {
       open.push(s);
       await vi.waitFor(() => expect(s.screen()).toContain("Paste your Infron API key to get started"));
       s.type("sk-bad");
-      await vi.waitFor(() => expect(s.screen()).toContain("key › ••••••"));
+      await vi.waitFor(() => expect(s.screen()).toContain("key › ******"));
       expect(s.screen()).not.toContain("sk-bad");
       s.type("\r");
       await vi.waitFor(() => expect(s.screen()).toContain("rejected this key"));
