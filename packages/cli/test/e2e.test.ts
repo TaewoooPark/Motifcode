@@ -238,6 +238,46 @@ describe("cli process end to end", () => {
     expect(server.bodies[2]!.messages[1]!.content).toBe("what is the answer?");
   }, 30_000);
 
+  it.each(["--print", "-p"])("restores the checkpoint transcript when resuming with %s", async (printFlag) => {
+    writeFileSync(join(dir, "resume-marker.txt"), "RESUME_MARKER");
+    server = new MockServer((turn) =>
+      turn === 1
+        ? toolCall("read", { path: "resume-marker.txt" })
+        : "</think>Resumed from the checkpoint.",
+    );
+    await server.start();
+
+    const interrupted = await runCli(
+      ["continue the task", "--max-turns", "1", "--endpoint", server.endpoint, "--no-hero"],
+      dir,
+    );
+    expect(interrupted.code, `${interrupted.stdout}\n${interrupted.stderr}`).toBe(1);
+
+    const sessions = join(dir, ".motif", "sessions");
+    const journal = join(sessions, readdirSync(sessions)[0]!);
+    // A turn-limit exit is a recorded ending for the normal one-shot command.
+    // Remove that ending to model the interrupted journal that `resume` is
+    // designed to continue, while keeping the real checkpoint and transcript.
+    const unfinished = readFileSync(journal, "utf8")
+      .trimEnd()
+      .split("\n")
+      .filter((line) => JSON.parse(line).record?.t !== "scope_end")
+      .join("\n") + "\n";
+    writeFileSync(journal, unfinished);
+    const resumed = await runCli(
+      ["resume", journal, printFlag, "--endpoint", server.endpoint],
+      dir,
+    );
+    expect(resumed.code, `${resumed.stdout}\n${resumed.stderr}`).toBe(0);
+    expect(resumed.stdout).toBe("Resumed from the checkpoint.\n");
+    expect(resumed.stderr).toMatch(/^resuming .+ from turn 1\n$/);
+    const messages = server.bodies[1]!.messages;
+    expect(messages.map((m) => m.role)).toEqual(["system", "user", "assistant", "tool"]);
+    expect(messages.filter((m) => m.role === "user" && m.content === "continue the task")).toHaveLength(1);
+    expect(messages[2]!.tool_calls).toMatchObject([{ function: { name: "read" } }]);
+    expect(messages[3]!.content).toContain("RESUME_MARKER");
+  }, 30_000);
+
   it("prints help and exits 2 for an empty task", async () => {
     // Without a terminal there is no prompt to open, so an empty command is
     // a usage error, as it always was.
