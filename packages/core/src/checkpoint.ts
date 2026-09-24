@@ -81,7 +81,7 @@ export interface ResumeCompatibility {
 export const PROTOCOL_VERSION = 2;
 
 /** Tools whose effects outlive the call, and so must never be replayed blind. */
-const MUTATING = new Set(["bash", "apply_patch", "term", "task", "mcp"]);
+const MUTATING = new Set(["bash", "write", "apply_patch", "term", "task", "mcp"]);
 
 export function isMutating(toolName: string): boolean {
   return MUTATING.has(toolName);
@@ -130,7 +130,9 @@ export function resumeBlock(
 ): ResumeBlock | null {
   if (compat !== null) return { kind: "incompatible", detail: compat };
   const inflight = checkpoint.inFlightTool;
-  if (inflight && inflight.mutating) {
+  // Older journals misclassified `write`. Keep a recorded true flag, but also
+  // apply today's classification so a legacy false flag cannot permit continuation.
+  if (inflight && (inflight.mutating || isMutating(inflight.name))) {
     return { kind: "execution_uncertain", tool: inflight.name, id: inflight.id };
   }
   return null;

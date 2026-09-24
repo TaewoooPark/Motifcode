@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { JournalEnvelopeV2 } from "@motifcode/journal";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "../../..");
@@ -287,6 +288,49 @@ describe("cli process end to end", () => {
     expect(r.code).toBe(2);
     expect(r.stdout).toContain("motif \"<task>\"");
     expect(server.bodies).toHaveLength(0);
+  }, 30_000);
+
+  it("refuses uncertain writes before contacting the model, including old false flags", async () => {
+    server = new MockServer((turn) => turn === 1
+      ? toolCall("write", { path: "write-marker.txt", content: "written once" })
+      : "</think>Continued after the completed write.");
+    await server.start();
+    const initial = await runCli([
+      "write the marker", "--max-turns", "1", "--permissions", "auto", "--endpoint", server.endpoint, "--no-hero",
+    ], dir);
+    expect(initial.code, `${initial.stdout}\n${initial.stderr}`).toBe(1);
+    expect(readFileSync(join(dir, "write-marker.txt"), "utf8")).toBe("written once");
+    const sessions = join(dir, ".motif", "sessions");
+    const journal = join(sessions, readdirSync(sessions)[0]!);
+    const lines = readFileSync(journal, "utf8").trimEnd().split("\n");
+    const intentIndex = lines.findIndex((line) => {
+      const record = JSON.parse(line).record as JournalEnvelopeV2["record"] | undefined;
+      return record?.t === "checkpoint" && record.state.inFlightTool?.name === "write";
+    });
+    expect(intentIndex).toBeGreaterThan(0);
+
+    for (const mutating of [false, true]) {
+      // Simulate a journal ending at intent, including the legacy misclassification.
+      const intent = JSON.parse(lines[intentIndex]!) as JournalEnvelopeV2;
+      if (intent.record.t !== "checkpoint") throw new Error("expected write intent");
+      intent.record.state.inFlightTool!.mutating = mutating;
+      writeFileSync(journal, [...lines.slice(0, intentIndex), JSON.stringify(intent)].join("\n") + "\n");
+      const resumed = await runCli(["resume", journal, "--print", "--endpoint", server.endpoint], dir);
+      expect(resumed.code, resumed.stderr).toBe(2);
+      expect(resumed.stdout).toBe("");
+      expect(resumed.stderr).toContain("cannot resume: the run stopped while `write`");
+      expect(resumed.stderr).toContain("Inspect the working tree, then start a new run");
+      expect(server.bodies).toHaveLength(1);
+      expect(readFileSync(join(dir, "write-marker.txt"), "utf8")).toBe("written once");
+    }
+
+    // A recorded observation and completion checkpoint make ordinary continuation safe.
+    writeFileSync(journal, lines.filter((line) => JSON.parse(line).record?.t !== "scope_end").join("\n") + "\n");
+    const completed = await runCli(["resume", journal, "--print", "--endpoint", server.endpoint], dir);
+    expect(completed.code, completed.stderr).toBe(0);
+    expect(completed.stdout).toBe("Continued after the completed write.\n");
+    expect(server.bodies).toHaveLength(2);
+    expect(server.bodies[1]!.messages.at(-1)!.role).toBe("tool");
   }, 30_000);
 
   it("refuses --interactive without a terminal, in one line", async () => {
