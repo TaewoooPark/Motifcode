@@ -13,7 +13,16 @@
  * the model will get blamed for.
  */
 
-/** Ranges from Unicode's East_Asian_Width = W or F. Coarse, and sufficient. */
+import { eastAsianWidth } from "get-east-asian-width";
+
+const TAB_SPACES = "    ";
+
+/** Display tabs as four spaces, independent of the terminal's tab stops. */
+export function expandTabs(s: string): string {
+  return s.replace(/\t/g, TAB_SPACES);
+}
+
+/** Preserve the existing terminal/emoji widths alongside current Unicode data. */
 const WIDE_RANGES: [number, number][] = [
   [0x1100, 0x115f], // Hangul Jamo
   [0x2e80, 0x303e], // CJK radicals, Kangxi
@@ -56,9 +65,11 @@ export function displayWidth(s: string): number {
   let w = 0;
   for (const ch of s) {
     const cp = ch.codePointAt(0)!;
+    if (ch === "\t") { w += TAB_SPACES.length; continue; }
     if (cp < 0x20 || cp === 0x7f) continue; // control characters print nothing
     if (isZeroWidth(cp)) continue;
-    w += isWide(cp) ? 2 : 1;
+    // Terminal width preferences cannot be inferred reliably from locale.
+    w += isWide(cp) ? 2 : eastAsianWidth(cp, { ambiguousAsWide: process.env["MOTIF_AMBIGUOUS_WIDTH"] === "2" });
   }
   return w;
 }
@@ -68,9 +79,13 @@ export function displayWidth(s: string): number {
  * Never splits a code point, and never overshoots the budget.
  */
 export function truncateToWidth(s: string, columns: number, ellipsis = "…"): string {
+  s = expandTabs(s);
+  ellipsis = expandTabs(ellipsis);
+  if (columns <= 0) return "";
   if (displayWidth(s) <= columns) return s;
+  if (displayWidth(ellipsis) > columns) return truncateToWidth(ellipsis, columns, "");
   const budget = columns - displayWidth(ellipsis);
-  if (budget <= 0) return ellipsis.slice(0, Math.max(0, columns));
+  if (budget <= 0) return ellipsis;
   let out = "";
   let w = 0;
   for (const ch of s) {
@@ -84,9 +99,13 @@ export function truncateToWidth(s: string, columns: number, ellipsis = "…"): s
 
 /** Keep the tail rather than the head — for a live ticker of the newest text. */
 export function truncateEndToWidth(s: string, columns: number, ellipsis = "…"): string {
+  s = expandTabs(s);
+  ellipsis = expandTabs(ellipsis);
+  if (columns <= 0) return "";
   if (displayWidth(s) <= columns) return s;
+  if (displayWidth(ellipsis) > columns) return truncateToWidth(ellipsis, columns, "");
   const budget = columns - displayWidth(ellipsis);
-  if (budget <= 0) return ellipsis.slice(0, Math.max(0, columns));
+  if (budget <= 0) return ellipsis;
   const chars = [...s];
   let out = "";
   let w = 0;
@@ -101,6 +120,7 @@ export function truncateEndToWidth(s: string, columns: number, ellipsis = "…")
 
 /** Pad on the right to a column budget. */
 export function padToWidth(s: string, columns: number, fill = " "): string {
+  s = expandTabs(s);
   const gap = columns - displayWidth(s);
   return gap > 0 ? s + fill.repeat(gap) : s;
 }
@@ -118,14 +138,17 @@ export function wrapToWidth(s: string, columns: number): string[] {
   const rows: string[] = [];
   let row = "";
   let used = 0;
-  for (const ch of s) {
-    const w = displayWidth(ch);
+  for (const ch of expandTabs(s)) {
+    // A two-column glyph cannot fit a one-column terminal. Keep the source
+    // intact and use an ASCII placeholder only in this displayed projection.
+    const shown = displayWidth(ch) > width ? "?" : ch;
+    const w = displayWidth(shown);
     if (used + w > width && used > 0) {
       rows.push(row);
       row = "";
       used = 0;
     }
-    row += ch;
+    row += shown;
     used += w;
   }
   rows.push(row);

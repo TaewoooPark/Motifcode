@@ -152,6 +152,11 @@ Flags: `--model`, `--endpoint`, `--env-file`, `--theme`, `--thinking`,
 `--verbose`, `--permissions ask|auto`, `--cwd`, `--channel`, `--max-turns`,
 `--max-output-tokens`, `--seed`, `--no-hero`. `motif --help` has the full list.
 
+If your terminal is configured to render East Asian Ambiguous characters as
+two columns, launch with `MOTIF_AMBIGUOUS_WIDTH=2 motif` to match its cursor and
+wrapping behavior. The default is one column. Set this in the shell environment;
+it is a terminal preference, not an API configuration value in `.env`.
+
 ---
 
 ## Get an API key from Infron

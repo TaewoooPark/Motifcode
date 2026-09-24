@@ -537,16 +537,18 @@ export class Screen {
     const width = this.columns();
     const settled = this.settledLines();
     const fresh = this.commits.take(settled.map((l) => l.text));
-    void fresh;
+    const previous = settled.slice(0, settled.length - fresh.length);
     const footer = this.buildFooter(width);
     const physical: string[] = [];
-    for (const l of settled) for (const t of wrapToWidth(l.text, width)) physical.push(this.colour({ ...l, text: t }));
+    for (const l of previous) for (const t of wrapToWidth(l.text, width)) physical.push(this.colour({ ...l, text: t }));
     const keep = Math.max(0, this.rowCount() - footer.rows.length - 1);
     this.withSync(() => {
       this.footer = [];
       this.cursorAt = null;
       this.write(term.clearScreen + term.home);
       for (const line of physical.slice(Math.max(0, physical.length - keep))) this.write(line + "\n");
+      // Commit newly settled text even when completion raced the resize.
+      for (const line of settled.slice(previous.length)) this.write(this.colour(line) + "\n");
       this.writeFooter(footer, width);
     });
   }
@@ -594,13 +596,27 @@ export class Screen {
     } else {
       rows.push(...this.rows(this.statusOnly(), (t) => t));
     }
-    return { rows, cursor };
+    // Leave one row below the footer for the parked cursor. Only the newest
+    // live rows are visible; omitted rows remain live and are never committed.
+    const limit = Math.max(0, this.rowCount() - 1);
+    let start = Math.max(0, rows.length - limit);
+    // A large draft/menu can itself exceed the viewport. Keep the editing
+    // cursor visible instead of showing only the end of the composer.
+    if (cursor && cursor.row < start) start = Math.max(0, cursor.row - Math.floor(limit / 2));
+    return {
+      rows: rows.slice(start, start + limit),
+      cursor: cursor && cursor.row >= start && cursor.row < start + limit
+        ? { row: cursor.row - start, col: cursor.col } : null,
+    };
   }
 
   private writeFooter(footer: { rows: Row[]; cursor: { row: number; col: number } | null }, width: number): void {
     const { rows, cursor } = footer;
     if (this.composer) this.write(term.hideCursor);
-    for (const r of rows) this.write(r.text + "\n");
+    // Reserve room while it contains only cleared/settled content. Advancing
+    // after drawing a live row could scroll that row into permanent history.
+    this.write(term.lineStart + term.index.repeat(rows.length) + term.up(rows.length));
+    for (const r of rows) this.write(r.text + term.down(1) + term.lineStart);
     this.footer = rows;
     this.paintedWidth = width;
     this.paintedHeight = this.rowCount();
@@ -610,7 +626,7 @@ export class Screen {
       // The cursor sits on the empty line below the footer; lift it into the
       // composer so the terminal's input method composes in the right place.
       this.write(term.up(rows.length - cursor.row) + term.column(cursor.col) + term.showCursor);
-    }
+    } else if (rows.length === 0) this.write(term.showCursor);
   }
 
   /**
@@ -620,7 +636,15 @@ export class Screen {
    * and nothing wraps. Returns where the cursor belongs among the rows.
    */
   private composerRows(view: ComposerView, width: number): { rows: Row[]; cursorRow: number; cursorCol: number } {
-    const inner = Math.max(4, width - 4);
+    const boxed = width >= 8;
+    const inner = boxed ? width - 4 : Math.max(1, width);
+    // Box drawing is Ambiguous-width in Unicode. ASCII decorations preserve
+    // the four-column frame on terminals configured to render it wide.
+    const wideBox = displayWidth("─") > 1;
+    const side = wideBox ? "|" : "│";
+    const left = boxed ? `${side} ` : "";
+    const right = boxed ? ` ${side}` : "";
+    const edge = boxed ? 2 : 0;
     // The box takes four columns: its edges and a space inside each.
     const draft = view.secret
       ? { text: "•".repeat([...view.draft.text].length), cursor: view.draft.cursor }
@@ -631,10 +655,10 @@ export class Screen {
       ...(view.placeholder !== undefined && !view.secret ? { placeholder: view.placeholder } : {}),
     });
     const border = (l: string, r: string): Row => ({
-      text: paint(`${l}${"─".repeat(inner + 2)}${r}`, style.faint),
+      text: paint(`${wideBox ? "+" : l}${(wideBox ? "-" : "─").repeat(inner + 2)}${wideBox ? "+" : r}`, style.faint),
       width: inner + 4,
     });
-    const rows: Row[] = [border("╭", "╮")];
+    const rows: Row[] = boxed ? [border("╭", "╮")] : [];
     if (view.confirm) {
       const fit = (s: string): string => {
         const t = truncateToWidth(s, inner);
@@ -651,12 +675,12 @@ export class Screen {
                 ? paint(fit(l), style.accent)
                 : paint(fit(l), style.faint)
               : fit(l);
-        rows.push({ text: `${paint("│ ", style.faint)}${painted}${paint(" │", style.faint)}`, width: inner + 4 });
+        rows.push({ text: `${paint(left, style.faint)}${painted}${paint(right, style.faint)}`, width });
       }
-      rows.push(border("╰", "╯"));
+      if (boxed) rows.push(border("╰", "╯"));
       // The cursor rests on the selected choice; there is nothing to type.
       const selectedLine = view.confirm.choices.findIndex((c) => c.startsWith("❯"));
-      return { rows, cursorRow: 1 + firstChoice + Math.max(0, selectedLine), cursorCol: 2 };
+      return { rows, cursorRow: Number(boxed) + firstChoice + Math.max(0, selectedLine), cursorCol: edge };
     }
     let header = 0;
     if (view.secret) {
@@ -671,7 +695,7 @@ export class Screen {
       body.push({ text: "", title: false });
       for (const { text, title } of body) {
         const painted = title ? paint(fit(text), style.bold) : paint(fit(text), style.faint);
-        rows.push({ text: `${paint("│ ", style.faint)}${painted}${paint(" │", style.faint)}`, width: inner + 4 });
+        rows.push({ text: `${paint(left, style.faint)}${painted}${paint(right, style.faint)}`, width });
       }
       header = body.length;
     }
@@ -680,16 +704,21 @@ export class Screen {
       const plainWidth = displayWidth(row.prefix) + displayWidth(row.body);
       const pad = " ".repeat(Math.max(0, inner - plainWidth));
       rows.push({
-        text: `${paint("│ ", style.faint)}${paint(row.prefix, style.accent)}${body}${pad}${paint(" │", style.faint)}`,
-        width: inner + 4,
+        text: `${paint(left, style.faint)}${paint(row.prefix, style.accent)}${body}${pad}${paint(right, style.faint)}`,
+        width,
       });
     }
     // +1 for the top border, plus any header rows; +2 for the box's left edge.
-    const cursorRow = 1 + header + render.cursorRow;
-    const cursorCol = Math.min(2 + render.cursorCol, Math.max(0, width - 1));
-    rows.push(border("╰", "╯"));
+    const cursorRow = Number(boxed) + header + render.cursorRow;
+    const cursorCol = Math.min(edge + render.cursorCol, Math.max(0, width - 1));
+    if (boxed) rows.push(border("╰", "╯"));
     if (view.menu && view.menu.items.length > 0 && !view.secret) {
-      const menu = renderMenu(view.menu.items, view.menu.selected, { width, ...(view.menu.prefix ? { prefix: view.menu.prefix } : {}) });
+      // Reserve the composer, hint and parked cursor before sizing the menu.
+      // Its own window follows the selection even on a short terminal.
+      const maxRows = Math.max(0, Math.min(8, this.rowCount() - rows.length - 2));
+      const menu = maxRows > 0
+        ? renderMenu(view.menu.items, view.menu.selected, { width, maxRows, ...(view.menu.prefix ? { prefix: view.menu.prefix } : {}) })
+        : { rows: [], selectedRow: -1 };
       menu.rows.forEach((row, i) => {
         const t = truncateToWidth(row, width);
         rows.push({
@@ -704,7 +733,7 @@ export class Screen {
   /**
    * The line under the prompt: a hint on the left, the session's numbers on
    * the right. The right side goes first when the two do not fit, and the
-   * hint is never truncated — "esc cl…" tells nobody what Esc does.
+   * hint is clipped only when it cannot fit by itself.
    */
   private hintRows(width: number): Row[] {
     const left = this.hint === "" ? "? for shortcuts" : this.hint;
@@ -718,7 +747,7 @@ export class Screen {
         ]
           .filter(Boolean)
           .join(paint(" · ", style.dim));
-    const leftText = `  ${truncateToWidth(left, Math.max(1, width - 2))}`;
+    const leftText = truncateToWidth(`  ${left}`, width);
     const gap = width - displayWidth(leftText) - displayWidth(rightPlain);
     if (rightPlain === "" || gap < 2) return [{ text: paint(leftText, style.faint), width: displayWidth(leftText) }];
     return [{ text: `${paint(leftText, style.faint)}${" ".repeat(gap)}${rightPainted}`, width }];
@@ -754,7 +783,7 @@ export class Screen {
     this.write(term.up(total));
     for (let i = 0; i < total; i++) {
       this.write(term.clearLine + term.lineStart);
-      if (i < total - 1) this.write("\n");
+      if (i < total - 1) this.write(term.down(1));
     }
     this.write(term.up(total - 1));
     this.footer = [];

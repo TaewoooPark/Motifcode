@@ -5,7 +5,7 @@
  * matter are the ones where those differ.
  */
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Composer, renderComposer } from "../src/composer.js";
 
 describe("editing", () => {
@@ -143,6 +143,60 @@ describe("rendering", () => {
     const r = renderComposer({ text: "abcdefgh", cursor: 8 }, { width: 10 });
     expect(r.rows.map((x) => x.body)).toEqual(["abcdefgh", ""]);
     expect(r).toMatchObject({ cursorRow: 1, cursorCol: 2 });
+  });
+});
+
+describe("narrow composer rendering", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("fits a long placeholder after a clipped prompt", () => {
+    const rendered = renderComposer({ text: "", cursor: 0 }, { width: 3, prompt: "API key > ", placeholder: "type here" });
+    expect(rendered.rows).toEqual([{ prefix: "AP", body: "…" }]);
+    expect(rendered).toMatchObject({ cursorRow: 0, cursorCol: 2 });
+  });
+
+  it("projects a wide glyph in a one-column viewport without changing the draft", () => {
+    const c = new Composer();
+    c.insert("한a");
+    c.left();
+    const rendered = renderComposer(c.snapshot(), { width: 1 });
+    expect(rendered.rows).toEqual([{ prefix: "", body: "?" }, { prefix: "", body: "a" }]);
+    expect(rendered).toMatchObject({ cursorRow: 1, cursorCol: 0 });
+    expect(c.submit()).toBe("한a");
+  });
+
+  it("locates the caret after an ambiguous glyph under either terminal policy", () => {
+    vi.stubEnv("MOTIF_AMBIGUOUS_WIDTH", "1");
+    expect(renderComposer({ text: "Ωa", cursor: 1 }, { width: 4, prompt: "> " }))
+      .toMatchObject({ rows: [{ prefix: "> ", body: "Ωa" }], cursorRow: 0, cursorCol: 3 });
+    vi.stubEnv("MOTIF_AMBIGUOUS_WIDTH", "2");
+    expect(renderComposer({ text: "Ωa", cursor: 1 }, { width: 4, prompt: "> " }))
+      .toMatchObject({ rows: [{ prefix: "> ", body: "Ω" }, { prefix: "  ", body: "a" }], cursorRow: 1, cursorCol: 2 });
+  });
+
+  it("wraps a rocket emoji and keeps its editing cursor on the physical row", () => {
+    const rendered = renderComposer({ text: "ab🚀x", cursor: 2 }, { width: 5, prompt: "> " });
+    expect(rendered.rows).toEqual([{ prefix: "> ", body: "ab" }, { prefix: "  ", body: "🚀x" }]);
+    expect(rendered).toMatchObject({ cursorRow: 1, cursorCol: 2 });
+    expect(renderComposer({ text: "🚀", cursor: 1 }, { width: 1 }))
+      .toMatchObject({ rows: [{ prefix: "", body: "?" }, { prefix: "", body: "" }], cursorRow: 1, cursorCol: 0 });
+  });
+
+  it("expands a pasted tab across narrow rows without changing its source or cursor index", () => {
+    const c = new Composer();
+    c.paste("a\tb");
+    c.left();
+    expect(c.cursor).toBe(2);
+    expect(renderComposer(c.snapshot(), { width: 1 })).toMatchObject({
+      rows: ["a", " ", " ", " ", " ", "b"].map((body) => ({ prefix: "", body })),
+      cursorRow: 5, cursorCol: 0,
+    });
+    c.left();
+    expect(renderComposer(c.snapshot(), { width: 1 })).toMatchObject({ cursorRow: 1, cursorCol: 0 });
+    c.right();
+    c.right();
+    expect(renderComposer(c.snapshot(), { width: 7 })).toMatchObject({ cursorRow: 1, cursorCol: 3 });
+    expect(c.submit()).toBe("a\tb");
   });
 });
 
