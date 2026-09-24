@@ -24,7 +24,8 @@
  * the terminal changes under it, and it has the cost it has there: Terminal
  * and iTerm keep the erased screen in scrollback, so each narrowing leaves a
  * copy behind. A widening costs nothing — no row that fitted before can wrap
- * now — so it is an ordinary repaint.
+ * now — so it is an ordinary repaint, unless the height also changes. A
+ * height change can clip rows below the composer cursor and needs a rebuild.
  *
  * The terminal's cursor is left inside the composer after each paint, so the
  * terminal's own input method composes where the text will land — Hangul
@@ -142,6 +143,8 @@ export class Screen {
   private cursorAt: { row: number; col: number } | null = null;
   /** The width the footer was painted at, to notice a resize. */
   private paintedWidth = 0;
+  /** A height change may clip the footer even when its contents are unchanged. */
+  private paintedHeight = 0;
   private composer: ComposerView | null = null;
   private hint = "";
   private label = "";
@@ -220,8 +223,8 @@ export class Screen {
   apply(event: LoopEvent): void {
     this.state = reduce(this.state, event);
     if (event.type === "stream") {
-      // Tokens arrive faster than a footer is worth repainting; one paint per
-      // frame or so keeps the text moving without the flicker.
+      // Tokens arrive faster than a footer is worth repainting. The cap only
+      // limits the rate; an unchanged footer is not painted at all.
       if (this.streamTimer) return;
       this.streamTimer = setTimeout(() => {
         this.streamTimer = null;
@@ -275,13 +278,15 @@ export class Screen {
    */
   setActivity(text: string | null): void {
     if (text === null) {
+      if (this.activity === null && this.ticker === null) return;
       this.activity = null;
       if (this.ticker) {
         clearInterval(this.ticker);
         this.ticker = null;
       }
     } else {
-      if (this.activity?.text !== text) this.activity = { text, since: this.now() };
+      const same = this.activity?.text === text;
+      if (!same) this.activity = { text, since: this.now() };
       if (!this.ticker && this.interactive) {
         this.ticker = setInterval(() => {
           this.tick += 1;
@@ -290,6 +295,9 @@ export class Screen {
         // A ticker must not hold the process open once the loop is done.
         this.ticker.unref?.();
       }
+      // The spinner and the elapsed second are the ticker's to paint. Reporting
+      // the same activity again is not a visible change.
+      if (same) return;
     }
     this.paint();
   }
@@ -323,12 +331,12 @@ export class Screen {
       }
     };
     // A drag sends a burst of resizes; one repaint at the end is enough.
-    // Narrower than the last paint means a rebuild; wider is a repaint.
+    // Narrower or a different height means a rebuild; wider is a repaint.
     const onResize = (): void => {
       if (this.resizeTimer) clearTimeout(this.resizeTimer);
       this.resizeTimer = setTimeout(() => {
         this.resizeTimer = null;
-        if (this.columns() < this.paintedWidth) this.repaintAll();
+        if (this.columns() < this.paintedWidth || this.rowCount() !== this.paintedHeight) this.repaintAll();
         else this.paint();
       }, 40);
     };
@@ -381,7 +389,6 @@ export class Screen {
     // Showing rewrites lines already committed to scrollback, so the stable
     // region has to be rebuilt rather than appended to.
     this.commits.reset();
-    this.clearFooter();
     this.paint();
   }
 
@@ -427,7 +434,6 @@ export class Screen {
   setCwd(cwd: string): void {
     this.cwd = cwd;
     this.commits.reset();
-    this.clearFooter();
     this.paint();
   }
 
@@ -435,7 +441,6 @@ export class Screen {
   toggleVerbose(): void {
     this.verbose = !this.verbose;
     this.commits.reset();
-    this.clearFooter();
     this.paint();
   }
 
@@ -449,20 +454,57 @@ export class Screen {
   }
 
   private paint(): void {
-    if (this.interactive && this.footer.length > 0 && this.columns() < this.paintedWidth) {
-      // Narrowed since the last paint, with or without a resize event: the
-      // rows on screen have been reflowed and cannot be counted over.
+    if (
+      this.interactive && this.footer.length > 0 &&
+      (this.columns() < this.paintedWidth || this.rowCount() !== this.paintedHeight)
+    ) {
+      // Resized since the last paint, with or without a resize event: rows
+      // may have reflowed or been clipped, so their old positions are stale.
       this.repaintAll();
       return;
     }
-    this.clearFooter();
-    // Only settled cells go to scrollback. A tool cell between `tool_start` and
-    // `tool_end` is still growing, and committing it there would print a tool
-    // that appears to have produced nothing.
+    const width = this.columns();
+    const next = this.interactive ? this.buildFooter(width) : null;
     const settled = this.settledLines();
-    const fresh = this.commits.take(settled.map((l) => l.text));
-    for (const line of settled.slice(settled.length - fresh.length)) this.write(this.colour(line) + "\n");
-    this.paintFooter();
+    const pending = Math.max(0, settled.length - this.commits.count);
+    // Compare before clearing. A hidden reasoning token changes no row, and
+    // erasing the footer to draw it back is the flash.
+    if (pending === 0 && this.sameFooter(next, width)) return;
+    this.withSync(() => {
+      this.clearFooter();
+      // Only settled cells go to scrollback. A tool cell between `tool_start` and
+      // `tool_end` is still growing, and committing it there would print a tool
+      // that appears to have produced nothing.
+      const fresh = this.commits.take(settled.map((l) => l.text));
+      for (const line of settled.slice(settled.length - fresh.length)) this.write(this.colour(line) + "\n");
+      if (next) this.writeFooter(next, width);
+      else this.paintFooter();
+    });
+  }
+
+  /** True when the footer about to be drawn is the one already on screen. */
+  private sameFooter(next: { rows: Row[]; cursor: { row: number; col: number } | null } | null, width: number): boolean {
+    if (!this.interactive || next === null) return true;
+    if (this.paintedWidth !== width || this.footer.length !== next.rows.length) return false;
+    if (this.cursorAt?.row !== next.cursor?.row || this.cursorAt?.col !== next.cursor?.col) return false;
+    return this.footer.every((row, i) => row.text === next.rows[i]!.text);
+  }
+
+  /**
+   * One terminal update. Synchronized output is requested only while a footer
+   * is actually being replaced; a skipped paint writes neither sequence.
+   */
+  private withSync(body: () => void): void {
+    if (!this.interactive) {
+      body();
+      return;
+    }
+    this.write(term.beginSync);
+    try {
+      body();
+    } finally {
+      this.write(term.endSync);
+    }
   }
 
   /**
@@ -500,11 +542,13 @@ export class Screen {
     const physical: string[] = [];
     for (const l of settled) for (const t of wrapToWidth(l.text, width)) physical.push(this.colour({ ...l, text: t }));
     const keep = Math.max(0, this.rowCount() - footer.rows.length - 1);
-    this.footer = [];
-    this.cursorAt = null;
-    this.write(term.clearScreen + term.home);
-    for (const line of physical.slice(Math.max(0, physical.length - keep))) this.write(line + "\n");
-    this.writeFooter(footer, width);
+    this.withSync(() => {
+      this.footer = [];
+      this.cursorAt = null;
+      this.write(term.clearScreen + term.home);
+      for (const line of physical.slice(Math.max(0, physical.length - keep))) this.write(line + "\n");
+      this.writeFooter(footer, width);
+    });
   }
 
   /** Footer rows from text that may be longer than the width: split here, never wrapped by the terminal. */
@@ -559,6 +603,7 @@ export class Screen {
     for (const r of rows) this.write(r.text + "\n");
     this.footer = rows;
     this.paintedWidth = width;
+    this.paintedHeight = this.rowCount();
     this.cursorAt = cursor;
 
     if (cursor) {

@@ -105,4 +105,10 @@ export const term = {
   down: (n: number) => (n > 0 ? `${ESC}${n}B` : ""),
   /** Absolute column, 1-based in the terminal; this takes 0-based. */
   column: (col: number) => `${ESC}${col + 1}G`,
+  /**
+   * Synchronized output (DEC 2026). The erase and the redraw are one update,
+   * so a terminal that understands it paints the result and not the blank.
+   */
+  beginSync: `${ESC}?2026h`,
+  endSync: `${ESC}?2026l`,
 } as const;
