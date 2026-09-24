@@ -39,9 +39,11 @@ import { BRACKETED_PASTE, KeyDecoder, type Key } from "./keys.js";
 import { renderMenu, type MenuItem } from "./menu.js";
 import {
   BULLET,
+  renderCellStyled,
   renderPendingStyled,
   renderSettledStyled,
   renderTailStyled,
+  settledCount,
   type RenderOptions,
   type StyledLine,
   type Tone,
@@ -106,6 +108,8 @@ export type KeyHandler = (key: Key) => void;
 interface Row {
   text: string;
   width: number;
+  /** A mutable leading bullet can pulse without recolouring its body. */
+  bulletTail?: string;
 }
 
 const SPINNER = ["✻", "✼", "✽", "✾"];
@@ -149,6 +153,7 @@ export class Screen {
   private hint = "";
   private label = "";
   private activity: { text: string; since: number } | null = null;
+  private working = false;
   private ticker: NodeJS.Timeout | null = null;
   private tick = 0;
   private shortcutsOpen = false;
@@ -277,29 +282,34 @@ export class Screen {
    * and the seconds elapsed. Null when it is waiting for the person.
    */
   setActivity(text: string | null): void {
-    if (text === null) {
-      if (this.activity === null && this.ticker === null) return;
-      this.activity = null;
-      if (this.ticker) {
-        clearInterval(this.ticker);
-        this.ticker = null;
-      }
-    } else {
-      const same = this.activity?.text === text;
-      if (!same) this.activity = { text, since: this.now() };
-      if (!this.ticker && this.interactive) {
-        this.ticker = setInterval(() => {
-          this.tick += 1;
-          this.paint();
-        }, 1000);
-        // A ticker must not hold the process open once the loop is done.
-        this.ticker.unref?.();
-      }
-      // The spinner and the elapsed second are the ticker's to paint. Reporting
-      // the same activity again is not a visible change.
-      if (same) return;
-    }
+    if (this.activity?.text === text || (text === null && this.activity === null)) return;
+    this.activity = text === null ? null : { text, since: this.now() };
+    this.updateTicker();
     this.paint();
+  }
+
+  /** Work can continue after the activity label is replaced by streamed prose. */
+  setWorking(working: boolean): void {
+    if (this.working === working) return;
+    this.working = working;
+    this.tick = 0;
+    this.updateTicker();
+    this.paint();
+  }
+
+  private updateTicker(): void {
+    const needed = this.interactive && (this.activity !== null || (this.working && !NO_COLOR));
+    if (!needed && this.ticker) {
+      clearInterval(this.ticker);
+      this.ticker = null;
+    } else if (needed && !this.ticker) {
+      this.ticker = setInterval(() => {
+        this.tick += 1;
+        this.paint(this.working);
+      }, 1000);
+      // A ticker must not hold the process open once the loop is done.
+      this.ticker.unref?.();
+    }
   }
 
   toggleShortcuts(): void {
@@ -453,7 +463,7 @@ export class Screen {
     this.repaintAll();
   }
 
-  private paint(): void {
+  private paint(tickOnly = false): void {
     if (
       this.interactive && this.footer.length > 0 &&
       (this.columns() < this.paintedWidth || this.rowCount() !== this.paintedHeight)
@@ -470,6 +480,7 @@ export class Screen {
     // Compare before clearing. A hidden reasoning token changes no row, and
     // erasing the footer to draw it back is the flash.
     if (pending === 0 && this.sameFooter(next, width)) return;
+    if (tickOnly && pending === 0 && next && this.paintTick(next, width)) return;
     this.withSync(() => {
       this.clearFooter();
       // Only settled cells go to scrollback. A tool cell between `tool_start` and
@@ -480,6 +491,28 @@ export class Screen {
       if (next) this.writeFooter(next, width);
       else this.paintFooter();
     });
+  }
+
+  /** A pulse must not append footer copies to scrollback or disturb the editor. */
+  private paintTick(next: { rows: Row[]; cursor: { row: number; col: number } | null }, width: number): boolean {
+    if (this.paintedWidth !== width || this.footer.length !== next.rows.length) return false;
+    if (this.cursorAt?.row !== next.cursor?.row || this.cursorAt?.col !== next.cursor?.col) return false;
+    // A long live reply can extend above the viewport. Never clamp a move to
+    // an off-screen row onto the terminal's first visible line.
+    const firstVisible = Math.max(0, next.rows.length - this.rowCount() + 1);
+    const changed = next.rows.flatMap((row, i) => i >= firstVisible && row.text !== this.footer[i]!.text ? [i] : []);
+    if (changed.length > 0) this.withSync(() => {
+      const anchor = this.cursorAt?.row ?? next.rows.length;
+      let at = anchor;
+      this.write(term.hideCursor);
+      for (const i of changed) {
+        this.write(term.up(at - i) + term.down(i - at) + term.lineStart + term.clearLine + next.rows[i]!.text);
+        at = i;
+      }
+      this.write(term.up(at - anchor) + term.down(anchor - at) + term.column(this.cursorAt?.col ?? 0) + term.showCursor);
+    });
+    this.footer = next.rows;
+    return true;
   }
 
   /** True when the footer about to be drawn is the one already on screen. */
@@ -567,19 +600,25 @@ export class Screen {
   private buildFooter(width: number): { rows: Row[]; cursor: { row: number; col: number } | null } {
     const opts = { ...this.renderOptions, width };
     const rows: Row[] = [];
+    const liveRows = (l: StyledLine, mutable = true): Row[] => wrapToWidth(l.text, width).map((text, i) => ({
+      text: this.colour({ ...l, text }),
+      width: displayWidth(text),
+      ...(mutable && i === 0 && text.startsWith(BULLET) ? { bulletTail: this.colour({ ...l, text: text.slice(BULLET.length) }) } : {}),
+    }));
 
-    for (const l of renderPendingStyled(this.state, opts)) {
-      rows.push(...this.rows(l.text, (t) => this.colour({ ...l, text: t })));
+    for (const cell of this.state.cells.slice(settledCount(this.state))) {
+      for (const l of renderCellStyled(cell, opts)) rows.push(...liveRows(l, cell.kind === "tool" && cell.ok === undefined));
     }
-    for (const l of renderTailStyled(this.state, opts)) rows.push(...this.rows(l.text, (t) => this.colour({ ...l, text: t })));
+    for (const l of renderTailStyled(this.state, opts)) rows.push(...liveRows(l));
 
     if (this.activity) {
-      const glyph = SPINNER[this.tick % SPINNER.length]!;
+      const glyph = this.working ? BULLET : SPINNER[this.tick % SPINNER.length]!;
       const seconds = Math.max(0, Math.floor((this.now() - this.activity.since) / 1000));
       const text = `${glyph} ${this.activity.text} (esc to interrupt · ${seconds}s)`;
-      rows.push(...this.rows(truncateToWidth(text, width), (t) => paint(t, style.faint)));
+      rows.push(...liveRows({ text: truncateToWidth(text, width), tone: "dim" }));
     }
 
+    const beforeComposer = rows.length;
     let cursor: { row: number; col: number } | null = null;
     if (this.composer) {
       const block = this.composerRows(this.composer, width);
@@ -593,6 +632,25 @@ export class Screen {
       }
     } else {
       rows.push(...this.rows(this.statusOnly(), (t) => t));
+    }
+    if (this.working) {
+      const firstVisible = Math.max(0, rows.length - this.rowCount() + 1);
+      let target = rows.findLastIndex((row, i) => i >= firstVisible && row.bulletTail !== undefined);
+      // Hidden reasoning, settled prose and a long live reply all need an
+      // indicator near the composer when their own bullet is not visible.
+      if (target < 0) {
+        const fallback = liveRows({ text: truncateToWidth(`${BULLET} Working…`, width), tone: "bullet" });
+        rows.splice(beforeComposer, 0, ...fallback);
+        if (cursor) cursor.row += fallback.length;
+        target = beforeComposer;
+      }
+      const row = rows[target]!;
+      if (row.bulletTail !== undefined) {
+        // Explicitly hide the glyph: terminal dim styling is not reliably
+        // visible, and ANSI blink depends on the terminal's preferences.
+        const dot = !NO_COLOR && this.tick % 2 === 1 ? " ".repeat(displayWidth(BULLET)) : paint(BULLET, style.accent);
+        row.text = dot + row.bulletTail;
+      }
     }
     return { rows, cursor };
   }
@@ -764,7 +822,13 @@ export class Screen {
   finish(): void {
     this.detachInput?.();
     this.detachInput = null;
-    this.setActivity(null);
+    this.working = false;
+    this.activity = null;
+    this.updateTicker();
+    if (this.streamTimer) {
+      clearTimeout(this.streamTimer);
+      this.streamTimer = null;
+    }
     this.composer = null;
     this.hint = "";
     this.clearFooter();

@@ -76,8 +76,9 @@ function session(transport: Transport, extra: Partial<ConstructorParameters<type
   agents.registerAll(BUILTIN_AGENTS);
   const cwd = mkdtempSync(join(tmpdir(), "motif-chat-"));
   let now = 1_000_000;
+  const terminal = new Screen({ write: (s) => out.push(s), columns: () => 100, interactive: true, cwd });
   const chat = new Chat({
-    screen: new Screen({ write: (s) => out.push(s), columns: () => 100, interactive: true, cwd }),
+    screen: terminal,
     stdin: stdin as unknown as NodeJS.ReadStream,
     settings: { model: "motif/motif-3", endpoint: "https://llm.onerouter.pro", channel: "toolcall", maxTurns: 20, cwd, theme: "motif", compactAt: 0.75, permissions: "auto" },
     channelPolicy: "fixed",
@@ -97,7 +98,7 @@ function session(transport: Transport, extra: Partial<ConstructorParameters<type
     stdin.write(s);
   };
   const screen = (): string => strip(out.join(""));
-  return { chat, type, screen, finished, tick: (ms: number) => (now += ms), cwd };
+  return { chat, type, screen, terminal, finished, tick: (ms: number) => (now += ms), cwd };
 }
 
 // In a conversation the first `done` is final: the person is the confirmation.
@@ -200,6 +201,65 @@ describe("interactive session", () => {
     expect(s.screen()).toContain("Interrupted");
     // The conversation keeps what happened; the next task follows it.
     expect(s.chat.transcript.map((m) => m.role)).toEqual(["user"]);
+  });
+
+  it("keeps the working indicator through partial prose, pauses for approval, and resumes until completion", async () => {
+    const t = new GateTransport([toolCallBody("bash", { command: "echo pulse-approval" }), ...reply("done")]);
+    const complete = t.complete.bind(t);
+    t.complete = (req) => {
+      req.onDelta?.({ content: "I will create the game now." });
+      return complete(req);
+    };
+    t.gated = true;
+    const s = session(t);
+    open.push(s);
+    const working = vi.spyOn(s.terminal, "setWorking");
+    s.type(`${ESC}[Z`); // Ask before the tool runs.
+    s.type("create a game\r");
+    await vi.waitFor(() => expect(t.seen).toHaveLength(1));
+    expect(working).toHaveBeenLastCalledWith(true);
+
+    t.open();
+    await vi.waitFor(() => expect(s.screen()).toContain("Run this command?"));
+    expect(s.chat.running).toBe(true);
+    expect(working).toHaveBeenLastCalledWith(false);
+
+    t.gated = true;
+    s.type("1");
+    await vi.waitFor(() => expect(t.seen).toHaveLength(2));
+    expect(working).toHaveBeenLastCalledWith(true);
+    t.open();
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    expect(working).toHaveBeenLastCalledWith(false);
+  });
+
+  it.each(["interrupt", "error"])("stops the working indicator after %s and can run again", async (ending) => {
+    const t = new GateTransport([...reply("first"), ...reply("second")]);
+    const complete = t.complete.bind(t);
+    t.complete = async (req) => {
+      const result = await complete(req);
+      if (ending === "error" && t.seen.length === 1) throw new Error("fixture transport failure");
+      return result;
+    };
+    t.gated = true;
+    const s = session(t);
+    open.push(s);
+    const working = vi.spyOn(s.terminal, "setWorking");
+    s.type("first task\r");
+    await vi.waitFor(() => expect(t.seen).toHaveLength(1));
+    expect(working).toHaveBeenLastCalledWith(true);
+    if (ending === "interrupt") s.type(ESC);
+    else t.open();
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    expect(working).toHaveBeenLastCalledWith(false);
+
+    t.gated = true;
+    s.type("second task\r");
+    await vi.waitFor(() => expect(t.seen).toHaveLength(2));
+    expect(working).toHaveBeenLastCalledWith(true);
+    t.open();
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(2));
+    expect(working).toHaveBeenLastCalledWith(false);
   });
 
   it("queues messages sent while a task runs, and sends them in order after", async () => {

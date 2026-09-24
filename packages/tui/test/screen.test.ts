@@ -6,9 +6,10 @@
  */
 
 import { PassThrough } from "node:stream";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Screen } from "../src/screen.js";
-import { term } from "../src/theme.js";
+import { BULLET } from "../src/render.js";
+import { style, term } from "../src/theme.js";
 
 function screen(write: (s: string) => void): Screen {
   return new Screen({
@@ -147,5 +148,206 @@ describe("unchanged footer redraws", () => {
     expect(painted.endsWith(term.endSync)).toBe(true);
     expect(painted.indexOf(term.clearLine)).toBeGreaterThan(term.beginSync.length);
     expect(painted.indexOf(term.clearLine)).toBeLessThan(painted.lastIndexOf(term.endSync));
+  });
+});
+
+describe("working indicator", () => {
+  let WorkingScreen: typeof Screen;
+  const screen = (write: (s: string) => void): Screen => new WorkingScreen({
+    write, columns: () => 80, rows: () => 24, interactive: true, now: () => 1_000,
+  });
+  beforeEach(async () => {
+    vi.stubEnv("NO_COLOR", undefined);
+    vi.stubEnv("TERM", "xterm-256color");
+    vi.resetModules();
+    WorkingScreen = (await import("../src/screen.js")).Screen;
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+  });
+
+  it("keeps one slow pulse after streamed prose replaces the activity label", () => {
+    vi.useFakeTimers();
+    const out: string[] = [];
+    const s = screen((chunk) => out.push(chunk));
+    s.setComposer({ draft: { text: "draft", cursor: 3 } });
+    s.setWorking(true);
+    s.setActivity("Thinking…");
+    s.apply({ type: "stream", content: "Now writing the game." });
+    vi.advanceTimersByTime(40);
+    s.setActivity(null);
+    out.length = 0;
+    s.setWorking(true);
+    expect(out).toEqual([]);
+    expect(vi.getTimerCount()).toBe(1);
+
+    vi.advanceTimersByTime(960);
+    const hidden = out.join("");
+    expect(hidden).toContain(term.clearLine + "  Now writing the game.");
+    expect(hidden).not.toContain(BULLET);
+    expect(hidden).not.toContain("Working…");
+    expect(hidden).not.toContain("draft");
+    expect(hidden).not.toContain("\n");
+    expect(hidden).toContain(term.column(7) + term.showCursor);
+    expect(hidden.startsWith(term.beginSync)).toBe(true);
+    expect(hidden.endsWith(term.endSync)).toBe(true);
+
+    out.length = 0;
+    vi.advanceTimersByTime(1000);
+    expect(out.join("")).toContain(style.accent + BULLET + style.reset + " Now writing the game.");
+
+    vi.advanceTimersByTime(1000);
+    out.length = 0;
+    s.setWorking(false);
+    expect(out.join("")).toContain(style.accent + BULLET + style.reset + " Now writing the game.");
+    expect(vi.getTimerCount()).toBe(0);
+    s.finish();
+  });
+
+  it("uses the activity row for work, then stops and resumes with its task state", () => {
+    vi.useFakeTimers();
+    const out: string[] = [];
+    const s = screen((chunk) => out.push(chunk));
+    s.setWorking(true);
+    out.length = 0;
+    s.setActivity("Calling write…");
+    expect(out.join("")).toContain("Calling write…");
+    expect(out.join("")).not.toContain("Working…");
+    s.setActivity(null);
+    s.setWorking(false);
+    out.length = 0;
+    vi.advanceTimersByTime(5000);
+    expect(out).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+
+    s.setWorking(true);
+    expect(out.join("")).toContain("Working…");
+    expect(out.join("")).toContain(BULLET);
+    expect(vi.getTimerCount()).toBe(1);
+    s.finish();
+  });
+
+  it("does not animate or re-emit completed transcript while hidden reasoning continues", () => {
+    vi.useFakeTimers();
+    const out: string[] = [];
+    const s = screen((chunk) => out.push(chunk));
+    s.append({ kind: "assistant", text: "Completed step" });
+    s.setWorking(true);
+    out.length = 0;
+    s.apply({ type: "stream", reasoning: "hidden" });
+    vi.advanceTimersByTime(40);
+    expect(out).toEqual([]);
+    vi.advanceTimersByTime(960);
+    expect(out.join("")).toContain("Working…");
+    expect(out.join("")).not.toContain(BULLET);
+    expect(out.join("")).not.toContain("Completed step");
+    expect(out.join("")).not.toContain("hidden");
+    expect(out.join("")).not.toContain("\n");
+    s.finish();
+  });
+
+  it("pulses the latest running tool rather than a completed tool behind it", () => {
+    vi.useFakeTimers();
+    const out: string[] = [];
+    const s = screen((chunk) => out.push(chunk));
+    s.setWorking(true);
+    s.apply({ type: "tool_start", call: { id: "a", name: "bash", arguments: { command: "still-running" }, repaired: false, validated: true } });
+    s.apply({ type: "tool_start", call: { id: "b", name: "bash", arguments: { command: "finished" }, repaired: false, validated: true } });
+    s.apply({ type: "tool_end", id: "b", ok: true, output: "done", ms: 1 });
+    out.length = 0;
+    vi.advanceTimersByTime(1000);
+    expect(out.join("")).toContain("still-running");
+    expect(out.join("")).not.toContain(BULLET);
+    expect(out.join("")).not.toContain("finished");
+    expect(out.join("")).not.toContain("Working…");
+    expect(out.join("")).not.toContain("\n");
+    s.finish();
+  });
+
+  it("keeps a visible indicator for tall live replies without adding scrollback on ticks", () => {
+    vi.useFakeTimers();
+    const out: string[] = [];
+    const s = screen((chunk) => out.push(chunk));
+    s.setComposer({ draft: { text: "", cursor: 0 } });
+    s.setWorking(true);
+    s.apply({ type: "stream", content: Array.from({ length: 45 }, (_, i) => `line ${i}`).join("\n") });
+    vi.advanceTimersByTime(40);
+    expect(out.join("")).toContain("Working…");
+    out.length = 0;
+    vi.advanceTimersByTime(3000);
+    const ticks = out.join("");
+    expect(ticks.match(/Working…/g)).toHaveLength(3);
+    expect(ticks).not.toContain("line 0");
+    expect(ticks).not.toContain("line 44");
+    expect(ticks).not.toContain("\n");
+    expect(ticks).not.toContain(term.clearScreen);
+    s.finish();
+  });
+
+  it("rebuilds at a changed terminal height before using pulse row positions", () => {
+    vi.useFakeTimers();
+    let rows = 24;
+    const out: string[] = [];
+    const s = new WorkingScreen({ write: (chunk) => out.push(chunk), columns: () => 80, rows: () => rows, interactive: true });
+    s.setComposer({ draft: { text: "draft", cursor: 5 } });
+    s.setWorking(true);
+    out.length = 0;
+    rows = 12;
+    vi.advanceTimersByTime(1000);
+    expect(out.join("")).toContain(term.clearScreen + term.home);
+    expect(out.join("")).toContain("draft");
+    out.length = 0;
+    vi.advanceTimersByTime(1000);
+    expect(out.join("")).not.toContain("\n");
+    s.finish();
+  });
+
+  it("clears both the pulse and a pending stream flush on finish", () => {
+    vi.useFakeTimers();
+    const out: string[] = [];
+    const s = screen((chunk) => out.push(chunk));
+    s.setWorking(true);
+    s.apply({ type: "stream", content: "pending" });
+    expect(vi.getTimerCount()).toBe(2);
+    s.finish();
+    expect(vi.getTimerCount()).toBe(0);
+    out.length = 0;
+    vi.advanceTimersByTime(5000);
+    expect(out).toEqual([]);
+  });
+
+  it("adds no output or ticker to piped runs", () => {
+    vi.useFakeTimers();
+    const out: string[] = [];
+    const s = new WorkingScreen({ write: (chunk) => out.push(chunk), interactive: false });
+    s.setWorking(true);
+    s.setActivity("Thinking…");
+    vi.advanceTimersByTime(5000);
+    expect(out).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+    s.finish();
+  });
+
+  it("uses a static, uncoloured indicator with NO_COLOR", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("NO_COLOR", "1");
+    vi.resetModules();
+    const { Screen: PlainScreen } = await import("../src/screen.js");
+    const out: string[] = [];
+    const s = new PlainScreen({ write: (chunk) => out.push(chunk), interactive: true, columns: () => 80 });
+    s.setWorking(true);
+    expect(out.join("")).toContain(`${BULLET} Working…`);
+    expect(out.join("")).not.toMatch(/\x1b\[[\d;]*m/);
+    out.length = 0;
+    vi.advanceTimersByTime(5000);
+    expect(out).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+    s.setActivity("Thinking…");
+    out.length = 0;
+    vi.advanceTimersByTime(1000);
+    expect(out.join("")).toContain(`${BULLET} Thinking…`);
+    expect(out.join("")).not.toMatch(/\x1b\[[\d;]*m/);
+    s.finish();
   });
 });

@@ -799,6 +799,9 @@ export class Chat {
 
   /** Repaint the composer, the menu and the hint from current state. */
   private refresh(): void {
+    // Receiving prose is not the end of a task. Keep the live indicator on
+    // through streaming and tool execution, but pause while a person decides.
+    this.screen.setWorking(Boolean(this.active) && !this.pendingConfirm && !this.pendingChoice && !this.pendingSecret);
     const items = this.menuItems();
     const view: ComposerView = {
       draft: this.composer.snapshot(),
@@ -1105,6 +1108,7 @@ export class Chat {
       this.screen.append({ kind: "notice", level: "error", text: err instanceof Error ? err.message : String(err) });
     } finally {
       this.active = null;
+      this.screen.setWorking(false);
       this.screen.setActivity(null);
       this.screen.setTitle(`motif · ${this.settings.cwd.split("/").pop() ?? this.settings.cwd}`);
       this.totals.tasks += 1;
