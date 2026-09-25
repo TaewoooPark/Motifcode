@@ -142,7 +142,10 @@ export const CORE_TOOLS: readonly Tool[] = Object.freeze([
         "Load a skill's full instructions by name. Skills extend what you can do without adding tools — which is deliberate, because the tool list is frozen for the session.",
       parameters: {
         type: "object",
-        properties: { name: { type: "string", description: "Skill name from the index." } },
+        properties: {
+          name: { type: "string", description: "Skill name from the index." },
+          arguments: { type: "string", description: "Optional task arguments. Quoted values stay together for positional placeholders." },
+        },
         required: ["name"],
         additionalProperties: false,
       },

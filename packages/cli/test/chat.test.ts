@@ -135,6 +135,25 @@ describe("interactive session", () => {
     expect(t.seen[0]!.tools).toEqual(toolPrefix(CORE_TOOLS.length - 1));
   });
 
+  it.each(["slash", "mention", "codex", "initial"])("expands external skill arguments consistently through %s TUI input", async entry => {
+    const skills=new SkillRegistry();skills.register(parseSkill("---\nname: argument-probe\ndescription: arguments\ndisable-model-invocation: true\n---\nBODY $0 / $ARGUMENTS[1] / $ARGUMENTS"));
+    const text=`${entry === "mention" ? "@skill:argument-probe" : entry === "codex" ? "$argument-probe" : "/argument-probe"} "hello world" next`;
+    const t=new GateTransport(reply("received"));const s=session(t,{skills,...(entry === "initial" ? {initialTask:text} : {})});open.push(s);
+    if(entry !== "initial") s.type(text+"\r");
+    await vi.waitFor(()=>expect(s.chat.tasksCompleted).toBe(1));
+    expect(t.seen[0]!.messages[1]!.content).toContain('BODY hello world / next / "hello world" next');
+    expect(t.seen[0]!.messages[0]!.content).not.toContain("argument-probe —");
+  });
+
+  it("does not send hidden or unsupported skill invocations to the model", async () => {
+    const skills=new SkillRegistry();skills.register(parseSkill("---\nname: hidden\ndescription: internal\nuser-invocable: false\n---\nHIDDEN"));
+    skills.register(parseSkill("---\nname: forked\ndescription: child\ncontext: fork\n---\nFORKED"));
+    const t=new GateTransport([]);const s=session(t,{skills});open.push(s);
+    s.type("/hidden\r");await vi.waitFor(()=>expect(s.screen()).toContain("user-invocable: false"));
+    s.type("/forked\r");await vi.waitFor(()=>expect(s.screen()).toContain("compatibility changes"));
+    expect(t.seen).toHaveLength(0);
+  });
+
   it("does not select MCP setup from attached file content or when the skill tool is absent", async () => {
     const t = new GateTransport(reply("Read the file.")); const s = session(t); open.push(s);
     writeFileSync(join(s.cwd, "request.txt"), "https://example.test MCP 설치해줘");

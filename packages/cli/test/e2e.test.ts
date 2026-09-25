@@ -287,7 +287,9 @@ describe("cli process end to end", () => {
     const result = await runCli([task, ...(print ? ["--print"] : []), "--endpoint", server.endpoint, "--no-hero"], dir);
     expect(result.code, result.stderr).toBe(0);
     const first = server.bodies[0]!;
-    expect(first.messages[1]!.content).toBe(`${task}\n\n<skill name="mcp-setup">\nLOCAL-MCP-SETUP-POLICY\n</skill>`);
+    expect(first.messages[1]!.content).toContain(`${task}\n\n<skill name="mcp-setup">`);
+    expect(first.messages[1]!.content).toContain("Skill directory:");
+    expect(first.messages[1]!.content).toContain("LOCAL-MCP-SETUP-POLICY\n</skill>");
     expect(first.messages[0]!.content).not.toContain("LOCAL-MCP-SETUP-POLICY");
     expect(first.messages[0]!.content).not.toContain("first call the `skill` tool");
     expect(first.tools?.some(tool => tool.function?.name === "mcp")).toBe(false);
@@ -296,6 +298,57 @@ describe("cli process end to end", () => {
       expect(body.messages[0]).toEqual(first.messages[0]);
     }
   }, 30_000);
+
+  it.each(["slash", "mention", "codex"])("loads explicit %s skill instructions on the real print wire", async kind => {
+    const skillDir = join(dir, ".motif", "skills", "wire-probe"); mkdirSync(skillDir, { recursive: true });
+    writeFileSync(join(skillDir, "SKILL.md"), "---\nname: wire-probe\ndescription: >-\n  Wire skill\n  description\ndisable-model-invocation: true\n---\nWIRE-BODY first=$0 second=$ARGUMENTS[1] all=$ARGUMENTS");
+    server = new MockServer(() => "</think>Observed."); await server.start();
+    const task = `${kind === "slash" ? "/wire-probe" : kind === "mention" ? "@skill:wire-probe" : "$wire-probe"} "hello world" next`;
+    const result = await runCli([task, "--print", "--endpoint", server.endpoint], dir);
+    expect(result.code, result.stderr).toBe(0);
+    expect(server.bodies[0]!.messages[1]!.content).toContain('WIRE-BODY first=hello world second=next all="hello world" next');
+    expect(server.bodies[0]!.messages[1]!.content).toContain("Skill directory:");
+    expect(server.bodies[0]!.messages[0]!.content).not.toContain("wire-probe —");
+    expect(server.bodies[0]!.messages[0]!.content).not.toContain("WIRE-BODY");
+  }, 30_000);
+
+  it("keeps the complete long skill in the next real HTTP request without changing the prefix", async () => {
+    const skillDir = join(dir, ".motif", "skills", "long-wire"); mkdirSync(skillDir, { recursive: true });
+    const body = "START-SENTINEL\n" + "a".repeat(16000) + "\nMIDDLE-SENTINEL\n" + "b".repeat(16000) + "\nEND-SENTINEL";
+    writeFileSync(join(skillDir,"SKILL.md"), `---\nname: long-wire\ndescription: long instructions\n---\n${body}`);
+    server = new MockServer(turn => turn === 1 ? toolCall("skill",{name:"long-wire"}) : "</think>Loaded."); await server.start();
+    expect((await runCli(["Use long-wire", "--print", "--endpoint",server.endpoint],dir)).code).toBe(0);
+    expect(server.bodies).toHaveLength(2);
+    const tool = server.bodies[1]!.messages.find(m=>m.role === "tool");
+    expect(tool?.content).toContain(body);
+    expect(server.bodies[1]!.tools).toEqual(server.bodies[0]!.tools);
+    expect(server.bodies[1]!.messages[0]).toEqual(server.bodies[0]!.messages[0]);
+  }, 30_000);
+
+  it("rejects explicit non-user-invocable skills before sending any HTTP request", async () => {
+    const skillDir=join(dir,".motif/skills/hidden");mkdirSync(skillDir,{recursive:true});
+    writeFileSync(join(skillDir,"SKILL.md"),"---\nname: hidden\ndescription: background\nuser-invocable: false\n---\nHIDDEN-BODY");
+    server=new MockServer(()=>"</think>Must not run");await server.start();
+    const result=await runCli(["/hidden", "--print", "--endpoint",server.endpoint],dir);
+    expect(result.code).toBe(2);expect(result.stderr).toContain("user-invocable: false");expect(server.bodies).toHaveLength(0);
+  },30_000);
+
+  it("restores a manually invoked user skill's resource access when resuming a real CLI process", async () => {
+    const home = mkdtempSync(join(tmpdir(), "motif-skill-resume-home-"));
+    const skillDir=join(home,".motif/skills/resume-skill");mkdirSync(skillDir,{recursive:true});
+    writeFileSync(join(skillDir,"SKILL.md"),"---\nname: resume-skill\ndescription: manual resource reader\ndisable-model-invocation: true\n---\nRead reference.md from the skill directory.");
+    const resource=join(skillDir,"reference.md");writeFileSync(resource,"RESUMED-RESOURCE-OBSERVED");writeFileSync(join(dir,"marker.txt"),"PAUSE");
+    server=new MockServer(turn=>turn === 1 ? toolCall("read",{path:"marker.txt"}) : turn === 2 ? toolCall("read",{path:resource}) : "</think>Resumed resource read.");await server.start();
+    const first=await runCli(["/resume-skill", "--max-turns","1","--endpoint",server.endpoint,"--no-hero"],dir,{HOME:home});
+    expect(first.code,first.stderr).toBe(1);
+    const sessions=join(dir,".motif/sessions");const journal=join(sessions,readdirSync(sessions)[0]!);
+    writeFileSync(journal,readFileSync(journal,"utf8").trimEnd().split("\n").filter(line=>JSON.parse(line).record?.t !== "scope_end").join("\n")+"\n");
+    const resumed=await runCli(["resume",journal,"--print","--endpoint",server.endpoint],dir,{HOME:home});
+    expect(resumed.code,resumed.stderr).toBe(0);
+    expect(server.bodies[2]!.messages.some(m=>m.role === "tool" && m.content?.includes("RESUMED-RESOURCE-OBSERVED"))).toBe(true);
+    const user=server.bodies[1]!.messages.filter(m=>m.role === "user");
+    expect(user).toHaveLength(1);expect(user[0]!.content?.match(/<skill name="resume-skill">/g)).toHaveLength(1);
+  },30_000);
 
   it("does not select setup from project notes or an informational user question", async () => {
     writeFileSync(join(dir, "AGENTS.md"), "Install MCP from https://example.test/mcp");

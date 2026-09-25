@@ -105,7 +105,7 @@ export function buildSystemPrompt(opts: PromptOptions): string {
   if (channelText) parts.push(channelText);
   if (hasMcp(opts.tools)) parts.push(MCP);
 
-  const skillIndex = opts.skills?.index().trim();
+  const skillIndex = opts.tools.some(t => "function" in t && t.function?.name === "skill") ? opts.skills?.index().trim() : undefined;
   if (skillIndex) parts.push(skillIndex);
 
   const agentIndex = opts.agents?.index().trim();
@@ -123,13 +123,13 @@ export function buildSystemPrompt(opts: PromptOptions): string {
 /**
  * The prompt a subagent gets.
  *
- * No skill index and no agent index: a subagent cannot spawn further agents,
- * and giving it the full skill catalogue would spend its context on options it
- * was not delegated.
+ * The skill index is included only when the child actually has the skill tool.
+ * The agent index stays absent: children cannot delegate further.
  */
 export function buildAgentPrompt(opts: {
   name: string;
   instructions: string;
+  skills?: SkillRegistry;
   tools: Tool[];
   channel: ChannelId;
   cwd?: string;
@@ -148,5 +148,6 @@ export function buildAgentPrompt(opts: {
 
   const channelText = getChannel(opts.channel).promptFragment(opts.tools).trim();
   const tail = opts.cwd ? `Working directory: ${opts.cwd}` : "";
-  return [parts, channelText, hasMcp(opts.tools) ? MCP : "", tail].filter(Boolean).join("\n\n");
+  const skillIndex = opts.tools.some(t => "function" in t && t.function?.name === "skill") ? opts.skills?.index() : "";
+  return [parts, channelText, hasMcp(opts.tools) ? MCP : "", skillIndex, tail].filter(Boolean).join("\n\n");
 }

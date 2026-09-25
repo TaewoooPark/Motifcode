@@ -22,7 +22,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { parseAgent, type AgentDef } from "@motifcode/agents";
-import { parseSkill, type Skill } from "@motifcode/skills";
+import { loadSkill, type Skill } from "@motifcode/skills";
 
 export interface PluginInfo {
   name: string;
@@ -84,7 +84,7 @@ export function loadPluginsFrom(root: string, source: PluginInfo["source"]): Loa
         const file = join(skillsDir, s, "SKILL.md");
         if (!existsSync(file)) continue;
         try {
-          const skill = parseSkill(readFileSync(file, "utf8"), source);
+          const skill = loadSkill(file, source, { packageRoot: path });
           out.skills.push(skill);
           info.skills.push(skill.name);
         } catch (err) {

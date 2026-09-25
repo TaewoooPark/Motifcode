@@ -63,7 +63,7 @@ import { TransportError, backoffDelay, sleep, type Transport } from "./transport
 export interface ToolResult {
   ok: boolean;
   output: string;
-  /** The MCP host already bounded this JSON and retained its original result. */
+  /** The producer already bounded this complete result (MCP envelope or skill instructions). */
   bounded?: boolean;
 }
 

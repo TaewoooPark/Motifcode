@@ -9,13 +9,10 @@ describe("skill parsing", () => {
     expect(s.body.trim()).toBe("body here");
   });
 
-  it("refuses a skill that tries to declare tools", () => {
-    // The whole point of the design: skills inject instructions, never
-    // capability. A skill that changed the tool list would invalidate the
-    // prompt prefix every time it loaded.
-    expect(() =>
-      parseSkill("---\nname: bad\ndescription: d\nallowed-tools: bash\n---\nbody"),
-    ).toThrow(/never capability/);
+  it("preserves upstream tool declarations without granting capabilities", () => {
+    const skill = parseSkill("---\nname: compatible\ndescription: d\nallowed-tools: bash\n---\nbody");
+    expect(skill.allowedTools).toEqual(["bash"]);
+    expect(skill.diagnostics).toContainEqual(expect.objectContaining({ code: "tool-preapproval", severity: "warning" }));
   });
 
   it("requires frontmatter, a name and a description", () => {

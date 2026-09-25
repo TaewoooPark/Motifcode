@@ -59,7 +59,7 @@ import {
   type Message,
   type Tool,
 } from "@motifcode/protocol";
-import { BUILTIN_SKILLS, SkillRegistry, parseSkill } from "@motifcode/skills";
+import { BUILTIN_SKILLS, SkillRegistry, loadSkill } from "@motifcode/skills";
 import { CORE_TOOLS, CORE_TOOL_NAMES, lintTools, formatFindings, toolPrefix } from "@motifcode/tools";
 import { Screen, applyTheme, themeNames } from "@motifcode/tui";
 import { Chat } from "./chat.js";
@@ -73,7 +73,8 @@ import { policyForAgent } from "./policy.js";
 import { buildAgentPrompt, buildSystemPrompt } from "./prompt.js";
 import { loadMcpConfig, McpSession } from "@motifcode/mcp";
 import { runMcpArgv } from "./mcp-command.js";
-import { expandMentions, mcpSetupMentions } from "./files.js";
+import { expandSkillInput } from "./skill-input.js";
+import { findCommand, parseSlash } from "./commands.js";
 
 const VERSION = "0.3.4";
 
@@ -216,11 +217,11 @@ function loadSkills(cwd: string): SkillRegistry {
     [join(cwd, CONFIG_DIR, "skills"), "project"],
   ] as const) {
     if (!existsSync(dir)) continue;
-    for (const name of readdirSync(dir)) {
+    for (const name of readdirSync(dir).sort()) {
       const file = join(dir, name, "SKILL.md");
       if (!existsSync(file)) continue;
       try {
-        reg.register(parseSkill(readFileSync(file, "utf8"), source));
+        reg.register(loadSkill(file, source));
       } catch (err) {
         process.stderr.write(`skipping ${file}: ${String(err)}\n`);
       }
@@ -671,7 +672,8 @@ async function main(): Promise<number> {
     case "skills": {
       const reg = loadSkills(cwd);
       for (const s of reg.list()) {
-        process.stdout.write(`${s.name.padEnd(16)} ${s.description}  (${s.source})\n`);
+        process.stdout.write(`${s.name.padEnd(16)} ${s.description.replace(/\s+/g, " ")}  (${s.source})${s.disableModelInvocation ? " [explicit only]" : ""}${!s.userInvocable ? " [model only]" : ""}\n`);
+        for (const d of s.diagnostics) process.stdout.write(`  ${d.severity}: ${d.message}\n`);
       }
       return 0;
     }
@@ -888,6 +890,7 @@ async function main(): Promise<number> {
       process.stderr.write(`cannot resume: ${blocker}\n`);
       return 2;
     }
+    skills.restoreResourceAccess(resumeFrom.checkpoint!.messages);
     task = resumeFrom.task ?? "";
     (printOnly ? process.stderr : process.stdout).write(
       `resuming ${resumeFrom.header.runId} from turn ${resumeFrom.checkpoint!.turn}` +
@@ -959,11 +962,11 @@ async function main(): Promise<number> {
   // Attach task guidance once, outside the cached prefix; resumed transcripts
   // already contain their original attachments. Interactive input uses submit.
   const discoveryTask = task;
-  if (!resumeFrom && activeToolNames.includes("skill")) {
-    task = expandMentions(task, mcpSetupMentions(task), {
-      cwd,
-      renderSkill: (name) => skills.get(name) ? skills.render(name) : undefined,
-    }).task;
+  if (!resumeFrom) {
+    const slash = parseSlash(task);
+    const expanded = expandSkillInput(task, { cwd, skills, automatic: activeToolNames.includes("skill"), slash: !slash || !findCommand(slash.name) });
+    if (expanded.errors.length) { process.stderr.write(expanded.errors.join("\n") + "\n"); return 2; }
+    task = expanded.task;
   }
 
   // A one-shot task or a print against the hosted endpoint needs the key as
@@ -1144,6 +1147,7 @@ async function main(): Promise<number> {
               buildAgentPrompt({
                 name: def.name,
                 instructions: def.instructions,
+                skills,
                 tools: def.tools,
                 channel: ch,
                 cwd,

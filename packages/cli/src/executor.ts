@@ -463,7 +463,9 @@ export class ToolExecutor implements Executor {
     // Policy first. A call the agent is not allowed to make should not reach a
     // hook, which might have side effects of its own.
     const decision = approve(this.policy, call);
-    if (!decision.allowed) {
+    const skillResourceRead = call.name === "read" && this.policy.allowedTools.has("read") &&
+      this.opts.skills?.canReadResource(str(call.arguments, "path"), cwd) === true;
+    if (!decision.allowed && !skillResourceRead) {
       return { ok: false, output: `refused by execution policy: ${decision.reason}` };
     }
 
@@ -610,7 +612,10 @@ export class ToolExecutor implements Executor {
       case "skill": {
         const reg = this.opts.skills;
         if (!reg) return { ok: false, output: "no skills are loaded" };
-        return { ok: true, output: reg.render(str(args, "name")) };
+        const result = reg.load(str(args, "name"), { invocation: "model", cwd, ...(typeof args.arguments === "string" ? { arguments: args.arguments } : {}) });
+        // The registry validates its complete byte budget. Do not let the loop
+        // silently remove the middle of an instruction sheet at the tool cap.
+        return { ...result, ...(result.ok ? { bounded: true } : {}) };
       }
 
       case "task": {

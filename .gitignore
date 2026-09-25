@@ -30,5 +30,8 @@ NOTES*.md
 WORKLOG*.md
 scratch/
 
+# Local skill compatibility experiments, private inventories, and work log.
+.local/skill-compat/
+
 # The vendor's modelling code, fetched rather than vendored — see toolkit/README.md.
 toolkit/ref/

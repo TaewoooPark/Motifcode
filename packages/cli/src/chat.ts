@@ -43,7 +43,7 @@ import {
 import { runHooks, runShell, type HookConfig, type RunResult } from "@motifcode/hooks";
 import { Journal, listSessions, loadResume, newHeader, type ScopeIdentity } from "@motifcode/journal";
 import { MAX_CONTEXT, SAMPLING_DEFAULTS, systemPromptHash, toolSchemaHash, type ChannelId, type Message, type Tool } from "@motifcode/protocol";
-import type { SkillRegistry } from "@motifcode/skills";
+import { substituteSkillArguments, type SkillRegistry } from "@motifcode/skills";
 import { CORE_TOOL_NAMES } from "@motifcode/tools";
 import {
   Composer,
@@ -52,14 +52,14 @@ import {
   applyTheme,
   clampSelection,
   mentionAt,
-  mentionsIn,
   menuItemsFor,
   relativise,
   type ComposerView,
   type Key,
   type MenuItem,
 } from "@motifcode/tui";
-import { expandMentions, forgetFiles, listFiles, matchFiles, mcpSetupMentions } from "./files.js";
+import { forgetFiles, listFiles, matchFiles } from "./files.js";
+import { expandSkillInput } from "./skill-input.js";
 import { installCommand } from "./install.js";
 import { loginLines, normaliseKeyInput, verifyApiKey, type VerifyResult } from "./login.js";
 import { COMMANDS, findCommand, parseSlash, runSlash, type ChatSettings, type CommandContext, type CommandOutput, type PersistableKey } from "./commands.js";
@@ -469,9 +469,9 @@ export class Chat {
   /** Built-in commands, then every skill that does not share a name with one. */
   private allMenuItems(): MenuItem[] {
     const skills = this.opts.skills
-      .list()
+      .listFor("user")
       .filter((s) => !findCommand(s.name))
-      .map((s) => ({ name: s.name, description: `skill · ${s.description}`, usage: "[input]" }));
+      .map((s) => ({ name: s.name, description: `skill · ${s.description}`, usage: s.argumentHint ?? "[input]" }));
     return [...MENU_ITEMS, ...skills];
   }
 
@@ -486,7 +486,7 @@ export class Chat {
     if (!m) return [];
     const q = m.query;
     const skills: MenuItem[] = this.opts.skills
-      .list()
+      .listFor("user")
       .filter((s) => q === "" || `skill:${s.name}`.includes(q.toLowerCase()) || s.name.startsWith(q.toLowerCase()))
       .map((s) => ({ name: `skill:${s.name}`, description: `skill · ${s.description}` }));
     const files: MenuItem[] = matchFiles(listFiles(this.settings.cwd), q).map((f) => ({
@@ -975,7 +975,11 @@ export class Chat {
         this.refresh();
         return;
       }
-      await this.runTask(skillTask(this.opts.skills.render(slash.name), slash.args), text);
+      const expanded = expandSkillInput(text, { cwd: this.settings.cwd, skills: this.opts.skills });
+      if (expanded.errors.length) {
+        this.screen.append({ kind: "notice", level: "error", text: expanded.errors.join("\n") }); this.refresh(); return;
+      }
+      await this.runTask(expanded.task, text);
       return;
     }
     if (slash) {
@@ -1006,11 +1010,11 @@ export class Chat {
       this.refresh();
       return;
     }
-    const setupMentions = this.opts.tools.some(tool => "function" in tool && tool.function?.name === "skill") ? mcpSetupMentions(text) : [];
-    const { task, attached } = expandMentions(text, [...mentionsIn(text), ...setupMentions], {
-      cwd: this.settings.cwd,
-      renderSkill: (name) => (this.opts.skills.get(name) ? this.opts.skills.render(name) : undefined),
+    const { task, attached, errors } = expandSkillInput(text, {
+      cwd: this.settings.cwd, skills: this.opts.skills,
+      automatic: this.opts.tools.some(tool => "function" in tool && tool.function?.name === "skill"), slash: false,
     });
+    if (errors.length) { this.screen.append({ kind: "notice", level: "error", text: errors.join("\n") }); this.refresh(); return; }
     if (attached.length > 0) {
       this.screen.append({ kind: "notice", level: "info", text: `attached ${attached.map((a) => `@${a}`).join(", ")}` });
     }
@@ -1441,6 +1445,7 @@ export class Chat {
                 buildAgentPrompt({
                   name: def.name,
                   instructions: def.instructions,
+                  skills: this.opts.skills,
                   tools: def.tools,
                   channel: ch,
                   cwd: this.settings.cwd,
@@ -1648,6 +1653,7 @@ export class Chat {
     if (state.header.model.id !== this.settings.model) {
       lines.push(`recorded against ${state.header.model.id}; this session sends ${this.settings.model}`);
     }
+    this.opts.skills.restoreResourceAccess(state.checkpoint.messages);
     this.history = state.checkpoint.messages.slice(1);
     this.opts.mcp?.clearScope("root");
     lines.unshift(
@@ -1678,8 +1684,7 @@ export class Chat {
  * the person's and which the sheet's.
  */
 export function skillTask(rendered: string, input: string): string {
-  if (rendered.includes("$ARGUMENTS")) return rendered.replaceAll("$ARGUMENTS", input);
-  return input === "" ? rendered : `${rendered}\n\nInput from the person:\n${input}`;
+  return substituteSkillArguments(rendered, input);
 }
 
 function readHistory(path: string): string[] {
