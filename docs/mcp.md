@@ -175,6 +175,74 @@ References accept `${VARIABLE}`, `${VARIABLE:-fallback}` or `{"env":"VARIABLE"}`
 
 Interactive `ask` mode confirms the actual server and tool. Remembered approvals apply to that pair only. Tools marked as requiring user interaction need fresh human approval, including in `auto` mode. Print and one-shot execution have no interactive approval dialog, so use configurations whose permitted tools you intend to authorize. An enabled stdio server is a local program; Motifcode does not provide an OS sandbox for it.
 
+## Built-in server presets
+
+Browse the included catalog without network access or credentials:
+
+```sh
+motif mcp presets
+motif mcp presets playwright
+motif mcp install context7
+motif mcp enable context7
+motif mcp doctor --connect
+```
+
+`install` registers a reviewed preset in your MCP configuration. It does not download
+packages, start a server, sign in, or modify an existing registration. New entries
+are disabled unless you pass `--enable`. For stdio presets, the first connection
+lets `npx` download and run the pinned package. The catalog ships with Motifcode;
+the server programs and browsers are separate installations.
+
+| Preset | Intended use | Prerequisites |
+| --- | --- | --- |
+| `context7` | Library documentation; recommended for general development | Public HTTP endpoint; optional API key for account limits |
+| `playwright` | Browser navigation and inspection | Node/npm and Chrome; runs headless with an isolated browser profile |
+| `filesystem` | Filesystem MCP compatibility | An explicit existing directory via `--root`; Motifcode also has native file tools |
+| `hugging-face` | Public model, dataset and repository information | Public HTTP endpoint; optional HF token for authenticated capabilities |
+| `openai-docs` | OpenAI developer documentation | Public read-only HTTP endpoint |
+| `tauri` | Tauri application inspection | Community server; a running Tauri 2 application with its Rust MCP bridge plugin |
+| `gmail` | Gmail integration, conditional preview | Google's preview/API prerequisites and your own OAuth access token; no built-in login or refresh |
+
+```sh
+motif mcp install playwright --enable
+motif mcp install filesystem --root /absolute/project/path --enable
+motif mcp install hugging-face --enable
+motif mcp install openai-docs --enable
+# Reference a token already supplied through your environment; never paste its value here.
+motif mcp install context7 --token-env CONTEXT7_API_KEY --enable
+motif mcp install gmail --token-env GMAIL_ACCESS_TOKEN
+```
+
+Each example is an alternative registration; installing an existing ID fails without
+changing it. Token options store variable references only. Filesystem paths are fixed
+to the selected directory rather than following future working directories. Review
+the chosen directory before enabling access. Use the canonical paths reported by
+`list_allowed_directories`; aliases such as macOS `/var` versus `/private/var` can
+be rejected by the server. With `--mcp-config`, installation uses
+the same current-hash trust checks as `add`; each edit returns a new hash.
+
+After any registration change, exit and relaunch Motif. `/new` and `/mcp` do not
+reload configuration. A `ready` connection only proves initialization and tool
+discovery: Gmail may advertise tools before rejecting an unauthenticated call, and
+the Tauri server can be ready without an application bridge. Neither means that
+account access or application control has been verified. Codex/Claude login sessions
+are not transferred.
+
+Maintainers can run an opt-in live smoke check from a source checkout:
+
+```sh
+pnpm exec tsx scripts/mcp-candidates-probe.ts /tmp/mcp-candidates.json
+pnpm exec tsx scripts/mcp-tauri-gmail-smoke.ts /tmp/mcp-conditional.json
+```
+
+The first check uses the actual MCP manager to read a generated scratch file,
+navigate a local test page, and query public documentation/model data. It needs
+network access, npm and Chrome. The conditional check only asks Tauri for session
+status and tries unauthenticated Gmail label discovery; it does not sign in, read
+mail content, or send mail. Neither check uses a language model or tests model
+tool selection. Remote catalogs and availability can change independently of the
+pinned local server versions.
+
 ## Playwright browser tools
 
 Use the Playwright profile to get a fresh page observation after browser actions:
@@ -192,6 +260,8 @@ The profile pairs supported navigation and form actions with `browser_snapshot`.
 | --- | --- |
 | Server stays `connecting` or times out | Run its documented installation first; check the executable path and `startupTimeoutMs`. |
 | Credential reference cannot be resolved | Export the named variable before launching Motif. |
+| `authentication_required` (HTTP 401) | Supply valid credentials through the configured environment/header reference. OAuth login and refresh are not implemented. |
+| `permission_denied` (HTTP 403) | Check the credential's scopes, service eligibility and API enablement. |
 | Explicit configuration is disabled | Review the file and pass its current hash with `--trust-mcp`. |
 | A newly registered server is missing from `/mcp` | Exit and relaunch the Motif process. |
 | A connected server has no available tools | Check its advertised tools, `allowedTools` and `deniedTools`. |

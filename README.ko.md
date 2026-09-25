@@ -138,6 +138,7 @@ npx motifcode          # 첫 실행: 키를 물어본 뒤 `motif` 명령 설치�
 | `motif login` · `motif logout` | 세션 밖에서 키 입력; 저장된 키 삭제 |
 | `motif doctor` | 엔드포인트 점검: 인증, 도구 호출·추론 파서, 프리픽스 캐시, 채널 |
 | `motif mcp add NAME -- COMMAND [ARGS...]` | 로컬 stdio MCP 서버 등록 |
+| `motif mcp presets [ID]` · `install ID` | 내장 프리셋 조회와 오프라인 등록; `--enable`로 활성화 |
 | `motif mcp add NAME --transport http URL` | Streamable HTTP MCP 서버 등록; 기존 SSE는 `sse` 지정 |
 | `motif mcp list` · `get NAME` · `doctor --connect` | MCP 설정 조회와 실제 연결 진단 |
 | `motif mcp enable NAME` · `disable NAME` · `remove NAME` | 저장된 MCP 등록 활성화·비활성화·삭제 |
@@ -155,13 +156,20 @@ npx motifcode          # 첫 실행: 키를 물어본 뒤 `motif` 명령 설치�
 ## MCP 서버 연결
 
 로컬 stdio 서버, Streamable HTTP 엔드포인트, 기존 SSE 서비스를 연결할 수 있습니다.
-서버를 등록한 뒤 연결을 확인하세요.
+내장 프리셋을 선택한 뒤 연결을 확인하세요.
 
 ```bash
-motif mcp add docs --transport http https://developers.openai.com/mcp
+motif mcp presets
+motif mcp install context7 --enable
 motif mcp list
 motif mcp doctor --connect
 ```
+
+Context7, Playwright, Filesystem, Hugging Face, OpenAI Docs, Tauri, Gmail을
+기본 목록으로 제공합니다. `install`은 `--enable`이 없으면 비활성 상태로 등록하며,
+로컬 서버 패키지는 첫 연결 때 내려받습니다. Filesystem은 `--root`로 접근 폴더를
+지정해야 하고, Tauri는 앱 브리지, Gmail은 별도로 준비한 OAuth 인증이 필요합니다.
+[프리셋별 요구 사항](docs/mcp.md#built-in-server-presets)을 확인하세요.
 
 등록은 `~/.motif/mcp.json`에 저장됩니다. `doctor --connect`는 활성 서버를 시작해
 도구 목록을 확인한 뒤 연결을 닫습니다. 세션 안에서 `/mcp`로 연결 관리 화면을 열거나,

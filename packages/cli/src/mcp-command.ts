@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { loadMcpConfig, resolveServerConfig, type ConfigDiagnostic, type EnvValue, type McpServerConfig } from "../../mcp/src/config.js";
 import { importMcpConfig, type ImportClient } from "../../mcp/src/importers.js";
+import { createMcpPresetConfig, getMcpPreset, listMcpPresets, McpPresetError } from "../../mcp/src/presets.js";
 import { editMcpConfig, McpConfigEditError, summarizeMcpServer } from "./mcp-config-edit.js";
 
 export interface McpCommandOptions {
@@ -13,6 +14,8 @@ export interface McpCommandOptions {
 }
 
 export const MCP_HELP = `Usage:
+  motif mcp presets [ID]
+  motif mcp install ID [--root PATH] [--token-env NAME] [--enable]
   motif mcp list [--mcp-config PATH] [--trust-mcp SHA256]
   motif mcp get NAME
   motif mcp add NAME [--env NAME=VALUE] [--env-ref NAME[=SOURCE]] [--profile playwright] -- COMMAND [ARGS...]
@@ -28,6 +31,10 @@ The default is ~/.motif/mcp.json. Project configs are never discovered automatic
 An explicit --mcp-config is disabled until its displayed SHA256 is passed to --trust-mcp.
 Editing an existing explicit file also requires its current hash; new files may be created.
 Each edit prints the new hash, which is required before using an explicit file to connect.
+presets shows built-in recipes and prerequisites. install only registers a recipe,
+disabled by default; --enable opts into later startup. It never downloads packages,
+starts a process, connects, logs in, or reads tokens. --token-env takes a variable name.
+filesystem requires an explicit --root directory; gmail requires --token-env.
 add defaults to stdio and enabled:true, but never starts a server. All command arguments
 after -- are preserved literally. Use --protocol legacy|modern|auto when needed.
 --env, --env-ref, --header and --header-env may repeat. Prefer references over secrets
@@ -41,8 +48,8 @@ Inline credentials are not copied; use environment references instead.
 
 export type McpCommandFlags = Record<string, string | boolean | string[]>;
 const REPEATED_FLAGS = new Set(["env", "env-ref", "header", "header-env"]);
-const BOOLEAN_MCP_FLAGS = new Set(["help", "connect", "dry-run"]);
-const VALUE_MCP_FLAGS = new Set(["cwd", "mcp-config", "trust-mcp", "from", "file", "project", "write", "transport", "protocol", "profile", ...REPEATED_FLAGS]);
+const BOOLEAN_MCP_FLAGS = new Set(["help", "connect", "dry-run", "enable"]);
+const VALUE_MCP_FLAGS = new Set(["cwd", "mcp-config", "trust-mcp", "from", "file", "project", "write", "transport", "protocol", "profile", "root", "token-env", ...REPEATED_FLAGS]);
 
 /** Parse before the generic CLI parser can consume child arguments or repeated flags. */
 export async function runMcpArgv(argv: string[], initialFlags: Record<string, string | boolean> = {}, options: McpCommandOptions = {}): Promise<number> {
@@ -75,6 +82,8 @@ export async function runMcpArgv(argv: string[], initialFlags: Record<string, st
 
 function allowedFlags(command: string): Set<string> {
   const common = ["help", "cwd", "mcp-config", "trust-mcp"];
+  if (command === "presets") return new Set(["help", "cwd"]);
+  if (command === "install") return new Set([...common, "root", "token-env", "enable"]);
   if (command === "import") return new Set(["help", "cwd", "from", "file", "project", "write", "dry-run"]);
   return new Set([...common, ...(command === "doctor" ? ["connect"] : []), ...(command === "add" ? ["transport", "profile", "protocol", ...REPEATED_FLAGS] : [])]);
 }
@@ -117,6 +126,36 @@ export async function runMcpCommand(
       : typeof flag !== "string" || !flag.length) return usage("An MCP option has an invalid or missing value.");
   }
   if (command === "help" || flags.help) { out(MCP_HELP); return 0; }
+  if (command === "presets") {
+    if (rest.length > 2) return usage("presets accepts at most one preset ID.");
+    const preset = rest[1] ? getMcpPreset(rest[1]) : undefined;
+    if (rest[1] && !preset) { emit({ error: { code: "unknown_preset", message: "Unknown built-in MCP preset. Use motif mcp presets to list available IDs." } }); return 1; }
+    emit({ mode: "offline", ...(preset ? { preset } : { presets: listMcpPresets() }), connected: false });
+    return 0;
+  }
+  if (command === "install") {
+    if (rest.length !== 2) return usage("install requires exactly one preset ID.");
+    try {
+      const server = createMcpPresetConfig(rest[1]!, { cwd, root: value("root"), tokenEnv: value("token-env"), enabled: flags.enable === true });
+      const edited = editMcpConfig({ kind: "add", server }, { cwd, home: options.home, path: value("mcp-config"), trustHash: value("trust-mcp") });
+      const configArgs = value("mcp-config") ? ["--mcp-config", edited.path, "--trust-mcp", edited.sha256] : [];
+      const connectArgs = value("mcp-config") && !server.enabled ? ["--mcp-config", edited.path, "--trust-mcp", "<SHA256 printed by enable>"] : configArgs;
+      emit({ mode: "saved-offline", operation: "install", preset: server.id, path: edited.path, sha256: edited.sha256, server: summarizeMcpServer(server), connected: false,
+        prerequisites: getMcpPreset(server.id)!.prerequisites,
+        nextSteps: [
+          { description: "Review configuration and resolve prerequisites.", argv: ["motif", "mcp", "doctor", ...configArgs] },
+          ...(!server.enabled ? [{ description: "Opt into startup after review; an explicit file receives a new hash.", argv: ["motif", "mcp", "enable", server.id, ...configArgs] }] : []),
+          { description: "Start enabled trusted servers and list tools; this may download pinned npm packages.", argv: ["motif", "mcp", "doctor", "--connect", ...connectArgs] },
+        ],
+        note: "Registered configuration only. No package download, process startup, connection, login, or token resolution occurred. Restart an existing chat to load the change.",
+      });
+      return 0;
+    } catch (cause) {
+      if (cause instanceof McpPresetError || cause instanceof McpConfigEditError) emit({ error: { code: cause.code, message: cause.message, ...(cause instanceof McpConfigEditError && cause.sha256 ? { sha256: cause.sha256 } : {}) } });
+      else err("Could not safely install the MCP preset. No server was started.\n");
+      return 1;
+    }
+  }
   if (["add", "remove", "enable", "disable"].includes(command)) {
     if (!rest[1]) return usage("Specify a server name.");
     try {

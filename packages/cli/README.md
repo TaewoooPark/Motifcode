@@ -36,12 +36,17 @@ motif -p "what does src/loop.ts do?"    # print only the reply, for pipes
 Connect MCP servers and check them from the CLI:
 
 ```bash
-motif mcp add docs --transport http https://developers.openai.com/mcp
+motif mcp presets
+motif mcp install context7 --enable
 motif mcp list
 motif mcp doctor --connect
 ```
 
-Register a local stdio server with `motif mcp add NAME -- COMMAND [ARGS...]`.
+Built-in presets cover Context7, Playwright, Filesystem, Hugging Face, OpenAI Docs,
+Tauri and Gmail. `install ID` registers offline and defaults to disabled. Local
+packages download on first connection. Filesystem requires `--root`; Tauri needs
+an app bridge and Gmail needs separately supplied OAuth credentials.
+Register a custom local stdio server with `motif mcp add NAME -- COMMAND [ARGS...]`.
 Inside a session, `/mcp` manages connections. The built-in `mcp-setup` skill
 also handles clear natural-language MCP setup requests containing a URL;
 `/mcp-setup <URL>` invokes it explicitly. Relaunch Motif after adding or editing

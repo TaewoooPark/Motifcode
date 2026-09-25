@@ -376,6 +376,8 @@ const HELP = `motif ${VERSION} — a coding agent built for Motif-3 (unofficial;
   motif config              show the effective settings and where each came from
   motif plugins             list the plugins under ~/.motif/plugins and .motif/plugins
   motif mcp list            list configured MCP servers without starting them
+  motif mcp presets         show built-in MCP recipes and prerequisites
+  motif mcp install ID      register a built-in recipe offline (disabled by default)
   motif mcp doctor          check MCP configuration (add --connect to test servers)
   motif mcp import          preview Codex TOML or Claude JSON server configuration
   motif lint                lint the tool schemas

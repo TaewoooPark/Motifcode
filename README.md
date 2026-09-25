@@ -145,6 +145,7 @@ does the same without the question.
 | `motif login` · `motif logout` | paste a key outside a session; remove the saved key |
 | `motif doctor` | probe the endpoint: auth, tool-call and reasoning parsers, prefix cache, channels |
 | `motif mcp add NAME -- COMMAND [ARGS...]` | register a local stdio MCP server |
+| `motif mcp presets [ID]` · `install ID` | browse built-in presets and register one offline; `--enable` opts in to startup |
 | `motif mcp add NAME --transport http URL` | register a Streamable HTTP MCP server; use `sse` for legacy SSE |
 | `motif mcp list` · `get NAME` · `doctor --connect` | inspect MCP configuration and check server connections |
 | `motif mcp enable NAME` · `disable NAME` · `remove NAME` | change saved MCP registrations |
@@ -167,13 +168,20 @@ it is a terminal preference, not an API configuration value in `.env`.
 ## MCP servers
 
 Connect local stdio servers, Streamable HTTP endpoints or legacy SSE services.
-Register a server and check the connection:
+Choose a built-in preset and check the connection:
 
 ```bash
-motif mcp add docs --transport http https://developers.openai.com/mcp
+motif mcp presets
+motif mcp install context7 --enable
 motif mcp list
 motif mcp doctor --connect
 ```
+
+The catalog includes Context7, Playwright, Filesystem, Hugging Face, OpenAI Docs,
+Tauri and Gmail. Installation saves a disabled registration unless `--enable` is
+given; local packages are downloaded on first connection. Filesystem needs an
+explicit `--root`, Tauri needs an app bridge, and Gmail needs separately supplied
+OAuth credentials. See [preset requirements](docs/mcp.md#built-in-server-presets).
 
 Registration saves to `~/.motif/mcp.json`. `doctor --connect` starts enabled
 servers, checks their tool lists, then closes them. Inside a session, `/mcp`
