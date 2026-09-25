@@ -37,7 +37,7 @@ describe("MCP CLI offline commands", () => {
     writeFileSync(source, text);
     const { configHash } = await import("../../mcp/src/config.js");
     expect(await runMcpCommand(["doctor"], { "mcp-config": source, "trust-mcp": configHash(text), connect: true }, io.options)).toBe(0);
-    expect(JSON.parse(io.output.join("")).connections).toEqual([]);
+    expect(JSON.parse(io.output.join("")).connections).toEqual([{ server: "invalid", enabled: false, transport: "stdio", state: "disabled", toolCount: 0 }]);
   });
   it("does not write partially supported imports or disclose inline values", async () => {
     const cwd = fixture(); const source = join(cwd, "claude.json"); const target = join(cwd, "mcp.json"); const io = capture(cwd);

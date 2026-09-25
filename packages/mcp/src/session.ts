@@ -1,7 +1,7 @@
 import Ajv from "ajv";
 import type { McpConfig } from "./config.js";
 import { HOST_CONTROL_CARDS, HOST_SERVER_ID, ToolCatalog } from "./discovery.js";
-import { McpManager, type McpOutcome } from "./manager.js";
+import { McpManager, type McpOutcome, type McpStatus } from "./manager.js";
 import { ResultStore, isResultError, serializeResultView } from "./results.js";
 import { extractFocusTerms } from "./focus.js";
 import { boundedDiagnosticText } from "./schema.js";
@@ -73,6 +73,24 @@ export class McpSession {
   }
 
   get enabled(): boolean { return this.config.servers.some((s) => s.enabled); }
+
+  /** Human connection controls. These are intentionally not model-facing tools. */
+  statuses(): McpStatus[] { return this.manager.statuses(); }
+
+  async connect(server: string, signal?: AbortSignal): Promise<McpStatus> {
+    this.catalog.replace([]);
+    return this.manager.connect(server, signal);
+  }
+
+  async disconnect(server: string): Promise<McpStatus> {
+    this.catalog.replace([]);
+    return this.manager.disconnect(server);
+  }
+
+  async reconnect(server: string, signal?: AbortSignal): Promise<McpStatus> {
+    this.catalog.replace([]);
+    return this.manager.reconnect(server, signal);
+  }
 
   /** Detection uses only the allowed catalog already fetched for this session. */
   replyRecovery(content: string): string | undefined {

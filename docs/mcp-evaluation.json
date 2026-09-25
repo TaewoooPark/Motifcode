@@ -1504,5 +1504,179 @@
       "typecheck": true,
       "toolSchemaLint": true
     }
+  },
+  "managementUseCases": {
+    "date": "2026-09-25",
+    "mode": "prefetch",
+    "maxTurns": 12,
+    "timeoutMs": 300000,
+    "serverVersions": {
+      "git": "2026.8.18",
+      "time": "2026.8.18",
+      "fetch": "2026.8.18",
+      "pythonMcpSdk": "1.30.0",
+      "filesystem": "2026.8.31",
+      "memory": "2026.8.31"
+    },
+    "episodes": [
+      {
+        "scenario": "git-original",
+        "evidence": "management-usecases/git/evidence-101.json",
+        "evidenceSha256": "f7c346ea7f1d67c28201a4da57842ecdf84d81af57fc90da20db8328cd597677",
+        "sourceSha256": "5bc425f55d41385f3015d7c8c670bb360d882fb3ce2e553768bb044933dd6eee",
+        "strictPass": false,
+        "seed": 101,
+        "requests": 3,
+        "remoteCalls": 3,
+        "nativeAttempts": 0,
+        "elapsedMs": 121515,
+        "inputTokens": 14177,
+        "outputTokens": 7023,
+        "cachedTokens": 9728,
+        "failedChecks": [
+          "final answer includes 새 메모.txt"
+        ]
+      },
+      {
+        "scenario": "git-utf8-process-config",
+        "evidence": "management-usecases/git/evidence-utf8-101.json",
+        "evidenceSha256": "5b3e00ef3a2678675c5e0fffb96382203ac3a72c799020939a17c4f65e8bc801",
+        "sourceSha256": "5bc425f55d41385f3015d7c8c670bb360d882fb3ce2e553768bb044933dd6eee",
+        "strictPass": true,
+        "seed": 101,
+        "requests": 2,
+        "remoteCalls": 3,
+        "nativeAttempts": 0,
+        "elapsedMs": 18695,
+        "inputTokens": 7385,
+        "outputTokens": 1048,
+        "cachedTokens": 0,
+        "failedChecks": []
+      },
+      {
+        "scenario": "time",
+        "evidence": "management-usecases/time/evidence-101.json",
+        "evidenceSha256": "9b83dba7ef93e17bbcc1305511583d26f56876539ead6649102f29ff2e961a77",
+        "sourceSha256": "5bc425f55d41385f3015d7c8c670bb360d882fb3ce2e553768bb044933dd6eee",
+        "strictPass": true,
+        "seed": 101,
+        "requests": 2,
+        "remoteCalls": 2,
+        "nativeAttempts": 0,
+        "elapsedMs": 28220,
+        "inputTokens": 7864,
+        "outputTokens": 1606,
+        "cachedTokens": 1664,
+        "failedChecks": []
+      },
+      {
+        "scenario": "filesystem-memory",
+        "evidence": "management-usecases/composed/evidence-101.json",
+        "evidenceSha256": "2efce62c26cfbbd7ad41228c596d0ba6bbd1106c270bb4719c9b81f82dc58814",
+        "sourceSha256": "5bc425f55d41385f3015d7c8c670bb360d882fb3ce2e553768bb044933dd6eee",
+        "strictPass": true,
+        "seed": 101,
+        "requests": 6,
+        "remoteCalls": 5,
+        "nativeAttempts": 0,
+        "elapsedMs": 24264,
+        "inputTokens": 25768,
+        "outputTokens": 1395,
+        "cachedTokens": 20608,
+        "failedChecks": []
+      },
+      {
+        "scenario": "fetch-paging",
+        "evidence": "management-usecases/fetch/evidence-101.json",
+        "evidenceSha256": "9d99101b5e0f5fb1595fb3074c7725505d9ae013b27b16ea2b9e26c3ca090f2d",
+        "sourceSha256": "5bc425f55d41385f3015d7c8c670bb360d882fb3ce2e553768bb044933dd6eee",
+        "strictPass": true,
+        "seed": 101,
+        "requests": 4,
+        "remoteCalls": 3,
+        "nativeAttempts": 0,
+        "elapsedMs": 11163,
+        "inputTokens": 18696,
+        "outputTokens": 420,
+        "cachedTokens": 8704,
+        "failedChecks": []
+      }
+    ],
+    "independentReviews": [
+      {
+        "evidence": "management-usecases/independent-semantic-review.json",
+        "sha256": "8eba86eae9c9ede53ab7f65effaf6e26c3a3f3d7e6afe1a7f6f1eea482f4f69f"
+      },
+      {
+        "evidence": "management-usecases/git/independent-utf8-review.json",
+        "sha256": "8963c511f17e68219a570ca980e373d7ad709ed87b0c1f4964ee2ca56fe40c56"
+      }
+    ],
+    "limitations": [
+      "Single-seed exploratory cases, not a reliability-rate estimate.",
+      "Some episodes overlapped; provider load and cache were uncontrolled.",
+      "Git UTF-8 mitigation changes only explicit server-process configuration; raw tool results stay intact.",
+      "One ignored injected document instruction does not prove general prompt-injection protection.",
+      "Original Git experiment has no pre-run index hash; only the UTF-8 repeat proves byte-identical index."
+    ],
+    "validation": {
+      "testFiles": 67,
+      "testsPassed": 952,
+      "typecheck": true,
+      "toolSchemaLint": true,
+      "bundleSha256": "7d8d4a871b52006fafbecbe07a7cc3651e9b17bde031120effbc175da84d2159",
+      "bundleBytes": 1914054,
+      "tarballSha256": "b0241d33cc254d4d8a0838f442675f802199edcd67fb4d5143a8deb4f4cd21c7",
+      "tarballBytes": 417276,
+      "sourceManifestSha256": "4691e349601d2c3e95c8d2a6de064dba250de2dde4b97ad32b81774826ea1d12",
+      "sourceAggregateSha256": "38757ef80894fa8e490c389ed322933003f9fdcf8af22d1501551f192ec4f40e",
+      "artifactCases": [
+        {
+          "node": "v20.3.0",
+          "kind": "copied",
+          "passed": true,
+          "childAlive": false
+        },
+        {
+          "node": "v20.3.0",
+          "kind": "installed",
+          "passed": true,
+          "childAlive": false
+        },
+        {
+          "node": "v20.20.2",
+          "kind": "copied",
+          "passed": true,
+          "childAlive": false
+        },
+        {
+          "node": "v20.20.2",
+          "kind": "installed",
+          "passed": true,
+          "childAlive": false
+        }
+      ],
+      "visualTerminal": {
+        "emulator": "xterm.js 6.0.0 in visible Chrome",
+        "captures": 9,
+        "untrustedServerStarted": false,
+        "alivePids": [],
+        "canaryAbsentFromRaw": true
+      },
+      "evidence": [
+        {
+          "path": "management-usecases/test-final.log",
+          "sha256": "b4cb70a714b5265ec480bc95041a0ce0cc95fbd91a3667b6685d569ae213eada"
+        },
+        {
+          "path": "management-usecases/artifact-smoke/evidence.json",
+          "sha256": "c49ad4a6f2413f908f1e5072297185d353f91b5497ef075400d6c27f7f095a1d"
+        },
+        {
+          "path": "management-usecases/visual-terminal/evidence-summary.json",
+          "sha256": "c3af0c823fa09044b6a2f0539cfa334f9a4f7e910eb8f6fd658923d4527282b3"
+        }
+      ]
+    }
   }
 }

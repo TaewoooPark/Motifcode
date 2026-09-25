@@ -91,6 +91,8 @@ export interface ComposerView {
    * shows, the draft is kept but not painted.
    */
   confirm?: { title: string; lines: string[]; choices: string[] };
+  /** Width-aware management panel using the same box and selection styling. */
+  panel?: (width: number, height: number) => { title: string; lines: string[]; choices: string[]; hint?: string };
   /**
    * A secret being typed — an API key. The title and lines sit above the
    * input, the draft is painted as one `•` per character, and no menu opens.
@@ -589,8 +591,8 @@ export class Screen {
       const block = this.composerRows(this.composer, width);
       cursor = { row: rows.length + block.cursorRow, col: block.cursorCol };
       rows.push(...block.rows);
-      rows.push(...this.hintRows(width));
-      if (this.shortcutsOpen) {
+      rows.push(...this.hintRows(width, block.hint));
+      if (this.shortcutsOpen && !this.composer.panel) {
         for (const s of SHORTCUTS) {
           rows.push(...this.rows(`  ${truncateToWidth(s, Math.max(1, width - 2))}`, (t) => paint(t, style.faint)));
         }
@@ -637,7 +639,7 @@ export class Screen {
    * Every box row is exactly the terminal width, so the right edge lines up
    * and nothing wraps. Returns where the cursor belongs among the rows.
    */
-  private composerRows(view: ComposerView, width: number): { rows: Row[]; cursorRow: number; cursorCol: number } {
+  private composerRows(view: ComposerView, width: number): { rows: Row[]; cursorRow: number; cursorCol: number; hint?: string } {
     const boxed = width >= 8;
     const inner = boxed ? width - 4 : Math.max(1, width);
     // Box drawing is Ambiguous-width in Unicode. ASCII decorations preserve
@@ -661,13 +663,14 @@ export class Screen {
       width: inner + 4,
     });
     const rows: Row[] = boxed ? [border("╭", "╮")] : [];
-    if (view.confirm) {
+    const panel = view.panel?.(width, this.rowCount()) ?? view.confirm;
+    if (panel) {
       const fit = (s: string): string => {
         const t = truncateToWidth(s, inner);
         return `${t}${" ".repeat(Math.max(0, inner - displayWidth(t)))}`;
       };
-      const body = [view.confirm.title, ...view.confirm.lines.map((l) => `  ${l}`), "", ...view.confirm.choices];
-      const firstChoice = body.length - view.confirm.choices.length;
+      const body = [panel.title, ...panel.lines.map((l) => `  ${l}`), "", ...panel.choices];
+      const firstChoice = body.length - panel.choices.length;
       for (const [i, l] of body.entries()) {
         const painted =
           i === 0
@@ -681,8 +684,8 @@ export class Screen {
       }
       if (boxed) rows.push(border("╰", "╯"));
       // The cursor rests on the selected choice; there is nothing to type.
-      const selectedLine = view.confirm.choices.findIndex((c) => c.startsWith("❯"));
-      return { rows, cursorRow: Number(boxed) + firstChoice + Math.max(0, selectedLine), cursorCol: edge };
+      const selectedLine = panel.choices.findIndex((c) => c.startsWith("❯"));
+      return { rows, cursorRow: Number(boxed) + firstChoice + Math.max(0, selectedLine), cursorCol: edge, ...("hint" in panel ? { hint: panel.hint as string } : {}) };
     }
     let header = 0;
     if (view.secret) {
@@ -737,8 +740,9 @@ export class Screen {
    * the right. The right side goes first when the two do not fit, and the
    * hint is clipped only when it cannot fit by itself.
    */
-  private hintRows(width: number): Row[] {
-    const left = this.hint === "" ? "? for shortcuts" : this.hint;
+  private hintRows(width: number, override?: string): Row[] {
+    const hint = override ?? this.hint;
+    const left = hint === "" ? "? for shortcuts" : hint;
     const parts = compactReadings(this.state.instruments);
     const rightPlain = [this.label, ...parts.map((r) => `${r.label} ${r.value}`)].filter(Boolean).join(" · ");
     const rightPainted = NO_COLOR

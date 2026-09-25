@@ -36,6 +36,7 @@ function fakeContext(overrides: Partial<CommandContext> = {}) {
     },
     notes: () => ["- a note"],
     hooks: () => ["PostToolUse  [apply_patch] true"],
+    mcp: async (args) => ({ title: "/mcp", lines: [`mcp ${args}`] }),
     persist: (key, value) => {
       calls.push(`persist ${key}=${JSON.stringify(value)}`);
       return "/home/u/.motif/settings.json";

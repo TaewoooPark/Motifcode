@@ -8,9 +8,65 @@ pnpm build
 node packages/cli/dist/motif.js mcp --help
 ```
 
+To install this built checkout as `motif`, pack the local CLI and install that artifact:
+
+```sh
+npm pack ./packages/cli
+npm install -g ./motifcode-0.3.4.tgz
+motif mcp --help
+```
+
+This installs the branch build, whose package version still reads `0.3.4`; the published npm `0.3.4` does not contain this adapter. Using `node packages/cli/dist/motif.js` avoids replacing a global installation.
+
 Requires **Node 20.3 or later**. MCP cancellation uses [`AbortSignal.any`, added in Node 20.3.0](https://nodejs.org/download/release/v20.20.1/docs/api/globals.html#static-method-abortsignalanysignals). Copied-artifact stdio/HTTP connection checks passed on Node 20.3.0 and 20.20.2; Node 20.0.0 starts the CLI but cannot connect to MCP servers.
 
 MCP servers extend Motifcode through one canonical `mcp` tool. Their original tool names and JSON Schemas stay authoritative. They do not add hundreds of native tools or change the order of Motif-3's cached tool prefix.
+
+## Register and manage servers from the CLI
+
+Register a public HTTP server or a pinned local server:
+
+```sh
+motif mcp add docs --transport http https://developers.openai.com/mcp
+motif mcp add playwright --profile playwright -- npx -y @playwright/mcp@0.0.82 --headless --isolated --browser chrome --image-responses omit --snapshot-mode none --codegen none
+```
+
+`add` defaults to `stdio` and saves an enabled entry in `~/.motif/mcp.json`; it does **not** start or install the server. For stdio, put all Motifcode options before `--`. The command and every argument after it are preserved, including flags, spaces and empty arguments. In the `npx` example, package installation can happen later when you explicitly check the connection or start an enabled agent session. Pin/install the server ahead of time to avoid that download during startup.
+
+HTTP and legacy SSE take one URL instead of a child command. Prefer environment references for credentials; registration does not resolve them:
+
+```sh
+motif mcp add local --env-ref TOKEN=SERVICE_TOKEN -- node /absolute/path/to/server.mjs
+motif mcp add remote --transport http --header 'Authorization=Bearer ${SERVICE_TOKEN}' https://example.com/mcp
+motif mcp add legacy --transport sse --header-env X-Api-Key=SERVICE_TOKEN https://example.com/sse
+```
+
+`--env KEY=VALUE`, `--env-ref NAME[=SOURCE]`, `--header NAME=VALUE` and `--header-env NAME=SOURCE` may repeat. References use the named variable from the launching environment; `--env-ref NAME` refers to the same name. Literal private/custom headers are rejected. Export service credentials before connecting, and avoid putting secrets directly in shell arguments/history. `--protocol legacy|modern|auto` selects protocol negotiation; the default remains `legacy`.
+
+```sh
+motif mcp list
+motif mcp get docs
+motif mcp doctor
+motif mcp doctor --connect
+motif mcp disable docs
+motif mcp enable docs
+motif mcp remove docs
+```
+
+`list`, `get` and ordinary `doctor` are offline. `get` shows configuration structure and reference names while withholding stored commands, arguments, URLs and credential values. `doctor --connect` starts enabled trusted servers, lists their tools and closes them without calling business tools. Registration edits apply to later sessions; restart an existing chat to load them. They do not change that chat's active connections.
+
+Names must be unique. Unknown options, invalid existing files and concurrent edits fail instead of overwriting configuration. Saves use a `0600` temporary file, a cooperative lock and atomic replacement. To replace a server, explicitly remove it and add the new entry.
+
+Use `--mcp-config PATH` to edit a different file. A new file can be created directly; replacing an existing file requires its current `--trust-mcp SHA256`. Each successful edit prints the new hash. Authorizing an earlier hash does not authorize the edited file for connection:
+
+```sh
+motif mcp add docs --mcp-config ./mcp.json --transport http https://developers.openai.com/mcp
+motif mcp list --mcp-config ./mcp.json
+# Review the file and copy the displayed current SHA256 for an existing-file edit:
+motif mcp disable docs --mcp-config ./mcp.json --trust-mcp REVIEWED_SHA256
+```
+
+Imports remain separate: `mcp import` previews by default and writes only disabled entries when `--write` is supplied.
 
 ## Configure a server
 
@@ -212,3 +268,38 @@ The opt-in live harness uses the actual model transport, native tool block, exec
 `--mcp-mode catalog` and `--mcp-mode search` are comparison controls. `catalog` appends up to 64 KiB of full schemas; `search` starts with controls and the tool-name index. Neither changes the native tool block. Report task success separately from tool correctness, native-tool fallback, latency and tokens; cache/network variation and model nondeterminism make a single run insufficient for an optimum claim.
 
 See [the implementation experiment report](mcp-validation.ko.md) for measured Motif-3 tasks, failures, fixes and remaining limitations.
+
+## Manage connections inside the TUI
+
+Enter `/mcp` in an interactive Motifcode session to open the connection manager. It uses the existing composer box, theme and selection accent. The selected server shows its configured name, transport, connection state, discovered allowed tool count and optional Playwright profile. Zero discovered tools can mean discovery has not run yet. Long names wrap in the detail area; the list scrolls with the selection. Shorter terminals show fewer rows and compact details while keeping the selected name, state and essential keys visible.
+
+| Key | Action |
+| --- | --- |
+| `↑` / `↓` | Select a configured server |
+| `Enter` | Connect the selected server, or disconnect it when connected/connecting |
+| `r` | Close the current connection and reconnect |
+| `c` / `d` | Explicitly connect / disconnect |
+| `Esc` | Close the manager; while connecting, stop waiting for that attempt |
+
+These operations affect the current session. Disconnect pauses that server, closes its connection and excludes its tools from subsequent task discovery; the model cannot reconnect it through an MCP tool call. Use the manager or `/mcp connect NAME` to make it available again. Reconnect refreshes the connection and catalog, but does not replay previous tool calls or remove the protection against repeating an unknown write.
+
+Stopping a connection **wait** with `Esc` does not necessarily stop a shared startup: it can still finish in the background. The UI states this explicitly and refreshes local connection status while the manager is visible. Use `d` or `/mcp disconnect NAME` to actually close it. A disconnect waits for connection cleanup to finish. No remote polling is performed just to display the manager.
+
+The same controls are available without opening the panel:
+
+```text
+/mcp list
+/mcp connect files
+/mcp disconnect files
+/mcp reconnect files
+```
+
+`/mcp list` only reads local status; it does not start a process, connect to a server or fetch tools. During an active task, its final history compaction or queued work, `/mcp` also shows this read-only list, and connection changes are refused until that work finishes. The manager prevents overlapping connection changes and does not accept task input while an operation is being awaited.
+
+Configuration is loaded once at startup. Add/remove/enable configuration changes through `motif mcp` commands, then restart the interactive session. A disabled entry cannot be enabled through `/mcp`; check its configuration and any required project trust first. The empty manager shows the `motif mcp add NAME -- COMMAND [ARGS...]` entry point. The TUI does not provide an OAuth login flow.
+
+Connection status omits command arguments, endpoint URLs, environment/header values and server stderr. Failures show bounded guidance rather than raw exception text. Disconnecting does not erase results already present in the conversation; existing result handles remain subject to their scope, expiry and storage limits.
+
+Starting a new conversation (`/new` or `/clear`), changing action channels, or successfully loading another conversation with `/resume` clears the previous root conversation's result handles. This does not recreate the MCP manager or erase its protection against repeating unknown writes. Changing only `/cwd` keeps the conversation and its handles.
+
+The interaction follows the status-and-selection workflow documented by [Claude Code](https://code.claude.com/docs/en/mcp#managing-your-servers) and the slash-command workflow in [OpenCode](https://opencode.ai/docs/tui/), while keeping Motifcode's existing terminal presentation.

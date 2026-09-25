@@ -152,9 +152,12 @@ npx motifcode          # 첫 실행: 키를 물어본 뒤 `motif` 명령 설치�
 `mcp-adapter` 브랜치는 stdio·Streamable HTTP·기존 SSE 서버 연결,
 Codex/Claude 설정 가져오기, 실제 Motif-3 실험으로 보완한 도구 검색과 결과 처리를
 추가합니다. 아직 npm 0.3.4 배포본에는 없습니다. 이 체크아웃을 빌드한 뒤
-`motif mcp list`, `motif mcp doctor --connect`, `motif mcp import`를 사용하세요.
-[설정·권한·호환 범위](docs/mcp.md)와 [실험 및 구현 보고서](docs/mcp-validation.ko.md)를
-참고해주세요.
+`motif mcp add NAME -- COMMAND [ARGS...]` 또는
+`motif mcp add NAME --transport http URL`로 서버를 등록하세요.
+TUI의 `/mcp`에서 상태 확인·연결·해제·재연결을 할 수 있으며,
+`motif mcp doctor --connect`로 별도 연결 진단도 가능합니다.
+[설정·권한·호환 범위](docs/mcp.md), [실험 및 구현 보고서](docs/mcp-validation.ko.md),
+[연결 관리와 추가 활용 검증](docs/mcp-management-validation.ko.md)을 참고해주세요.
 
 ---
 

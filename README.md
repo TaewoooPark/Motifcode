@@ -164,9 +164,13 @@ it is a terminal preference, not an API configuration value in `.env`.
 The `mcp-adapter` branch adds stdio, Streamable HTTP and legacy SSE servers,
 Codex/Claude config import, and bounded discovery/results tuned through live
 Motif-3 tasks. This is not yet in npm 0.3.4. Build this checkout, then use
-`motif mcp list`, `motif mcp doctor --connect`, or `motif mcp import`.
+`motif mcp add NAME -- COMMAND [ARGS...]` or
+`motif mcp add NAME --transport http URL` to register a server.
+Use `/mcp` inside the TUI to inspect, connect, disconnect or reconnect servers;
+`motif mcp doctor --connect` checks connections outside a chat.
 See [configuration, permissions and compatibility](docs/mcp.md) and the
-[Motif-3 validation report](docs/mcp-validation.ko.md).
+[Motif-3 validation report](docs/mcp-validation.ko.md), including the
+[connection management and additional use cases](docs/mcp-management-validation.ko.md).
 
 ---
 

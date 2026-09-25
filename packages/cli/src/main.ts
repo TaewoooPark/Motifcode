@@ -72,7 +72,7 @@ import { ToolExecutor } from "./executor.js";
 import { policyForAgent } from "./policy.js";
 import { buildAgentPrompt, buildSystemPrompt } from "./prompt.js";
 import { loadMcpConfig, McpSession } from "@motifcode/mcp";
-import { runMcpCommand } from "./mcp-command.js";
+import { runMcpArgv } from "./mcp-command.js";
 
 const VERSION = "0.3.4";
 
@@ -127,6 +127,9 @@ function parseArgs(argv: string[]): Args {
       else if (argv[i + 1] && !argv[i + 1]!.startsWith("-")) flags[a.slice(2)] = argv[++i]!;
       else flags[a.slice(2)] = true;
     } else if (command === "run" && rest.length === 0 && ["mcp", "doctor", "login", "logout", "sessions", "resume", "skills", "agents", "plugins", "config", "lint", "distil", "metrics", "trust", "redact", "corpus-spec", "corpus-render", "help", "version"].includes(a)) {
+      // MCP owns its argv: repeated --env and every child argument after --
+      // must reach its dedicated parser without generic flag interpretation.
+      if (a === "mcp") return { command: "mcp", rest: argv.slice(i + 1), flags };
       command = a;
     } else {
       rest.push(a);
@@ -478,6 +481,11 @@ async function loginAtTerminal(endpoint: string, model: string): Promise<string 
 
 async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2));
+  if (args.command === "mcp") {
+    // Standalone MCP commands skip model setup, not the existing credential boundary.
+    withholdSecrets(process.env);
+    return runMcpArgv(args.rest, args.flags);
+  }
   const cwd = flagStr(args.flags, "cwd", process.cwd());
   const envFile = flagStr(args.flags, "env-file", "");
   // The settings files sit below the environment and the flags: a one-off
@@ -512,8 +520,6 @@ async function main(): Promise<number> {
   let resumeFrom: ResumeState | undefined;
 
   switch (args.command) {
-    case "mcp":
-      return runMcpCommand(args.rest, args.flags, { cwd });
     case "help":
       process.stdout.write(HELP);
       return 0;
