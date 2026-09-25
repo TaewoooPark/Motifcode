@@ -204,7 +204,13 @@ export async function runMcpCommand(
           const catalog = await manager.catalog({ signal: controller.signal });
           const statuses = manager.statuses();
           connections = statuses.map((status) => ({ ...status, toolCount: catalog.filter((tool) => tool.server === status.server).length }));
-          for (const status of statuses) if (status.state === "error") diagnostics.push({ severity: "error", code: status.error?.code ?? "connection_error", message: status.error?.message ?? "MCP connection failed.", server: status.server });
+          for (const status of statuses) {
+            if (!status.enabled) continue;
+            if (status.state === "error") diagnostics.push({ severity: "error", code: status.error?.code ?? "connection_error", message: status.error?.message ?? "MCP connection failed.", server: status.server });
+            // A catalog waiter can time out while the shared startup remains pending.
+            // Only ready confirms a successful connection check, even with zero tools.
+            else if (status.state !== "ready") diagnostics.push({ severity: "error", code: "connection_not_ready", message: `MCP server was not ready when the connection check ended (state: ${status.state}).`, server: status.server });
+          }
         } catch {
           diagnostics.push({ severity: "error", code: "connection_error", message: "MCP connection diagnosis failed; server-controlled details are withheld." });
         } finally {
