@@ -108,7 +108,7 @@ session checked feature by feature against Claude Code's.
     </td>
     <td width="50%" align="center" valign="top">
       <img src="docs/screen-skills.jpg" alt="the /skills list" width="100%"><br>
-      <sub><b><code>/skills</code>.</b> The fifteen built-in skills, each of them also a command: <code>/commit fix the parser</code>.</sub>
+      <sub><b><code>/skills</code>.</b> The built-in skills, each of them also a command: <code>/commit fix the parser</code>.</sub>
     </td>
   </tr>
 </table>
@@ -168,6 +168,9 @@ Motif-3 tasks. This is not yet in npm 0.3.4. Build this checkout, then use
 `motif mcp add NAME --transport http URL` to register a server.
 Use `/mcp` inside the TUI to inspect, connect, disconnect or reconnect servers;
 `motif mcp doctor --connect` checks connections outside a chat.
+The built-in `mcp-setup` skill guides natural-language setup requests; you can
+also invoke `/mcp-setup <GitHub or service URL>` explicitly. After registering a
+new server, relaunch Motif to load it; `/new` only clears the conversation.
 See [configuration, permissions and compatibility](docs/mcp.md) and the
 [Motif-3 validation report](docs/mcp-validation.ko.md), including the
 [connection management and additional use cases](docs/mcp-management-validation.ko.md).
@@ -251,7 +254,7 @@ enter send · \ + enter newline · esc interrupt or clear · ctrl-c twice quit �
 | Permissions | A numbered prompt before a command, a write, a patch or the terminal runs; "don't ask again for this tool"; a refusal the model is told about; Shift-Tab or `/permissions auto` runs everything |
 | Conversation | Each task sees the ones before it; `--continue` and `/resume` bring a recorded conversation back; messages sent while a task runs are queued; Esc interrupts; Codex-style compaction past `compactAt` of the window — the model writes a handoff summary and your own messages are kept verbatim — and `/compact <focus>` on demand |
 | Backend | `.motif/` laid out like Claude Code's `.claude/`: user and project settings, skills, agents, plugins, notes, one journal per task, history; project hooks applied once `motif trust` approves them |
-| Skills and agents | 15 built-in skills (`explore`, `plan`, `explain`, `code-review`, `security-review`, `test-fix`, `debug`, `refactor`, `commit`, `pr-body`, `docs`, `init`, `skill-creator`, `motif-endpoint`, `korean`); 5 built-in subagents (`explorer`, `reviewer`, `tester`, `planner`, `patcher`) with prefix tool sets and a local scheduler; plugins in Claude Code's layout |
+| Skills and agents | 16 built-in skills (`explore`, `plan`, `explain`, `code-review`, `security-review`, `test-fix`, `debug`, `refactor`, `commit`, `pr-body`, `docs`, `init`, `skill-creator`, `mcp-setup`, `motif-endpoint`, `korean`); 5 built-in subagents (`explorer`, `reviewer`, `tester`, `planner`, `patcher`) with prefix tool sets and a local scheduler; plugins in Claude Code's layout |
 | Endpoint | The key asked for once and saved to `~/.motif/.env`, withheld from every command the agent runs; a 401 that says which side of the key it is on; a 429 retried after the server's `Retry-After`; `motif doctor` reports what the server actually returns |
 | Screen | Shrinking the window mid-session leaves no stale rows; five themes (`motif`, `claude`, `mono`, `solarized`, `dracula`) swapped in place |
 | Scripts | `motif -p "question"` prints only the reply; `motif "task"` runs one task and exits |

@@ -205,6 +205,28 @@ did, it is not a skill — it is a comment.`,
 
   /* ---------------------------------------------------------------- */
   `---
+name: mcp-setup
+description: Register an MCP server from a GitHub URL or server docs, then verify it — MCP 연결/등록
+budget: 900
+tags: setup mcp
+---
+사용자가 요청한 MCP를 Motifcode에 등록하고 연결을 확인한다. 아래 순서만 수행한다. 설정 설명·검토만 요청했으면 변경하지 않는다. 원래 요청과 실행 권한을 따른다.
+
+완료 기준은 \`motif mcp doctor --connect\`에서 대상 서버가 \`ready\`인 것이다. 성공하면 즉시 결과를 보고하고 끝낸다. 직접 JSON-RPC를 만들거나, 서버를 백그라운드로 띄우거나, README의 별도 smoke test·업무 예제를 실행하지 않는다.
+
+1. \`bash\`로 \`motif mcp --help\`와 \`motif mcp list\`를 확인한다. CLI가 없거나 MCP 기능이 없으면 한계를 보고한다. Motifcode 소스를 찾거나 수정하지 않는다.
+2. 주소에 따라 한 경로만 선택한다.
+   - **서비스 URL과 HTTP/SSE 방식이 주어졌다면** 저장소 탐색이나 curl 검사를 생략하고 곧바로 다음처럼 등록한다. \`motif mcp add ID --transport http URL\`. SSE로 명시됐을 때만 sse를 쓴다. 그다음 4번으로 간다.
+   - **GitHub 저장소 URL이면** README, manifest/스크립트, 버전만 확인한다. URL 자체를 HTTP 서버로 등록하지 않는다. 문서의 \`npx\`·\`uvx\` 명령이 있으면 그것을 우선하며 검토한 버전을 고정한다. 예: \`motif mcp add ID -- npx -y PACKAGE_SPEC\`. 문서 인자를 그대로 보존한다. cold npx는 doctor 전에 \`npm exec --yes --package=PACKAGE_SPEC -- node -e 'process.exit(0)'\`로 검토한 정확한 패키지만 미리 설치한다(서버를 시작하지 않음). 그다음 4번으로 간다. 문서 명령이 없거나 실패했을 때만 3번의 소스 설치를 검토한다. 다른 폴더를 탐색하지 않는다.
+3. 소스 설치가 필요할 때만 \`"$HOME/.motif/mcp-servers/ID"\` 같은 영구 경로를 쓴다. HOME을 사용자 이름이나 작업 경로에서 추측하지 않는다. bash에서 실제 \`$HOME\`과 \`command -v\`로 경로를 구한다. 작업 폴더 밖 메타데이터도 bash로 읽는다. 설치 스크립트를 먼저 검토하고 \`package-lock.json\`이면 \`npm ci --ignore-scripts\`, 이어서 검토한 필수 빌드만 실행한다. 원본 소스·manifest·잠금 파일·tsconfig를 고치거나 재생성하지 말고 빌드가 지원되지 않으면 한계를 보고한다. Node 예: \`motif mcp add ID -- node "$HOME/.motif/mcp-servers/ID/dist/index.js"\`. 이 entry가 실제 문서 경로이고 존재하는지 먼저 확인한다. **.js 파일은 node의 인자이며 실행 권한도 확인하지 않고 command로 지정하면 안 된다.** Python/uv/Docker는 문서의 런타임·인자를 보존한다. 인자는 전부 \`--\` 뒤에 둔다. 임시 checkout 경로를 저장하지 않는다. 기존 임시·설치 디렉터리를 \`rm -rf\`로 지우지 말고 확인 후 재사용하거나 충돌하지 않는 새 디렉터리를 쓴다.
+4. \`motif mcp doctor --connect\`를 한 번 실행한다. 대상 서버의 상태와 진단을 확인한다. \`connecting\`이나 exit 0만으로 성공이라 하지 않는다. \`ready\`이고 도구가 0개인 서버도 정상일 수 있다. 실패하면 관찰된 원인 하나만 고친 뒤 한 번 재시도한다. 근거 없이 protocol을 modern 등으로 바꾸지 않는다. 계속 실패하면 오류를 보고한다. 다른 서버의 오류를 대상 서버 오류와 구별한다.
+
+기존 설정은 보존한다. 같은 ID만으로 같은 서버라고 판단하지 말고 로컬에서 command/args/URL이 일치하는지 비교하되 자격증명은 출력하지 않는다(\`get\`은 값이 가려져 있다). 기존 항목 교체는 사용자가 원할 때만 한다. 이번 작업에서 직접 만든 실패 항목은 수정할 수 있다. 다른 홈·자격증명 저장소·\`.env\`를 읽거나 환경 전체를 출력하지 않는다. 토큰은 저장·출력하지 말고 \`--env-ref NAME=ENV\` 또는 \`--header-env HEADER=ENV\`로 참조한다. 모델 키를 MCP 키로 재사용하지 않는다. 별도 config 파일은 현재/변경 후 해시 신뢰 절차를 따른다.
+
+마지막 응답 또는 \`done.summary\`에는 사용자 언어로 다음 네 항목을 모두 넣는다: **서버 ID, 자격증명을 제외한 실제 저장 실행 명령·버전(또는 HTTP/SSE 방식), ready 여부·도구 수, Motif 프로세스 재시작 필요 여부.** 새로 등록하거나 설정을 바꿨다면 **현재 Motif를 종료하고 다시 실행해야 사용 가능하며 \`/new\`와 \`/mcp\`는 설정을 다시 읽지 않는다**고 최종 응답에도 명시한다. 앞선 진행 설명에만 쓰지 않는다. doctor가 업무 도구 실행 검증은 아님을 구별한다.`,
+
+  /* ---------------------------------------------------------------- */
+  `---
 name: motif-endpoint
 description: Diagnose the Motif-3 endpoint when tool calls or output quality look wrong
 budget: 900

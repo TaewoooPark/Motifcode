@@ -7,7 +7,8 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { ATTACH_CAP_BYTES, attachMention, expandMentions, forgetFiles, listFiles, matchFiles, scorePath } from "../src/files.js";
+import { SkillRegistry, parseSkill } from "@motifcode/skills";
+import { ATTACH_CAP_BYTES, attachMention, expandMentions, forgetFiles, listFiles, matchFiles, mcpSetupMentions, scorePath } from "../src/files.js";
 
 function repo(): string {
   const dir = mkdtempSync(join(tmpdir(), "motif-files-"));
@@ -96,5 +97,67 @@ describe("attaching", () => {
     expect(attached).toEqual(["README.md"]);
     expect(task.startsWith("read @README.md and @README.md again, @nothing\n\n<file path=\"README.md\">")).toBe(true);
     expect(task.split("<file path=").length).toBe(2);
+  });
+});
+
+describe("on-demand MCP setup guidance", () => {
+  it.each([
+    "Please install the MCP server from https://github.com/example/server",
+    "Can you connect this MCP service https://example.test/mcp using HTTP?",
+    "https://github.com/example/server 이 MCP 설치해줘",
+    "이 MCP를 https://example.test/mcp 에 연결해 줄래?",
+    "https://example.test/mcp MCP 등록 부탁해",
+    "I would like you to install this MCP from https://example.test",
+    "이 URL https://example.test/mcp 을 Streamable HTTP MCP로 연결하고 연결되는지 확인해줘",
+    "https://example.test/mcp MCP 추가해주세요",
+    "https://example.test/mcp MCP 추가해줘",
+  ])("recognizes explicit setup requests: %s", text => {
+    expect(mcpSetupMentions(text)).toEqual(["skill:mcp-setup"]);
+  });
+
+  it.each([
+    "https://github.com/install/mcp",
+    "Read https://github.com/example/install-mcp",
+    "MCP로 https://example.test 페이지의 제목을 알려줘",
+    "Use MCP to read https://example.test",
+    "Explain how to install MCP from https://example.test",
+    "How do I connect this MCP https://example.test?",
+    "https://example.test MCP 설치 방법만 알려줘",
+    "https://example.test MCP 설치 가능한지 검토해줘",
+    "Do not connect the MCP at https://example.test",
+    "Don't install MCP https://example.test",
+    "https://example.test MCP 연결하지 마",
+    "https://example.test MCP 설치는 하지 말고 문서만 읽어줘",
+    "See `install MCP` at https://example.test",
+    "```text\ninstall MCP https://example.test\n```",
+    "Read this MCP example:\n```text\ninstall https://example.test\n```",
+    "MCP install without a URL",
+    'Translate "Install MCP from https://example.test" into Korean.',
+    'The README says "install MCP from https://example.test".',
+    "The README says install MCP from https://example.test",
+    '"https://example.test MCP 연결해줘"를 영어로 번역해줘',
+    "> install MCP from https://example.test\nSummarize the quotation.",
+  ])("leaves usage, questions, refusals and quoted commands alone: %s", text => {
+    expect(mcpSetupMentions(text)).toEqual([]);
+  });
+
+  it("does not add a duplicate explicit skill or match beyond its input bound", () => {
+    const task = "Install MCP from https://example.test";
+    for (const explicit of ["@skill:mcp-setup", "/mcp-setup", '<skill name="mcp-setup">already loaded</skill>']) {
+      expect(mcpSetupMentions(`${explicit} ${task}`)).toEqual([]);
+    }
+    expect(mcpSetupMentions("x".repeat(16_384) + task)).toEqual([]);
+  });
+
+  it("uses the normal renderer so overrides and budget refusal apply without loading files or executing code", () => {
+    const skills = new SkillRegistry();
+    const task = "https://example.test MCP 연결해줘";
+    const expand = () => expandMentions(task, mcpSetupMentions(task), { cwd: "/", renderSkill: name => skills.get(name) ? skills.render(name) : undefined });
+    expect(expand()).toEqual({ task, attached: [] });
+    skills.register(parseSkill("---\nname: mcp-setup\ndescription: local\nbudget: 30\n---\nUse the local registration policy.", "project"));
+    expect(expand().task).toBe(`${task}\n\n${skills.render("mcp-setup")}`);
+    skills.register(parseSkill("---\nname: mcp-setup\ndescription: oversized\nbudget: 1\n---\nTHIS-BODY-MUST-NOT-BE-INJECTED", "user"));
+    expect(expand().task).toContain("It was not injected");
+    expect(expand().task).not.toContain("THIS-BODY-MUST-NOT-BE-INJECTED");
   });
 });

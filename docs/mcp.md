@@ -53,7 +53,7 @@ motif mcp enable docs
 motif mcp remove docs
 ```
 
-`list`, `get` and ordinary `doctor` are offline. `get` shows configuration structure and reference names while withholding stored commands, arguments, URLs and credential values. `doctor --connect` starts enabled trusted servers, lists their tools and closes them without calling business tools. Registration edits apply to later sessions; restart an existing chat to load them. They do not change that chat's active connections.
+`list`, `get` and ordinary `doctor` are offline. `get` shows configuration structure and reference names while withholding stored commands, arguments, URLs and credential values. `doctor --connect` starts enabled trusted servers, lists their tools and closes them without calling business tools. Registration edits apply to later Motif processes; exit and relaunch Motif to load them. `/new` clears the conversation but retains the original MCP configuration, as does the `/mcp` connection menu.
 
 Names must be unique. Unknown options, invalid existing files and concurrent edits fail instead of overwriting configuration. Saves use a `0600` temporary file, a cooperative lock and atomic replacement. To replace a server, explicitly remove it and add the new entry.
 
@@ -67,6 +67,36 @@ motif mcp disable docs --mcp-config ./mcp.json --trust-mcp REVIEWED_SHA256
 ```
 
 Imports remain separate: `mcp import` previews by default and writes only disabled entries when `--write` is supplied.
+
+## Set up a server in natural language
+
+The built-in `mcp-setup` skill is attached on demand to clear MCP setup requests
+containing a URL, such as:
+
+```text
+https://github.com/TaewoooPark/Trendchaser-mcp 이 MCP를 motifcode에 연결해줘. 연결되는지도 확인해줘.
+```
+
+This small English/Korean matcher selects instructions; it does not execute a
+command or authorize work. Informational requests, negations and quoted examples
+are excluded. Unrecognized phrasing can use `/mcp-setup <URL>` explicitly in the
+TUI. User/project overrides and the normal skill budget still apply. The skill
+checks the installed CLI and existing configuration, reads the supplied server's
+setup documentation, prefers its documented package command over rebuilding
+source, and verifies the requested server reaches `ready`. It prepares a cold
+npx installation before the connection check so download/build time does not
+consume the short startup allowance. A GitHub repository URL is source code,
+not an HTTP MCP endpoint. Local installs need a durable path; secrets use
+references to environment variables. The skill instructs the model to preserve
+existing entries and pin reviewed versions; these are guidance, not additional
+host-enforced guarantees. CLI edits retain their existing validation and locking.
+
+This is an instruction workflow using the ordinary tools and permissions, not a
+universal URL installer. Missing credentials, ambiguous instructions or an
+unsupported installation can still require input. Connection verification does
+not prove a server's business tools work. Newly registered servers require
+**exiting and relaunching Motif**; neither `/new` nor `/mcp` reloads configuration.
+The tool prefix stays fixed, with the skill body loaded only on demand.
 
 ## Configure a server
 

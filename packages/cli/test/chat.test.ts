@@ -19,7 +19,7 @@ import { TransportError, type CompletionRequest, type CompletionResponse, type T
 import { DEFAULT_HOOKS } from "@motifcode/hooks";
 import type { JournalLine } from "@motifcode/journal";
 import { doneBody, toolCallBody } from "@motifcode/replay";
-import { BUILTIN_SKILLS, SkillRegistry } from "@motifcode/skills";
+import { BUILTIN_SKILLS, SkillRegistry, parseSkill } from "@motifcode/skills";
 import { CORE_TOOLS, toolPrefix } from "@motifcode/tools";
 import { Screen } from "@motifcode/tui";
 import { Chat } from "../src/chat.js";
@@ -117,6 +117,36 @@ describe("interactive session", () => {
       await s.finished;
     }
     open.length = 0;
+  });
+
+  it.each(["typed", "initial", "mention", "slash"] as const)("attaches MCP setup guidance once through %s input", async entry => {
+    const skills = new SkillRegistry(); skills.registerAll(BUILTIN_SKILLS);
+    skills.register(parseSkill("---\nname: mcp-setup\ndescription: local setup\nbudget: 30\n---\nTUI-SETUP-OVERRIDE", "project"));
+    const task = "https://example.test/mcp MCP 추가해주세요";
+    const t = new GateTransport(reply("Instructions received."));
+    const s = session(t, { skills, ...(entry === "initial" ? { initialTask: task } : {}) }); open.push(s);
+    if (entry !== "initial") s.type(`${entry === "mention" ? "@skill:mcp-setup " : entry === "slash" ? "/mcp-setup " : ""}${task}\r`);
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    const user = String(t.seen[0]!.messages[1]!.content);
+    expect(user).toContain(task);
+    expect(user.match(/<skill name="mcp-setup">/g)).toHaveLength(1);
+    expect(user).toContain("TUI-SETUP-OVERRIDE");
+    expect(t.seen[0]!.messages[0]!.content).not.toContain("TUI-SETUP-OVERRIDE");
+    expect(t.seen[0]!.tools).toEqual(toolPrefix(CORE_TOOLS.length - 1));
+  });
+
+  it("does not select MCP setup from attached file content or when the skill tool is absent", async () => {
+    const t = new GateTransport(reply("Read the file.")); const s = session(t); open.push(s);
+    writeFileSync(join(s.cwd, "request.txt"), "https://example.test MCP 설치해줘");
+    s.type("Read @request.txt please\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    expect(t.seen[0]!.messages[1]!.content).toContain("https://example.test MCP 설치해줘");
+    expect(t.seen[0]!.messages[1]!.content).not.toContain('<skill name="mcp-setup">');
+    const noSkill = new GateTransport(reply("No skill tool."));
+    const raw = "Install MCP from https://example.test";
+    const other = session(noSkill, { tools: toolPrefix(2), initialTask: raw }); open.push(other);
+    await vi.waitFor(() => expect(other.chat.tasksCompleted).toBe(1));
+    expect(noSkill.seen[0]!.messages[1]!.content).toBe(raw);
   });
 
   it("runs a task and continues the conversation with the next one", async () => {

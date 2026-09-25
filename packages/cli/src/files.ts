@@ -182,3 +182,22 @@ export function expandMentions(
   if (blocks.length === 0) return { task: text, attached };
   return { task: `${text}\n\n${blocks.join("\n\n")}`, attached };
 }
+
+/** Conservative routing of original user prose, never attached files or project notes.
+ * This selects guidance only; execution still follows the user's request and policy.
+ */
+export function mcpSetupMentions(text: string): string[] {
+  if (text.length > 16_384 || /@skill:mcp-setup\b|^\s*\/mcp-setup\b|<skill\s+name=["']mcp-setup["']/i.test(text)) return [];
+  const prose = text.replace(/```[\s\S]*?(?:```|$)/g, " ").replace(/^\s*>[^\n]*$/gm, " ");
+  const urls = /https?:\/\/[^\s<>"'`]+/gi;
+  if (!urls.test(prose)) return [];
+  const intent = prose.replace(urls, " ").replace(/`[^`]*(?:`|$)|"[^"\n]*"|'[^'\n]*'|“[^”\n]*”|‘[^’\n]*’/g, " ").trim();
+  if (!/\bmcp\b/i.test(intent)) return [];
+  // Prefer a missed convenience attachment over treating a question or refusal as setup.
+  if (/\b(?:how|why|explain|describe|example|inspect|review|compare|documentation|translate|quote)\b|\b(?:do\s+not|don['’]t|never|not\s+yet|without)\b|어떻게|방법|설명|예시|검토|번역|인용|알려|가능한지|하지\s*(?:마|말)|(?:등록|추가|연결|설치)(?:은|는|을|를)?\s*(?:하지|안\s*해|없이)/i.test(intent)) return [];
+  const action = "(?:add|install|connect|register|configure|set\\s+up)\\b";
+  const english = new RegExp(`^(?:please\\s+)?${action}|\\b(?:can|could|would|will)\\s+you\\s+(?:please\\s+)?${action}|\\b(?:I|we)\\s+(?:want|need|would\\s+like)\\s+(?:you\\s+)?to\\s+${action}`, "i").test(intent);
+  const korean = /(?:등록|추가|연결|설치)(?:을|를)?\s*(?:좀\s*)?(?:해\s*(?:줘|주|줄)|하(?:자|세요|고\s*싶)|부탁)/.test(intent)
+    || /(?:등록|추가|연결|설치)하고[^.!?\n]{0,80}(?:확인|검증)해\s*(?:줘|주|줄)/.test(intent);
+  return english || korean ? ["skill:mcp-setup"] : [];
+}

@@ -1678,5 +1678,652 @@
         }
       ]
     }
+  },
+  "trendchaserLinkVerification": {
+    "date": "2026-09-25",
+    "serverCommit": "8ad13162ba64d8d836438696172a5d70e846bd72",
+    "naturalLanguage": {
+      "prompt": "https://github.com/TaewoooPark/Trendchaser-mcp 이 MCP를 motifcode에 연결해줘. 연결되는지도 확인해줘.",
+      "cliAliases": [
+        "motif",
+        "motifcode"
+      ],
+      "maxTurns": 20,
+      "elapsedMs": 79558,
+      "exitCode": 1,
+      "registered": false,
+      "endReason": "turn_limit",
+      "observation": "The model spent its budget exploring nearby source trees rather than registering the server. This bounded failure is not a proof that registration is impossible with more turns or different instructions.",
+      "earlierTrialConfound": "An earlier fixture mapped motif only, so the model found the old global motifcode alias. That trial is excluded as evidence about branch capability."
+    },
+    "directCompatibility": {
+      "readyToolCount": 4,
+      "operations": [
+        "list_briefs",
+        "get_topic",
+        "search_trends",
+        "missing_anchor_error"
+      ],
+      "oracleMatches": true,
+      "freshNpxStartup": {
+        "defaultTimeoutMs": 10000,
+        "observedElapsedMs": 12104,
+        "state": "connecting",
+        "exitCodeAfterFix": 1,
+        "diagnostic": "connection_not_ready"
+      },
+      "preinstalledStartup": {
+        "observedElapsedMs": 200,
+        "state": "ready",
+        "exitCode": 0
+      },
+      "sameSessionConfigReload": false
+    },
+    "modelUse": {
+      "toolCompatibilityPass": true,
+      "fullTaskSemanticPass": false,
+      "failure": "Final answer claimed a two-sentence summary had been written, but did not provide the summary.",
+      "modelRequests": 4,
+      "mcpCalls": 3,
+      "elapsedMs": 29805,
+      "inputTokens": 21414,
+      "outputTokens": 1085,
+      "redundantRead": "get_brief before the requested get_topic",
+      "sourceSha256": "5bc425f55d41385f3015d7c8c670bb360d882fb3ce2e553768bb044933dd6eee"
+    },
+    "validation": {
+      "testFiles": 67,
+      "testsPassed": 954,
+      "typecheck": true,
+      "toolSchemaLint": true,
+      "build": true
+    },
+    "evidence": [
+      {
+        "path": "trendchaser-link/natural-clean/run.json",
+        "sha256": "2cd163e26808baccefc63893a2fa1e6d06fa7243071700845fa1c039fb33f51a"
+      },
+      {
+        "path": "trendchaser-link/natural-clean/model-trace.jsonl",
+        "sha256": "73f2122125d0a2e4d80122851bae3999c920795a634e6b905b581e9187be37c8"
+      },
+      {
+        "path": "trendchaser-link/direct-doctor-cold.json",
+        "sha256": "5e835511171df22e455cfd9d85cb4f532847c4943bee132b68eedd833da29568"
+      },
+      {
+        "path": "trendchaser-link/fixed-direct-doctor-cold.json",
+        "sha256": "9450f2798d9b8e398e9cbe203afbc72b3b218172c421fee937b1ff294a34735b"
+      },
+      {
+        "path": "trendchaser-link/fixed-direct-doctor-installed.json",
+        "sha256": "c5ea93a9ae3ff91449294b02fda283f0d45664d2e6c6c8dd104ed2cb02c9004f"
+      },
+      {
+        "path": "trendchaser-link/direct-session-evidence.json",
+        "sha256": "db8a1fb0e408de0b40354aad0d28f0dbd4f868f2c45a8adf8fa573309df9fa2e"
+      },
+      {
+        "path": "trendchaser-link/model-evidence.json",
+        "sha256": "d0de224cfc06554f0ff69be8d0a4990999b7fe00c22b7c29c93050c090508063"
+      },
+      {
+        "path": "trendchaser-link/model-independent-semantic-review.json",
+        "sha256": "d15231b890785e9cfbcd1b427bbf4ab9099deaa8116474619eb9b317c0915ea4"
+      },
+      {
+        "path": "trendchaser-link/test-final.log",
+        "sha256": "ab5c3fb50a1218aa7558d809efab39753eb8b9cb2b043d78d885982183e62971"
+      }
+    ]
+  },
+  "mcpSetupSkill": {
+    "dates": [
+      "2026-09-25",
+      "2026-09-26"
+    ],
+    "implementation": {
+      "builtin": "mcp-setup",
+      "bodyLanguage": "Korean",
+      "budgetEstimateCeiling": 900,
+      "attachment": "Conservative original user text: URL + MCP + explicit setup intent; existing renderer and overrides; no model router request.",
+      "nativeToolsUnchanged": true,
+      "sameSessionConfigReload": false
+    },
+    "developmentTrials": [
+      {
+        "label": "skill-natural-101",
+        "bundleSha256": "cc44fa7118764a32ee63b216c4147f8dda93ffd23105e644f340875e4600b482",
+        "code": 1,
+        "elapsedMs": 74292,
+        "timeout": false,
+        "modelRequests": 20,
+        "registered": false,
+        "automaticAttachment": false,
+        "toolCalls": null,
+        "inputTokens": null,
+        "outputTokens": null
+      },
+      {
+        "label": "skill-natural-102",
+        "bundleSha256": "cc44fa7118764a32ee63b216c4147f8dda93ffd23105e644f340875e4600b482",
+        "code": 143,
+        "elapsedMs": 114896,
+        "timeout": false,
+        "modelRequests": 3,
+        "registered": false,
+        "automaticAttachment": false,
+        "toolCalls": null,
+        "inputTokens": null,
+        "outputTokens": null,
+        "operatorStopped": true
+      },
+      {
+        "label": "skill-routed-101",
+        "bundleSha256": "4c862dc09de0d136bb6cb6fc71876127ec9b998204f78336d89d6fb3cc91f52d",
+        "code": 1,
+        "elapsedMs": 52782,
+        "timeout": false,
+        "modelRequests": 20,
+        "registered": false,
+        "automaticAttachment": false,
+        "toolCalls": 23,
+        "inputTokens": 174203,
+        "outputTokens": 2304
+      },
+      {
+        "label": "skill-routed-102",
+        "bundleSha256": "4c862dc09de0d136bb6cb6fc71876127ec9b998204f78336d89d6fb3cc91f52d",
+        "code": 1,
+        "elapsedMs": 95650,
+        "timeout": false,
+        "modelRequests": 20,
+        "registered": false,
+        "automaticAttachment": false,
+        "toolCalls": 34,
+        "inputTokens": 265481,
+        "outputTokens": 4699
+      },
+      {
+        "label": "skill-http-101",
+        "bundleSha256": "4c862dc09de0d136bb6cb6fc71876127ec9b998204f78336d89d6fb3cc91f52d",
+        "code": 0,
+        "elapsedMs": 75538,
+        "timeout": false,
+        "modelRequests": 15,
+        "registered": true,
+        "automaticAttachment": false,
+        "toolCalls": 14,
+        "inputTokens": 95650,
+        "outputTokens": 3734
+      },
+      {
+        "label": "skill-explicit-101",
+        "bundleSha256": "4c862dc09de0d136bb6cb6fc71876127ec9b998204f78336d89d6fb3cc91f52d",
+        "code": 143,
+        "elapsedMs": 194616,
+        "timeout": false,
+        "modelRequests": 17,
+        "registered": true,
+        "automaticAttachment": false,
+        "toolCalls": 18,
+        "inputTokens": 159687,
+        "outputTokens": 4531,
+        "operatorStopped": true
+      },
+      {
+        "label": "skill-auto-101",
+        "bundleSha256": "a7e7004925869c00121cc05e8ae473c8b9c502b8d801897cda8a0cad1dbc9516",
+        "code": 143,
+        "elapsedMs": 99835,
+        "timeout": false,
+        "modelRequests": 16,
+        "registered": true,
+        "automaticAttachment": true,
+        "toolCalls": 21,
+        "inputTokens": 162847,
+        "outputTokens": 3002,
+        "operatorStopped": true
+      },
+      {
+        "label": "skill-auto-102",
+        "bundleSha256": "a7e7004925869c00121cc05e8ae473c8b9c502b8d801897cda8a0cad1dbc9516",
+        "code": 143,
+        "elapsedMs": 99808,
+        "timeout": false,
+        "modelRequests": 15,
+        "registered": false,
+        "automaticAttachment": true,
+        "toolCalls": 19,
+        "inputTokens": 184617,
+        "outputTokens": 4226,
+        "operatorStopped": true
+      },
+      {
+        "label": "skill-auto-http-101",
+        "bundleSha256": "a7e7004925869c00121cc05e8ae473c8b9c502b8d801897cda8a0cad1dbc9516",
+        "code": 0,
+        "elapsedMs": 99561,
+        "timeout": false,
+        "modelRequests": 12,
+        "registered": true,
+        "automaticAttachment": true,
+        "toolCalls": 20,
+        "inputTokens": 84156,
+        "outputTokens": 3697
+      },
+      {
+        "label": "skill-short-ko-101",
+        "bundleSha256": "a7e7004925869c00121cc05e8ae473c8b9c502b8d801897cda8a0cad1dbc9516",
+        "code": 0,
+        "elapsedMs": 80771,
+        "timeout": false,
+        "modelRequests": 12,
+        "registered": true,
+        "automaticAttachment": true,
+        "toolCalls": 14,
+        "inputTokens": 109950,
+        "outputTokens": 3527,
+        "independentGradeEvidence": {
+          "path": "trendchaser-link/skill-short-ko-101/independent-grade.json",
+          "sha256": "8208b471a2247239dc549e594c4a078d868bf3eade811ffead5b47ecdfe25ca8"
+        }
+      },
+      {
+        "label": "skill-short-ko-http-101",
+        "bundleSha256": "a7e7004925869c00121cc05e8ae473c8b9c502b8d801897cda8a0cad1dbc9516",
+        "code": 0,
+        "elapsedMs": 14416,
+        "timeout": false,
+        "modelRequests": 5,
+        "registered": true,
+        "automaticAttachment": true,
+        "toolCalls": 4,
+        "inputTokens": 17294,
+        "outputTokens": 653,
+        "independentGradeEvidence": {
+          "path": "trendchaser-link/skill-short-ko-http-101/independent-grade.json",
+          "sha256": "4152c6ffd47332c314a90e85efdc645b659df54e5baea315373786f0cdb40ddd"
+        }
+      },
+      {
+        "label": "skill-compact-101",
+        "bundleSha256": "3d5f4deb48cd60bac4be4e94b65d665fdece0aa6f19942275e599ad98c9f071a",
+        "code": 1,
+        "elapsedMs": 111819,
+        "timeout": false,
+        "modelRequests": 20,
+        "registered": false,
+        "automaticAttachment": true,
+        "toolCalls": 24,
+        "inputTokens": 241998,
+        "outputTokens": 3851,
+        "independentGradeEvidence": {
+          "path": "trendchaser-link/skill-compact-101/independent-grade.json",
+          "sha256": "6e226d4807f76b2ed452fc4dbad6d2105c450608b287f449bf9e7ba314cfe321"
+        }
+      },
+      {
+        "label": "skill-compact-102",
+        "bundleSha256": "3d5f4deb48cd60bac4be4e94b65d665fdece0aa6f19942275e599ad98c9f071a",
+        "code": 143,
+        "elapsedMs": 137964,
+        "timeout": false,
+        "modelRequests": 6,
+        "registered": false,
+        "automaticAttachment": true,
+        "toolCalls": 13,
+        "inputTokens": 44149,
+        "outputTokens": 2784,
+        "operatorStopped": true,
+        "independentGradeEvidence": {
+          "path": "trendchaser-link/skill-compact-102/independent-grade.json",
+          "sha256": "17d4b7fbeee3f449ddc99e8fb4999a24eb8d95cb19c39c871f2d241c15f8242c"
+        }
+      },
+      {
+        "label": "skill-compact-http-101",
+        "bundleSha256": "3d5f4deb48cd60bac4be4e94b65d665fdece0aa6f19942275e599ad98c9f071a",
+        "code": 0,
+        "elapsedMs": 20011,
+        "timeout": false,
+        "modelRequests": 5,
+        "registered": true,
+        "automaticAttachment": true,
+        "toolCalls": 5,
+        "inputTokens": 18689,
+        "outputTokens": 911,
+        "independentGradeEvidence": {
+          "path": "trendchaser-link/skill-compact-http-101/independent-grade.json",
+          "sha256": "41baf12e23a949f74588ff1012124a887e2f5bd3ba74ad29c7778c8cfaa73235"
+        }
+      },
+      {
+        "label": "skill-final-101",
+        "bundleSha256": "a3249e35dd6c3bc7a495053ac8ca735a7d134fb7e1f7c1e523741726d47fde22",
+        "code": 1,
+        "elapsedMs": 104893,
+        "timeout": false,
+        "modelRequests": 20,
+        "registered": true,
+        "automaticAttachment": true,
+        "toolCalls": 23,
+        "inputTokens": 219616,
+        "outputTokens": 4053,
+        "independentGradeEvidence": {
+          "path": "trendchaser-link/skill-final-101/independent-grade.json",
+          "sha256": "a2675c0c19c47f4d83d64aaf017b40293072c40207099e1faa78bd1ba5832b52"
+        }
+      },
+      {
+        "label": "skill-final-102",
+        "bundleSha256": "a3249e35dd6c3bc7a495053ac8ca735a7d134fb7e1f7c1e523741726d47fde22",
+        "code": 143,
+        "elapsedMs": 105636,
+        "timeout": false,
+        "modelRequests": 14,
+        "registered": false,
+        "automaticAttachment": true,
+        "toolCalls": 16,
+        "inputTokens": 108704,
+        "outputTokens": 2050,
+        "operatorStopped": true,
+        "independentGradeEvidence": {
+          "path": "trendchaser-link/skill-final-102/independent-grade.json",
+          "sha256": "a3694d6335e1c8eed9681e23f6dcc38844050f122539d40fa8e5001692878201"
+        }
+      },
+      {
+        "label": "skill-final-http-101",
+        "bundleSha256": "a3249e35dd6c3bc7a495053ac8ca735a7d134fb7e1f7c1e523741726d47fde22",
+        "code": 0,
+        "elapsedMs": 15339,
+        "timeout": false,
+        "modelRequests": 4,
+        "registered": true,
+        "automaticAttachment": true,
+        "toolCalls": 3,
+        "inputTokens": 13649,
+        "outputTokens": 638,
+        "independentGradeEvidence": {
+          "path": "trendchaser-link/skill-final-http-101/independent-grade.json",
+          "sha256": "8ca3b66c2586e1fe74d1421c1d3d73525a56f9fb3c047431e7edb93d5cb011d2"
+        }
+      }
+    ],
+    "limitations": [
+      "Skill instructions do not enforce execution policy or guarantee an arbitrary repository install.",
+      "Operator-stopped trials are recorded separately from natural turn-limit failures.",
+      "Later skill-command trials protect real credential directories at the test harness level; that guard is not part of Motifcode.",
+      "Both successful GitHub trials registered an unpinned documented npx command; its tested cache resolution matched reviewed commit 8ad13162ba64d8d836438696172a5d70e846bd72, but future installs can differ.",
+      "Final response compliance was partial for both GitHub trials: restart wording was ambiguous or weaker than the required process relaunch.",
+      "Five successful trials are exploratory evidence, not a reliability rate or an optimal speed/token claim. Provider cache and load were not controlled."
+    ],
+    "credentialScopeIncident": {
+      "trial": "skill-final-102",
+      "attempt": "Model attempted a real-home .env read after recursive file discovery; operator interrupted the owned process.",
+      "followingApiRequestObserved": false,
+      "localReadOutcome": "Not established; credential contents were not inspected during the audit.",
+      "evidence": "trendchaser-link/skill-final-102/interruption-audit.json"
+    },
+    "productionTrials": [
+      {
+        "label": "skill-command-101",
+        "bundleSha256": "1ee8450f032970a32ef600df5f1ccd6e656c6d344a40fb8d845b36c632d7fdbc",
+        "code": 0,
+        "elapsedMs": 71600,
+        "timeout": false,
+        "credentialGuard": true,
+        "modelRequests": 11,
+        "toolCalls": 13,
+        "mcpCalls": 0,
+        "automaticAttachment": true,
+        "maximumAttachmentCount": 1,
+        "inputTokens": 69501,
+        "outputTokens": 2414,
+        "cachedInputTokens": 42624,
+        "evidence": {
+          "run": {
+            "path": "trendchaser-link/skill-command-101/run.json",
+            "sha256": "4cc3ef34784992ca59c68efd08e5b0d30c1e83f1326801bb097989fa1e9b3816"
+          },
+          "trace": {
+            "path": "trendchaser-link/skill-command-101/model-trace.jsonl",
+            "sha256": "b3d5283609a351d6747786b567395b9f8b3628476672ee64f4434150ece617d9"
+          },
+          "stdout": {
+            "path": "trendchaser-link/skill-command-101/stdout.txt",
+            "sha256": "bcc445e4a3b355f912991934722872155153a115685a277ac24ef7ad7178efda"
+          },
+          "independentGrade": {
+            "path": "trendchaser-link/skill-command-101/independent-grade.json",
+            "sha256": "b2ecba738a4a43c6bb0720a003f225c9f908e6e624892f4578c79c32c8b62040"
+          }
+        },
+        "connectionPass": true,
+        "procedureQuality": "partial",
+        "targetState": "ready",
+        "toolCount": 4,
+        "storedVersionPinned": false,
+        "restartNotice": "process restart explicitly required; /new and /mcp phrasing ambiguous",
+        "manualProtocolCalls": 0,
+        "businessCalls": 0,
+        "extraHttpProbes": 0
+      },
+      {
+        "label": "skill-command-102",
+        "bundleSha256": "1ee8450f032970a32ef600df5f1ccd6e656c6d344a40fb8d845b36c632d7fdbc",
+        "code": 0,
+        "elapsedMs": 57623,
+        "timeout": false,
+        "credentialGuard": true,
+        "modelRequests": 9,
+        "toolCalls": 10,
+        "mcpCalls": 0,
+        "automaticAttachment": true,
+        "maximumAttachmentCount": 1,
+        "inputTokens": 57311,
+        "outputTokens": 1671,
+        "cachedInputTokens": 17536,
+        "evidence": {
+          "run": {
+            "path": "trendchaser-link/skill-command-102/run.json",
+            "sha256": "2af56474226bf8cd6bbd8ed160a53e95c0fa358913c4519f956bb1a8c4bc72d2"
+          },
+          "trace": {
+            "path": "trendchaser-link/skill-command-102/model-trace.jsonl",
+            "sha256": "5b650e9b0b1a63b286d8c1e36d590005165a6acac66cacd866c9455cf065e06e"
+          },
+          "stdout": {
+            "path": "trendchaser-link/skill-command-102/stdout.txt",
+            "sha256": "a31b5bce5233537bf1029faec3bdfef2fc391be9f2414b20378d6c39694c2c23"
+          },
+          "independentGrade": {
+            "path": "trendchaser-link/skill-command-102/independent-grade.json",
+            "sha256": "ad01653b41ecfc42dbefac54d79aaf52e8fcd4c2ec4bcaf04ce7843c564026eb"
+          }
+        },
+        "connectionPass": true,
+        "procedureQuality": "partial",
+        "targetState": "ready",
+        "toolCount": 4,
+        "storedVersionPinned": false,
+        "restartNotice": "insufficient: says refresh may be needed rather than required process restart",
+        "manualProtocolCalls": 0,
+        "businessCalls": 0,
+        "extraHttpProbes": 0
+      },
+      {
+        "label": "skill-command-http-101",
+        "bundleSha256": "1ee8450f032970a32ef600df5f1ccd6e656c6d344a40fb8d845b36c632d7fdbc",
+        "code": 0,
+        "elapsedMs": 27891,
+        "timeout": false,
+        "credentialGuard": true,
+        "modelRequests": 6,
+        "toolCalls": 5,
+        "mcpCalls": 0,
+        "automaticAttachment": true,
+        "maximumAttachmentCount": 1,
+        "inputTokens": 23458,
+        "outputTokens": 1092,
+        "cachedInputTokens": 13440,
+        "evidence": {
+          "run": {
+            "path": "trendchaser-link/skill-command-http-101/run.json",
+            "sha256": "ac73c621feec101f4cdebeb6f3940848f7b4c231c3ef16f20ee356ca0f813852"
+          },
+          "trace": {
+            "path": "trendchaser-link/skill-command-http-101/model-trace.jsonl",
+            "sha256": "c54a295e281c5ea4a60f9ebcfcffbfeab9adfb94707be34e29c5db7873843e11"
+          },
+          "stdout": {
+            "path": "trendchaser-link/skill-command-http-101/stdout.txt",
+            "sha256": "4575761950418cd49d82e8a8e14ffd0fca00911f7cff7b987403a1472bc59ba1"
+          },
+          "independentGrade": {
+            "path": "trendchaser-link/skill-command-http-101/independent-grade.json",
+            "sha256": "bf3d73e085ade231b12bf3c2f1170680ff5af389b1d2e34578b5705dceee9048"
+          }
+        },
+        "connectionPass": true,
+        "procedureQuality": "pass with minor inefficiency",
+        "targetState": "ready",
+        "toolCount": 5,
+        "storedVersionPinned": "not applicable",
+        "restartNotice": "clear and correct",
+        "manualProtocolCalls": 0,
+        "businessCalls": 0,
+        "extraHttpProbes": 2
+      },
+      {
+        "label": "skill-command-reuse-101",
+        "bundleSha256": "1ee8450f032970a32ef600df5f1ccd6e656c6d344a40fb8d845b36c632d7fdbc",
+        "code": 0,
+        "elapsedMs": 46905,
+        "timeout": false,
+        "credentialGuard": true,
+        "modelRequests": 7,
+        "toolCalls": 6,
+        "mcpCalls": 0,
+        "automaticAttachment": true,
+        "maximumAttachmentCount": 1,
+        "inputTokens": 53205,
+        "outputTokens": 1871,
+        "cachedInputTokens": 43520,
+        "evidence": {
+          "run": {
+            "path": "trendchaser-link/skill-command-reuse-101/run.json",
+            "sha256": "9ccd95c098086b92473762126633176544b0a80ad0e8ec1289c07fc2762daffb"
+          },
+          "trace": {
+            "path": "trendchaser-link/skill-command-reuse-101/model-trace.jsonl",
+            "sha256": "790e9cdc1e9dcf7cc920552628d7f3af9efa8102f2b992d4e07b29013a2092d4"
+          },
+          "stdout": {
+            "path": "trendchaser-link/skill-command-reuse-101/stdout.txt",
+            "sha256": "9b42f69d8966d1160134a8e71b9984791c236d3f4ab3517e6e67af6df11c9ada"
+          },
+          "verification": {
+            "path": "trendchaser-link/skill-command-reuse-101/verification.json",
+            "sha256": "aee2eb90f77d90a029ddc1f92ac1e1b7fb7c4e1bc89590beecb1278464713120"
+          }
+        },
+        "reviewMethod": "Root inspection of actual trace and config bytes, not model self-report.",
+        "connectionPass": true,
+        "targetState": "ready",
+        "toolCount": 4,
+        "configurationByteIdentical": true,
+        "beforeSha256": "7f0a2fe48edcb72279d555deb4b56112fb81f7caae44497cb07f4f18353a15cc",
+        "afterSha256": "7f0a2fe48edcb72279d555deb4b56112fb81f7caae44497cb07f4f18353a15cc",
+        "disabledSentinelPreserved": true,
+        "businessCalls": 0,
+        "procedureQuality": "pass",
+        "configEvidence": {
+          "path": "trendchaser-link/skill-command-reuse-101/before-config.json",
+          "sha256": "7f0a2fe48edcb72279d555deb4b56112fb81f7caae44497cb07f4f18353a15cc"
+        }
+      },
+      {
+        "label": "skill-command-use-101",
+        "bundleSha256": "1ee8450f032970a32ef600df5f1ccd6e656c6d344a40fb8d845b36c632d7fdbc",
+        "code": 0,
+        "elapsedMs": 9539,
+        "timeout": false,
+        "credentialGuard": true,
+        "modelRequests": 2,
+        "toolCalls": 1,
+        "mcpCalls": 1,
+        "automaticAttachment": false,
+        "maximumAttachmentCount": 0,
+        "inputTokens": 8693,
+        "outputTokens": 290,
+        "cachedInputTokens": 3968,
+        "evidence": {
+          "run": {
+            "path": "trendchaser-link/skill-command-use-101/run.json",
+            "sha256": "f5c2e9da4e95368a20eaed9d7befca388771485b1501c2e31c6c1b8a197d8840"
+          },
+          "trace": {
+            "path": "trendchaser-link/skill-command-use-101/model-trace.jsonl",
+            "sha256": "abcc05c9fe80db3e92f3f644dbb3605fa44f1bc92caa20945dc79302e3c060aa"
+          },
+          "stdout": {
+            "path": "trendchaser-link/skill-command-use-101/stdout.txt",
+            "sha256": "2aa486ff293bf63edd00c2ac2a5a06680e4f07b1ca231e71f7d05fddb5a3b584"
+          },
+          "verification": {
+            "path": "trendchaser-link/skill-command-use-101/verification.json",
+            "sha256": "8a287e8cbdef490ea0e5526f2acff686cd53e9dcdf1636e79db80dc27315b033"
+          }
+        },
+        "reviewMethod": "Root comparison of final answer to actual MCP structured result.",
+        "taskPass": true,
+        "actualCall": {
+          "server": "trendchaser",
+          "method": "trendchaser_list_briefs",
+          "args": {
+            "limit": 1
+          }
+        },
+        "nativeToolBypass": false,
+        "setupSkillAttached": false,
+        "fieldsMatchMcpResult": true,
+        "returnedFields": {
+          "date": "2026-09-25",
+          "slot": "night",
+          "headline": "오픈소스, LLM 기여 두고 분열",
+          "anchor": "2026-09-25-night--1"
+        }
+      }
+    ],
+    "validation": {
+      "testFiles": 67,
+      "testsPassed": 997,
+      "typecheck": "pass",
+      "toolSchemaLint": "pass",
+      "build": "pass",
+      "diffCheck": "pass",
+      "testEvidence": {
+        "path": "trendchaser-link/final-tests.log",
+        "sha256": "01e33d096bcb491636dd55afe24be821742ebd977e9a169afe7fb04319ea7e31"
+      },
+      "packSmoke": {
+        "bundleSha256": "1ee8450f032970a32ef600df5f1ccd6e656c6d344a40fb8d845b36c632d7fdbc",
+        "tarballSha256": "ae8e7ccafde1dd47acb531e9b452854127c1c8242fe33d0b6d577933f822913f",
+        "exitCode": 0,
+        "mcpSetupListed": true,
+        "skillCount": 16,
+        "size": 420924
+      },
+      "packSmokeEvidence": {
+        "path": "trendchaser-link/command-package/smoke.json",
+        "sha256": "ceba35b7fc05e8c1dff5e8c4f3960b6bebc175cb61c7985ad45f3e994a590d7b"
+      }
+    },
+    "productionEvidence": {
+      "path": "trendchaser-link/setup-production-summary.json",
+      "sha256": "f8b3f06b420a312b35736f630c6a45ea05032f0fa141397e9b627d600acc30e7"
+    }
   }
 }

@@ -102,7 +102,7 @@ Motifcode는 Claude Code의 모양을 한 터미널 코딩 에이전트입니다
     </td>
     <td width="50%" align="center" valign="top">
       <img src="docs/screen-skills.jpg" alt="/skills 목록" width="100%"><br>
-      <sub><b><code>/skills</code>.</b> 내장 스킬 열다섯 개. 각각 <code>/commit fix the parser</code>처럼 명령으로도 실행됩니다.</sub>
+      <sub><b><code>/skills</code>.</b> 내장 스킬 목록. 각각 <code>/commit fix the parser</code>처럼 명령으로도 실행됩니다.</sub>
     </td>
   </tr>
 </table>
@@ -156,6 +156,9 @@ Codex/Claude 설정 가져오기, 실제 Motif-3 실험으로 보완한 도구 �
 `motif mcp add NAME --transport http URL`로 서버를 등록하세요.
 TUI의 `/mcp`에서 상태 확인·연결·해제·재연결을 할 수 있으며,
 `motif mcp doctor --connect`로 별도 연결 진단도 가능합니다.
+내장 `mcp-setup` 스킬은 자연어 연결 요청을 안내하며,
+`/mcp-setup <GitHub 또는 서비스 URL>`로 직접 실행할 수도 있습니다.
+새 서버를 등록한 뒤에는 Motif를 종료하고 다시 실행하세요. `/new`는 대화만 초기화합니다.
 [설정·권한·호환 범위](docs/mcp.md), [실험 및 구현 보고서](docs/mcp-validation.ko.md),
 [연결 관리와 추가 활용 검증](docs/mcp-management-validation.ko.md)을 참고해주세요.
 
@@ -236,7 +239,7 @@ enter send · \ + enter newline · esc interrupt or clear · ctrl-c twice quit �
 | 권한 | 명령·파일 쓰기·패치·터미널이 실행되기 전에 번호로 답하는 창; "이 도구는 다시 묻지 않기"; 거절하면 모델에게 그 사실이 전달됨; Shift-Tab이나 `/permissions auto`로 전부 자동 실행 |
 | 대화 | 각 작업은 앞선 작업들을 전부 봄; `--continue`와 `/resume`으로 기록된 대화를 다시 불러옴; 실행 중에 보낸 메시지는 대기열에; Esc로 중단; 컨텍스트가 창의 `compactAt`을 넘으면 Codex 방식으로 압축(모델이 인수인계 요약을 쓰고 내 메시지는 원문 그대로 남김), `/compact <초점>`으로 직접 실행 |
 | 백엔드 | Claude Code의 `.claude/`와 같은 배치의 `.motif/`: 사용자·프로젝트 설정, 스킬, 에이전트, 플러그인, 메모, 작업마다 저널 하나, 히스토리; 프로젝트 훅은 `motif trust`로 승인한 뒤 적용 |
-| 스킬과 에이전트 | 내장 스킬 15개(`explore`, `plan`, `explain`, `code-review`, `security-review`, `test-fix`, `debug`, `refactor`, `commit`, `pr-body`, `docs`, `init`, `skill-creator`, `motif-endpoint`, `korean`); 내장 서브에이전트 5개(`explorer`, `reviewer`, `tester`, `planner`, `patcher`)는 도구 목록의 앞부분만 받고 로컬 스케줄러로 돎; Claude Code 배치를 따르는 플러그인 |
+| 스킬과 에이전트 | 내장 스킬 16개(`explore`, `plan`, `explain`, `code-review`, `security-review`, `test-fix`, `debug`, `refactor`, `commit`, `pr-body`, `docs`, `init`, `skill-creator`, `mcp-setup`, `motif-endpoint`, `korean`); 내장 서브에이전트 5개(`explorer`, `reviewer`, `tester`, `planner`, `patcher`)는 도구 목록의 앞부분만 받고 로컬 스케줄러로 돎; Claude Code 배치를 따르는 플러그인 |
 | 엔드포인트 | 키는 한 번만 물어보고 `~/.motif/.env`에 저장하며, 에이전트가 실행하는 모든 명령으로부터 차단; 401이면 키의 어느 쪽이 문제인지 알려 줌; 429는 서버의 `Retry-After`에 맞춰 재시도; `motif doctor`가 서버가 실제로 무엇을 내놓는지 보고 |
 | 화면 | 사용 도중 창을 줄여도 줄이 남지 않음; 테마 다섯 개(`motif`, `claude`, `mono`, `solarized`, `dracula`)를 제자리에서 교체 |
 | 스크립트 | `motif -p "질문"`은 답변만 출력; `motif "작업"`은 작업 하나를 실행하고 종료 |

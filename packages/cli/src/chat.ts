@@ -59,7 +59,7 @@ import {
   type Key,
   type MenuItem,
 } from "@motifcode/tui";
-import { expandMentions, forgetFiles, listFiles, matchFiles } from "./files.js";
+import { expandMentions, forgetFiles, listFiles, matchFiles, mcpSetupMentions } from "./files.js";
 import { installCommand } from "./install.js";
 import { loginLines, normaliseKeyInput, verifyApiKey, type VerifyResult } from "./login.js";
 import { COMMANDS, findCommand, parseSlash, runSlash, type ChatSettings, type CommandContext, type CommandOutput, type PersistableKey } from "./commands.js";
@@ -1006,7 +1006,8 @@ export class Chat {
       this.refresh();
       return;
     }
-    const { task, attached } = expandMentions(text, mentionsIn(text), {
+    const setupMentions = this.opts.tools.some(tool => "function" in tool && tool.function?.name === "skill") ? mcpSetupMentions(text) : [];
+    const { task, attached } = expandMentions(text, [...mentionsIn(text), ...setupMentions], {
       cwd: this.settings.cwd,
       renderSkill: (name) => (this.opts.skills.get(name) ? this.opts.skills.render(name) : undefined),
     });
@@ -1174,7 +1175,7 @@ export class Chat {
         tools: this.opts.tools,
         system: (ch) => this.systemFor(ch),
         userTask: task,
-        context: await this.opts.mcp?.prepare(task, abort.signal),
+        context: await this.opts.mcp?.prepare(display ?? task, abort.signal),
         replyRecovery: (content) => this.opts.mcp?.replyRecovery(content),
         history: this.history,
         executor: this.executor,

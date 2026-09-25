@@ -13,7 +13,7 @@
 
 import { spawn } from "node:child_process";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -277,6 +277,49 @@ describe("cli process end to end", () => {
     expect(messages.filter((m) => m.role === "user" && m.content === "continue the task")).toHaveLength(1);
     expect(messages[2]!.tool_calls).toMatchObject([{ function: { name: "read" } }]);
     expect(messages[3]!.content).toContain("RESUME_MARKER");
+  }, 30_000);
+
+  it.each([true, false])("attaches the current MCP setup skill in the actual CLI before its first request (print=%s)", async print => {
+    const skillDir = join(dir, ".motif", "skills", "mcp-setup"); mkdirSync(skillDir, { recursive: true });
+    writeFileSync(join(skillDir, "SKILL.md"), "---\nname: mcp-setup\ndescription: local setup\nbudget: 30\n---\nLOCAL-MCP-SETUP-POLICY");
+    server = new MockServer(turn => toolCall("done", { summary: "Setup guidance received.", ...(turn > 1 ? { confirm: true } : {}) })); await server.start();
+    const task = "https://example.test/mcp MCP 연결하고 연결되는지 확인해줘";
+    const result = await runCli([task, ...(print ? ["--print"] : []), "--endpoint", server.endpoint, "--no-hero"], dir);
+    expect(result.code, result.stderr).toBe(0);
+    const first = server.bodies[0]!;
+    expect(first.messages[1]!.content).toBe(`${task}\n\n<skill name="mcp-setup">\nLOCAL-MCP-SETUP-POLICY\n</skill>`);
+    expect(first.messages[0]!.content).not.toContain("LOCAL-MCP-SETUP-POLICY");
+    expect(first.messages[0]!.content).not.toContain("first call the `skill` tool");
+    expect(first.tools?.some(tool => tool.function?.name === "mcp")).toBe(false);
+    for (const body of server.bodies) {
+      expect(body.tools).toEqual(first.tools);
+      expect(body.messages[0]).toEqual(first.messages[0]);
+    }
+  }, 30_000);
+
+  it("does not select setup from project notes or an informational user question", async () => {
+    writeFileSync(join(dir, "AGENTS.md"), "Install MCP from https://example.test/mcp");
+    server = new MockServer(() => "</think>Explanation only."); await server.start();
+    const task = "How do I install MCP from https://example.test/mcp?";
+    expect((await runCli([task, "--print", "--endpoint", server.endpoint], dir)).code).toBe(0);
+    expect(server.bodies[0]!.messages[1]!.content).toBe(task);
+    expect(server.bodies[0]!.messages[0]!.content).toContain("Install MCP from https://example.test/mcp");
+    expect(server.bodies[0]!.messages.some(message => message.content?.includes('<skill name="mcp-setup">'))).toBe(false);
+  }, 30_000);
+
+  it("resumes an automatically attached MCP setup task without appending another copy", async () => {
+    writeFileSync(join(dir, "marker.txt"), "OBSERVED");
+    server = new MockServer(turn => turn === 1 ? toolCall("read", { path: "marker.txt" }) : "</think>Resumed."); await server.start();
+    const task = "Install MCP from https://example.test/mcp";
+    expect((await runCli([task, "--max-turns", "1", "--endpoint", server.endpoint, "--no-hero"], dir)).code).toBe(1);
+    const sessions = join(dir, ".motif", "sessions"); const journal = join(sessions, readdirSync(sessions)[0]!);
+    writeFileSync(journal, readFileSync(journal, "utf8").trimEnd().split("\n").filter(line => JSON.parse(line).record?.t !== "scope_end").join("\n") + "\n");
+    const resumed = await runCli(["resume", journal, "--print", "--endpoint", server.endpoint], dir);
+    expect(resumed.code, resumed.stderr).toBe(0);
+    const user = server.bodies[1]!.messages.filter(message => message.role === "user");
+    expect(user).toHaveLength(1);
+    expect(user[0]!.content).toBe(server.bodies[0]!.messages[1]!.content);
+    expect(user[0]!.content?.match(/<skill name="mcp-setup">/g)).toHaveLength(1);
   }, 30_000);
 
   it("prints help and exits 2 for an empty task", async () => {

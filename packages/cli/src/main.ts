@@ -73,6 +73,7 @@ import { policyForAgent } from "./policy.js";
 import { buildAgentPrompt, buildSystemPrompt } from "./prompt.js";
 import { loadMcpConfig, McpSession } from "@motifcode/mcp";
 import { runMcpArgv } from "./mcp-command.js";
+import { expandMentions, mcpSetupMentions } from "./files.js";
 
 const VERSION = "0.3.4";
 
@@ -953,6 +954,16 @@ async function main(): Promise<number> {
     return 2;
   }
 
+  // Attach task guidance once, outside the cached prefix; resumed transcripts
+  // already contain their original attachments. Interactive input uses submit.
+  const discoveryTask = task;
+  if (!resumeFrom && activeToolNames.includes("skill")) {
+    task = expandMentions(task, mcpSetupMentions(task), {
+      cwd,
+      renderSkill: (name) => skills.get(name) ? skills.render(name) : undefined,
+    }).task;
+  }
+
   // A one-shot task or a print against the hosted endpoint needs the key as
   // much as the session does. With a terminal it is asked for here; in a
   // pipe there is nobody to ask, and saying so beats a 401 later.
@@ -984,7 +995,7 @@ async function main(): Promise<number> {
         tools: activeTools,
         system: (ch) => buildSystemPrompt({ mode: "chat", channel: ch, tools: activeTools, skills, agents, ...(projectNotes !== undefined ? { projectNotes } : {}), cwd }),
         userTask: task,
-        context: await mcp.prepare(task, abort.signal),
+        context: await mcp.prepare(discoveryTask, abort.signal),
         replyRecovery: (content) => mcp.replyRecovery(content),
         signal: abort.signal,
         executor,
@@ -1182,7 +1193,7 @@ async function main(): Promise<number> {
       tools: activeTools,
       system: systemFor,
       userTask: task,
-      context: await mcp.prepare(task, abort.signal),
+      context: await mcp.prepare(discoveryTask, abort.signal),
       replyRecovery: (content) => mcp.replyRecovery(content),
       signal: abort.signal,
       executor,
