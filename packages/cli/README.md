@@ -33,6 +33,22 @@ motif "fix the failing test in tests/"  # one task, then exit
 motif -p "what does src/loop.ts do?"    # print only the reply, for pipes
 ```
 
+Connect MCP servers and check them from the CLI:
+
+```bash
+motif mcp add docs --transport http https://developers.openai.com/mcp
+motif mcp list
+motif mcp doctor --connect
+```
+
+Register a local stdio server with `motif mcp add NAME -- COMMAND [ARGS...]`.
+Inside a session, `/mcp` manages connections. The built-in `mcp-setup` skill
+also handles clear natural-language MCP setup requests containing a URL;
+`/mcp-setup <URL>` invokes it explicitly. Relaunch Motif after adding or editing
+a registration. `motif skills` lists all 16 built-in skills and any custom ones.
+See the [MCP guide](https://github.com/TaewoooPark/Motifcode/blob/main/docs/mcp.md)
+for credentials, configuration import and supported features.
+
 Needs Node 20.3+. The bundle is a single file with no runtime dependencies.
 
 Full documentation, the design notes on why this harness is shaped the way it is, and the Korean

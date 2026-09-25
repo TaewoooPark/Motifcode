@@ -144,6 +144,11 @@ does the same without the question.
 | `motif -p "<question>"` | print only the final reply, for scripts and pipes |
 | `motif login` · `motif logout` | paste a key outside a session; remove the saved key |
 | `motif doctor` | probe the endpoint: auth, tool-call and reasoning parsers, prefix cache, channels |
+| `motif mcp add NAME -- COMMAND [ARGS...]` | register a local stdio MCP server |
+| `motif mcp add NAME --transport http URL` | register a Streamable HTTP MCP server; use `sse` for legacy SSE |
+| `motif mcp list` · `get NAME` · `doctor --connect` | inspect MCP configuration and check server connections |
+| `motif mcp enable NAME` · `disable NAME` · `remove NAME` | change saved MCP registrations |
+| `motif mcp import codex\|claude PATH` | preview server settings from another client; `--write NEW_PATH` saves disabled entries |
 | `motif sessions` · `motif resume <file>` | list recorded sessions; resume an interrupted one |
 | `motif skills` · `agents` · `plugins` · `config` | what is loaded, and the effective settings with their sources |
 | `motif trust` | approve this repository's `.motif/settings.json` hooks |
@@ -159,21 +164,33 @@ it is a terminal preference, not an API configuration value in `.env`.
 
 ---
 
-## MCP servers (development branch)
+## MCP servers
 
-The `mcp-adapter` branch adds stdio, Streamable HTTP and legacy SSE servers,
-Codex/Claude config import, and bounded discovery/results tuned through live
-Motif-3 tasks. This is not yet in npm 0.3.4. Build this checkout, then use
-`motif mcp add NAME -- COMMAND [ARGS...]` or
-`motif mcp add NAME --transport http URL` to register a server.
-Use `/mcp` inside the TUI to inspect, connect, disconnect or reconnect servers;
-`motif mcp doctor --connect` checks connections outside a chat.
-The built-in `mcp-setup` skill guides natural-language setup requests; you can
-also invoke `/mcp-setup <GitHub or service URL>` explicitly. After registering a
-new server, relaunch Motif to load it; `/new` only clears the conversation.
-See [configuration, permissions and compatibility](docs/mcp.md) and the
-[Motif-3 validation report](docs/mcp-validation.ko.md), including the
-[connection management and additional use cases](docs/mcp-management-validation.ko.md).
+Connect local stdio servers, Streamable HTTP endpoints or legacy SSE services.
+Register a server and check the connection:
+
+```bash
+motif mcp add docs --transport http https://developers.openai.com/mcp
+motif mcp list
+motif mcp doctor --connect
+```
+
+Registration saves to `~/.motif/mcp.json`. `doctor --connect` starts enabled
+servers, checks their tool lists, then closes them. Inside a session, `/mcp`
+opens the connection manager; `/mcp list`, `/mcp connect NAME`,
+`/mcp disconnect NAME` and `/mcp reconnect NAME` also work directly.
+
+The built-in `mcp-setup` skill guides setup from a GitHub repository or a
+service URL. Ask, for example, “Connect this MCP to Motifcode and check it:
+https://github.com/TaewoooPark/Trendchaser-mcp”. Clear setup requests load the
+skill automatically, or use `/mcp-setup <URL>` explicitly. It reads the server's
+installation instructions, registers it and checks the connection using the
+normal execution permissions.
+
+After adding or editing a registration, exit and relaunch Motif to load the
+configuration. `/new` clears the conversation but does not reload servers.
+See the [MCP guide](docs/mcp.md) for credentials, Codex/Claude configuration
+import, connection controls and supported features.
 
 ---
 
@@ -220,6 +237,8 @@ spawned — the agent's `bash` cannot see it, and neither can a project hook.
 | `/status` (`/cost`) | connection, settings and session totals |
 | `/config` | effective settings, where each came from, and the files |
 | `/doctor` | probe the endpoint: auth, parsers, cache, channels |
+| `/mcp [list\|connect NAME\|disconnect NAME\|reconnect NAME]` | open the MCP connection manager, inspect status or control a connection |
+| `/mcp-setup <URL>` | use the built-in skill to register and check an MCP server |
 | `/login`, `/logout` | paste an Infron API key, checked and saved to `~/.motif/.env`; remove the saved key |
 | `/model [id]`, `/endpoint [url]` | show or set the model id or endpoint for the next task |
 | `/channel [toolcall\|object\|raw]` | show or set the action channel; changing it restarts the conversation |
@@ -255,6 +274,7 @@ enter send · \ + enter newline · esc interrupt or clear · ctrl-c twice quit �
 | Conversation | Each task sees the ones before it; `--continue` and `/resume` bring a recorded conversation back; messages sent while a task runs are queued; Esc interrupts; Codex-style compaction past `compactAt` of the window — the model writes a handoff summary and your own messages are kept verbatim — and `/compact <focus>` on demand |
 | Backend | `.motif/` laid out like Claude Code's `.claude/`: user and project settings, skills, agents, plugins, notes, one journal per task, history; project hooks applied once `motif trust` approves them |
 | Skills and agents | 16 built-in skills (`explore`, `plan`, `explain`, `code-review`, `security-review`, `test-fix`, `debug`, `refactor`, `commit`, `pr-body`, `docs`, `init`, `skill-creator`, `mcp-setup`, `motif-endpoint`, `korean`); 5 built-in subagents (`explorer`, `reviewer`, `tester`, `planner`, `patcher`) with prefix tool sets and a local scheduler; plugins in Claude Code's layout |
+| MCP | stdio, Streamable HTTP and legacy SSE servers; CLI registration and Codex/Claude config import; `/mcp` connection controls; `mcp-setup` for natural-language setup; server tools follow session permissions |
 | Endpoint | The key asked for once and saved to `~/.motif/.env`, withheld from every command the agent runs; a 401 that says which side of the key it is on; a 429 retried after the server's `Retry-After`; `motif doctor` reports what the server actually returns |
 | Screen | Shrinking the window mid-session leaves no stale rows; five themes (`motif`, `claude`, `mono`, `solarized`, `dracula`) swapped in place |
 | Scripts | `motif -p "question"` prints only the reply; `motif "task"` runs one task and exits |
@@ -268,6 +288,7 @@ a directory with `plugin.json` and its own `skills/` and `agents/`.
 ```
 ~/.motif/settings.json      your defaults: model, endpoint, channel, budgets, theme, thinking, compactAt, permissions
 ~/.motif/.env               the credential
+~/.motif/mcp.json           MCP server registrations
 ~/.motif/skills/<n>/SKILL.md, ~/.motif/agents/<n>.md      yours, on every project
 <repo>/.motif/settings.json the project's settings and hooks — applied once `motif trust` approves it
 <repo>/.motif/skills/, agents/, NOTES.md                    the project's

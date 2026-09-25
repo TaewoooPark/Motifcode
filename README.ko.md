@@ -137,6 +137,11 @@ npx motifcode          # 첫 실행: 키를 물어본 뒤 `motif` 명령 설치�
 | `motif -p "<질문>"` | 최종 답변만 출력; 스크립트와 파이프용 |
 | `motif login` · `motif logout` | 세션 밖에서 키 입력; 저장된 키 삭제 |
 | `motif doctor` | 엔드포인트 점검: 인증, 도구 호출·추론 파서, 프리픽스 캐시, 채널 |
+| `motif mcp add NAME -- COMMAND [ARGS...]` | 로컬 stdio MCP 서버 등록 |
+| `motif mcp add NAME --transport http URL` | Streamable HTTP MCP 서버 등록; 기존 SSE는 `sse` 지정 |
+| `motif mcp list` · `get NAME` · `doctor --connect` | MCP 설정 조회와 실제 연결 진단 |
+| `motif mcp enable NAME` · `disable NAME` · `remove NAME` | 저장된 MCP 등록 활성화·비활성화·삭제 |
+| `motif mcp import codex\|claude PATH` | 다른 클라이언트의 서버 설정 미리보기; `--write NEW_PATH`로 비활성 항목 저장 |
 | `motif sessions` · `motif resume <file>` | 기록된 세션 목록; 중단된 세션 이어 가기 |
 | `motif skills` · `agents` · `plugins` · `config` | 로드된 것들, 그리고 유효한 설정과 각각의 출처 |
 | `motif trust` | 이 저장소의 `.motif/settings.json` 훅을 승인 |
@@ -147,20 +152,32 @@ npx motifcode          # 첫 실행: 키를 물어본 뒤 `motif` 명령 설치�
 
 ---
 
-## MCP 서버 연결 (개발 브랜치)
+## MCP 서버 연결
 
-`mcp-adapter` 브랜치는 stdio·Streamable HTTP·기존 SSE 서버 연결,
-Codex/Claude 설정 가져오기, 실제 Motif-3 실험으로 보완한 도구 검색과 결과 처리를
-추가합니다. 아직 npm 0.3.4 배포본에는 없습니다. 이 체크아웃을 빌드한 뒤
-`motif mcp add NAME -- COMMAND [ARGS...]` 또는
-`motif mcp add NAME --transport http URL`로 서버를 등록하세요.
-TUI의 `/mcp`에서 상태 확인·연결·해제·재연결을 할 수 있으며,
-`motif mcp doctor --connect`로 별도 연결 진단도 가능합니다.
-내장 `mcp-setup` 스킬은 자연어 연결 요청을 안내하며,
-`/mcp-setup <GitHub 또는 서비스 URL>`로 직접 실행할 수도 있습니다.
-새 서버를 등록한 뒤에는 Motif를 종료하고 다시 실행하세요. `/new`는 대화만 초기화합니다.
-[설정·권한·호환 범위](docs/mcp.md), [실험 및 구현 보고서](docs/mcp-validation.ko.md),
-[연결 관리와 추가 활용 검증](docs/mcp-management-validation.ko.md)을 참고해주세요.
+로컬 stdio 서버, Streamable HTTP 엔드포인트, 기존 SSE 서비스를 연결할 수 있습니다.
+서버를 등록한 뒤 연결을 확인하세요.
+
+```bash
+motif mcp add docs --transport http https://developers.openai.com/mcp
+motif mcp list
+motif mcp doctor --connect
+```
+
+등록은 `~/.motif/mcp.json`에 저장됩니다. `doctor --connect`는 활성 서버를 시작해
+도구 목록을 확인한 뒤 연결을 닫습니다. 세션 안에서 `/mcp`로 연결 관리 화면을 열거나,
+`/mcp list`, `/mcp connect NAME`, `/mcp disconnect NAME`,
+`/mcp reconnect NAME`으로 직접 제어할 수도 있습니다.
+
+내장 `mcp-setup` 스킬은 GitHub 저장소나 서비스 URL을 받아 설치 절차를 안내합니다.
+예를 들어 “https://github.com/TaewoooPark/Trendchaser-mcp 이 MCP를 motifcode에
+연결해줘. 연결되는지도 확인해줘.”처럼 요청하면 스킬을 자동으로 불러옵니다.
+`/mcp-setup <URL>`로 직접 실행할 수도 있습니다. 서버의 설치 문서를 확인하고,
+기존 실행 권한에 따라 등록과 연결 진단을 진행합니다.
+
+등록을 추가하거나 수정한 뒤에는 Motif를 종료하고 다시 실행해야 설정이 적용됩니다.
+`/new`는 대화만 초기화하며 서버 설정을 다시 읽지 않습니다.
+인증 정보, Codex/Claude 설정 가져오기, 연결 제어와 지원 범위는
+[MCP 사용 안내](docs/mcp.md)를 참고하세요.
 
 ---
 
@@ -205,6 +222,8 @@ Infron의 [무료 모델 약관](https://infron.ai/docs/overview/free-models)에
 | `/status` (`/cost`) | 연결, 설정, 세션 누적치 |
 | `/config` | 유효한 설정과 각각의 출처, 설정 파일 |
 | `/doctor` | 엔드포인트 점검: 인증, 파서, 캐시, 채널 |
+| `/mcp [list\|connect NAME\|disconnect NAME\|reconnect NAME]` | MCP 연결 관리 화면, 상태 조회와 연결 제어 |
+| `/mcp-setup <URL>` | 내장 스킬로 MCP 서버 등록과 연결 확인 |
 | `/login`, `/logout` | Infron API 키를 붙여 넣어 확인 후 `~/.motif/.env`에 저장; 저장된 키 삭제 |
 | `/model [id]`, `/endpoint [url]` | 다음 작업에 쓸 모델 id나 엔드포인트를 보거나 바꿈 |
 | `/channel [toolcall\|object\|raw]` | 행동 채널을 보거나 바꿈; 바꾸면 대화가 새로 시작됨 |
@@ -240,6 +259,7 @@ enter send · \ + enter newline · esc interrupt or clear · ctrl-c twice quit �
 | 대화 | 각 작업은 앞선 작업들을 전부 봄; `--continue`와 `/resume`으로 기록된 대화를 다시 불러옴; 실행 중에 보낸 메시지는 대기열에; Esc로 중단; 컨텍스트가 창의 `compactAt`을 넘으면 Codex 방식으로 압축(모델이 인수인계 요약을 쓰고 내 메시지는 원문 그대로 남김), `/compact <초점>`으로 직접 실행 |
 | 백엔드 | Claude Code의 `.claude/`와 같은 배치의 `.motif/`: 사용자·프로젝트 설정, 스킬, 에이전트, 플러그인, 메모, 작업마다 저널 하나, 히스토리; 프로젝트 훅은 `motif trust`로 승인한 뒤 적용 |
 | 스킬과 에이전트 | 내장 스킬 16개(`explore`, `plan`, `explain`, `code-review`, `security-review`, `test-fix`, `debug`, `refactor`, `commit`, `pr-body`, `docs`, `init`, `skill-creator`, `mcp-setup`, `motif-endpoint`, `korean`); 내장 서브에이전트 5개(`explorer`, `reviewer`, `tester`, `planner`, `patcher`)는 도구 목록의 앞부분만 받고 로컬 스케줄러로 돎; Claude Code 배치를 따르는 플러그인 |
+| MCP | stdio·Streamable HTTP·기존 SSE 서버; CLI 등록과 Codex/Claude 설정 가져오기; `/mcp` 연결 제어; `mcp-setup` 자연어 설정; 서버 도구에도 세션 권한 적용 |
 | 엔드포인트 | 키는 한 번만 물어보고 `~/.motif/.env`에 저장하며, 에이전트가 실행하는 모든 명령으로부터 차단; 401이면 키의 어느 쪽이 문제인지 알려 줌; 429는 서버의 `Retry-After`에 맞춰 재시도; `motif doctor`가 서버가 실제로 무엇을 내놓는지 보고 |
 | 화면 | 사용 도중 창을 줄여도 줄이 남지 않음; 테마 다섯 개(`motif`, `claude`, `mono`, `solarized`, `dracula`)를 제자리에서 교체 |
 | 스크립트 | `motif -p "질문"`은 답변만 출력; `motif "작업"`은 작업 하나를 실행하고 종료 |
@@ -253,6 +273,7 @@ enter send · \ + enter newline · esc interrupt or clear · ctrl-c twice quit �
 ```
 ~/.motif/settings.json      내 기본값: model, endpoint, channel, 예산, theme, thinking, compactAt, permissions
 ~/.motif/.env               자격 증명
+~/.motif/mcp.json           MCP 서버 등록
 ~/.motif/skills/<n>/SKILL.md, ~/.motif/agents/<n>.md      내 것, 모든 프로젝트에서
 <repo>/.motif/settings.json 프로젝트의 설정과 훅 — `motif trust`로 승인한 뒤 적용
 <repo>/.motif/skills/, agents/, NOTES.md                    프로젝트의 것
