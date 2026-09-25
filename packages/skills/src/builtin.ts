@@ -445,6 +445,65 @@ names and quoted output. Translating an error message helps nobody.
 
 Match the register of the surrounding material — a commit log, a code comment
 and a design document are three different voices.`,
+  /* ---------------------------------------------------------------- */
+  `---
+name: skill-setup
+description: Install, import and verify skills from local files, Claude, Codex, GitHub or marketplaces
+budget: 1400
+tags: setup skills
+---
+
+Help the person add skills to Motifcode using its supported CLI. Preserve their
+existing library and source-client installations. Follow an explicit request to
+install; do not ask again merely because installation writes local files.
+
+1. Identify the requested source, skill and scope from the conversation. Run
+   \`motif skills --help\` and \`motif skills list\` to see the current commands and
+   registrations. Use the user scope by default; use project scope when the
+   person asks for a repository-local installation. Do not install every skill
+   in a collection unless they requested that.
+2. Inspect before selecting:
+   - Local directory or GitHub repository:
+     \`motif skills inspect SOURCE --json\`.
+   - Existing Claude or Codex skills:
+     \`motif skills import claude --json\` or
+     \`motif skills import codex --json\`. With no selection these only list
+     candidates, including skills in installed plugin packages.
+   - A marketplace: \`motif skills marketplace SOURCE --json\`, then
+     \`motif skills inspect SOURCE --plugin ENTRY --json\`.
+   Use \`--path\` for a repository subdirectory and \`--ref\` for an explicit Git
+   branch, tag or commit. Read the returned diagnostics. Do not guess a missing
+   entry, silently choose a namesake, or scan unrelated private directories.
+3. Install the requested selection with
+   \`motif skills add SOURCE --skill NAME --scope SCOPE\`, adding the inspected
+   \`--plugin\`, \`--path\`, \`--ref\` or \`--namespace\` options when needed.
+   For existing client skills, use
+   \`motif skills import CLIENT --skill SELECTION_ID --scope SCOPE\` with the returned selectionId.
+   Replace SCOPE with the selected user or project scope. Multiple \`--skill\` options select several entries. \`--all\` is only for an
+   explicit bulk request. Use \`--namespace\` to preserve both conflicting
+   sources, rather than replacing an unrelated skill. Use \`--dry-run\` when the
+   person asks for a preview.
+4. Verify with \`motif skills installed --scope user --json\` (or project), and
+   \`motif skills list\`. Check the selected names, recorded source/ref and
+   compatibility diagnostics. A copied skill is not proof that all its tools
+   or scripts run. Report any separate executable, connector, MCP or account
+   dependency. Do not copy credentials, run plugin hooks, or claim a complete
+   Claude/Codex plugin runtime was installed.
+5. Tell the person how to use the installed name: restart the current Motif
+   session, then \`/<name> task\` or \`@skill:<name> task\`. When verification of
+   behavior is requested, use a harmless task that checks the skill body and
+   needed bundled resources, and report its actual result. Do not treat a
+   model's claim of success as evidence without checking the output.
+   Once the installation receipt, registration and requested resource checks
+   pass, report the result and stop. Do not launch another model session to
+   verify an installation unless the person explicitly requests one.
+
+For maintenance, inspect \`motif skills installed\` first, then use
+\`motif skills update NAME\` or \`motif skills remove NAME\` with the matching
+scope. These operate on Motif-managed copies. A refusal about local edits or
+an ambiguous source needs a concrete explanation; never delete the person's
+customizations or alter another client's installation to force success.`,
+
 ];
 
 export const BUILTIN_SKILLS: readonly Skill[] = Object.freeze(

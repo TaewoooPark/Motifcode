@@ -17,6 +17,70 @@ In interactive chat, use `/skills`, `/<name> [arguments]`, or `@skill:<name>`.
 The model can also select an eligible skill with the `skill` tool. Explicit
 skill references work in both interactive chat and one-shot/print runs.
 
+## Install and import
+
+The built-in `skill-setup` skill guides source inspection, installation and
+verification. In a session, use `/skill-setup` followed by a repository URL or
+an instruction such as “import my Claude webapp-testing skill”. You can also
+use the commands directly, without a model or API key:
+
+```sh
+# Discover existing client skills; no files are copied yet.
+motif skills import claude
+motif skills import codex --json
+
+# Select a candidate selectionId returned by discovery.
+motif skills import claude --skill webapp-testing --scope project
+
+# Inspect and add a standalone directory or GitHub subdirectory.
+motif skills inspect ./my-skill
+motif skills add ./my-skill --scope project
+motif skills add anthropics/skills --path skills/webapp-testing
+
+# Inspect a marketplace and install skills from one of its entries.
+motif skills marketplace OWNER/CATALOG --json
+motif skills inspect OWNER/CATALOG --plugin ENTRY --json
+motif skills add OWNER/CATALOG --plugin ENTRY --skill SKILL_NAME
+
+# Inspect and maintain Motif-managed copies.
+motif skills installed --json
+motif skills update INSTALLED_NAME
+motif skills remove INSTALLED_NAME
+```
+
+`add` also accepts the alias `install`. User scope is the default; pass
+`--scope project` to installation, maintenance and listing commands for a
+project's managed library. `--dry-run` previews changes. A remote preview may
+fetch the requested repository into temporary storage, but does not register
+skills. `--ref` selects a Git branch, tag or commit. Resolved commits and content
+digests are recorded with each installation.
+
+Use repeated `--skill` options to select several candidates, or `--all` for
+an intentional bulk import. Ambiguous names are reported; use the returned
+qualified `selectionId` and, when needed, `--namespace` to keep different sources distinct.
+Installation does not overwrite another client's files. Updates and removals
+refuse to discard changes made inside managed snapshots.
+
+Standalone skills retain their supporting files. Skills extracted from plugin
+packages retain the package's shared scripts, references and assets. The
+managed index registers only the selected skills; bundled MCP definitions,
+hooks, agents and connectors remain inactive. Package managers and lifecycle
+scripts are not run during installation.
+
+Supported catalogs include `.claude-plugin/marketplace.json` and
+`.agents/plugins/marketplace.json`, with local, GitHub, Git URL and Git
+subdirectory entries. Unsupported source types or unavailable catalog entries
+produce diagnostics. Use the repository as the source when a catalog uses
+relative paths. Claude and Codex installed-plugin discovery uses their client
+inventory and exact installed versions, rather than treating every cached
+version as active. Missing client tools are reported alongside any direct
+skills that can still be discovered.
+
+Managed data lives in `~/.motif/skills-installed.json` and
+`~/.motif/skill-packages/`, or the equivalent project `.motif/` directories.
+Hand-authored `skills/` folders remain usable. Restart an existing session to
+load changes to the library.
+
 ## Author a local skill
 
 Create `~/.motif/skills/<name>/SKILL.md` for all projects, or
@@ -42,8 +106,13 @@ read resources inside a successfully loaded skill's registered resource root;
 this does not grant writes outside the workspace or permit symlink escapes.
 Scripts still use the ordinary command tools and their permissions.
 
-Project skills override user skills of the same name; user skills override
-built-ins. Restart a running session after changing the installed library.
+When names collide, precedence rises from built-ins to legacy plugin skills,
+then managed imports, then handwritten `skills/` folders. Within each category,
+project skills override user skills. A user handwritten skill can therefore
+override a project managed import. Installation rejects a same-scope handwritten
+collision; other handwritten overrides produce a warning with the source paths.
+Use `--namespace` to keep both skills available. Restart a running session after
+changing the installed library.
 
 ## Compatibility
 

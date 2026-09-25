@@ -73,6 +73,8 @@ import { policyForAgent } from "./policy.js";
 import { buildAgentPrompt, buildSystemPrompt } from "./prompt.js";
 import { loadMcpConfig, McpSession } from "@motifcode/mcp";
 import { runMcpArgv } from "./mcp-command.js";
+import { runSkillsArgv } from "./skills-command.js";
+import { loadInstalledSkills } from "./skill-installer.js";
 import { expandSkillInput } from "./skill-input.js";
 import { findCommand, parseSlash } from "./commands.js";
 
@@ -129,9 +131,8 @@ function parseArgs(argv: string[]): Args {
       else if (argv[i + 1] && !argv[i + 1]!.startsWith("-")) flags[a.slice(2)] = argv[++i]!;
       else flags[a.slice(2)] = true;
     } else if (command === "run" && rest.length === 0 && ["mcp", "doctor", "login", "logout", "sessions", "resume", "skills", "agents", "plugins", "config", "lint", "distil", "metrics", "trust", "redact", "corpus-spec", "corpus-render", "help", "version"].includes(a)) {
-      // MCP owns its argv: repeated --env and every child argument after --
-      // must reach its dedicated parser without generic flag interpretation.
-      if (a === "mcp") return { command: "mcp", rest: argv.slice(i + 1), flags };
+      // These commands own their argv, including repeated selections/values.
+      if (a === "mcp" || a === "skills") return { command: a, rest: argv.slice(i + 1), flags };
       command = a;
     } else {
       rest.push(a);
@@ -210,6 +211,10 @@ function loadSkills(cwd: string): SkillRegistry {
   // Plugins sit between the built-ins and the person's own skills: what a
   // plugin ships can be overridden by hand, never the other way round.
   reg.registerAll(plugins(cwd).skills);
+  const installed = loadInstalledSkills({ cwd, home: homedir() });
+  reg.registerAll(installed.skills);
+  const installedPaths = new Set(installed.skills.map(skill => skill.filePath));
+  for (const problem of installed.problems) process.stderr.write(`skipping installed skill: ${problem}\n`);
   // Project skills shadow built-ins of the same name, which is the precedence
   // every other harness uses.
   for (const [dir, source] of [
@@ -221,7 +226,13 @@ function loadSkills(cwd: string): SkillRegistry {
       const file = join(dir, name, "SKILL.md");
       if (!existsSync(file)) continue;
       try {
-        reg.register(loadSkill(file, source));
+        const skill = loadSkill(file, source); const previous = reg.get(skill.name);
+        if (previous?.filePath && installedPaths.has(previous.filePath)) {
+          const message = `Handwritten skill ${skill.filePath} takes precedence over installed skill ${previous.filePath}. Install with --namespace to make both available.`;
+          skill.diagnostics.push({ code: "skill-shadow", severity: "warning", message });
+          process.stderr.write(`skill precedence: ${message}\n`);
+        }
+        reg.register(skill);
       } catch (err) {
         process.stderr.write(`skipping ${file}: ${String(err)}\n`);
       }
@@ -372,7 +383,8 @@ const HELP = `motif ${VERSION} — a coding agent built for Motif-3 (unofficial;
   motif doctor              check the endpoint, the credentials and what the server produces
   motif sessions            list recorded sessions
   motif resume <file>       resume an interrupted session
-  motif skills              list available skills
+  motif skills              list available skills and compatibility diagnostics
+  motif skills --help       inspect, add, import, update or remove skill packages
   motif agents              list available subagents
   motif config              show the effective settings and where each came from
   motif plugins             list the plugins under ~/.motif/plugins and .motif/plugins
@@ -489,6 +501,10 @@ async function main(): Promise<number> {
     // Standalone MCP commands skip model setup, not the existing credential boundary.
     withholdSecrets(process.env);
     return runMcpArgv(args.rest, args.flags);
+  }
+  if (args.command === "skills") {
+    withholdSecrets(process.env);
+    return runSkillsArgv(args.rest, args.flags, { getSkills: cwd => loadSkills(cwd).list() });
   }
   const cwd = flagStr(args.flags, "cwd", process.cwd());
   const envFile = flagStr(args.flags, "env-file", "");
@@ -667,15 +683,6 @@ async function main(): Promise<number> {
       const findings = lintTools(CORE_TOOLS);
       process.stdout.write(formatFindings(findings) + "\n");
       return findings.length > 0 ? 1 : 0;
-    }
-
-    case "skills": {
-      const reg = loadSkills(cwd);
-      for (const s of reg.list()) {
-        process.stdout.write(`${s.name.padEnd(16)} ${s.description.replace(/\s+/g, " ")}  (${s.source})${s.disableModelInvocation ? " [explicit only]" : ""}${!s.userInvocable ? " [model only]" : ""}\n`);
-        for (const d of s.diagnostics) process.stdout.write(`  ${d.severity}: ${d.message}\n`);
-      }
-      return 0;
     }
 
     case "agents": {

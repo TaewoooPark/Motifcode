@@ -152,7 +152,7 @@ motif mcp import codex ~/.codex/config.toml --write ./mcp.imported.json
 
 Import previews mappings and diagnostics without connecting. `--write` creates a new private file and never overwrites an existing file. Imported entries remain disabled. Review them, provide required environment variables, enable the desired entries and authorize the resulting file before use.
 
-Imports cover common commands, arguments, working directories, URLs, headers, environment references, tool filters and timeouts. Inline credentials and fallback values are not copied. Unsupported settings are reported. OAuth sessions, client-specific approval stores, skills and plugins are not imported.
+MCP imports cover common commands, arguments, working directories, URLs, headers, environment references, tool filters and timeouts. Inline credentials and fallback values are not copied. Unsupported settings are reported. OAuth sessions and client-specific approval stores are not imported. Skills use the separate [`motif skills import` workflow](skills.md); full plugin runtimes are not imported.
 
 ## Credentials and permissions
 

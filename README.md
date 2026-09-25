@@ -152,6 +152,7 @@ does the same without the question.
 | `motif mcp import codex\|claude PATH` | preview server settings from another client; `--write NEW_PATH` saves disabled entries |
 | `motif sessions` · `motif resume <file>` | list recorded sessions; resume an interrupted one |
 | `motif skills` · `agents` · `plugins` · `config` | what is loaded, and the effective settings with their sources |
+| `motif skills add` · `import` · `marketplace` | install skills from local/Git sources, Claude, Codex and marketplace packages |
 | `motif trust` | approve this repository's `.motif/settings.json` hooks |
 
 Flags: `--model`, `--endpoint`, `--env-file`, `--theme`, `--thinking`,
@@ -259,6 +260,7 @@ spawned — the agent's `bash` cannot see it, and neither can a project hook.
 | `/cwd [path]` | show or change the working directory |
 | `/notes` (`/memory`), `/hooks` | the project notes every task reads; the hooks around tools |
 | `/skills`, `/agents`, `/plugins` | what is loaded; each skill also runs as `/<skill> [input]` |
+| `/skill-setup <source or request>` | inspect, install and verify skills from local files, clients or marketplaces |
 | `/new` (`/clear`) | start a new conversation; the working tree is untouched |
 | `/sessions`, `/resume [n\|file]` | recorded sessions; continue from one |
 | `/quit` (`/exit`, `/q`) | leave |
@@ -281,7 +283,7 @@ enter send · \ + enter newline · esc interrupt or clear · ctrl-c twice quit �
 | Permissions | A numbered prompt before a command, a write, a patch or the terminal runs; "don't ask again for this tool"; a refusal the model is told about; Shift-Tab or `/permissions auto` runs everything |
 | Conversation | Each task sees the ones before it; `--continue` and `/resume` bring a recorded conversation back; messages sent while a task runs are queued; Esc interrupts; Codex-style compaction past `compactAt` of the window — the model writes a handoff summary and your own messages are kept verbatim — and `/compact <focus>` on demand |
 | Backend | `.motif/` laid out like Claude Code's `.claude/`: user and project settings, skills, agents, plugins, notes, one journal per task, history; project hooks applied once `motif trust` approves them |
-| Skills and agents | 16 built-in skills (`explore`, `plan`, `explain`, `code-review`, `security-review`, `test-fix`, `debug`, `refactor`, `commit`, `pr-body`, `docs`, `init`, `skill-creator`, `mcp-setup`, `motif-endpoint`, `korean`); 5 built-in subagents (`explorer`, `reviewer`, `tester`, `planner`, `patcher`) with prefix tool sets and a local scheduler; plugins in Claude Code's layout |
+| Skills and agents | 17 built-in skills (`explore`, `plan`, `explain`, `code-review`, `security-review`, `test-fix`, `debug`, `refactor`, `commit`, `pr-body`, `docs`, `init`, `skill-creator`, `skill-setup`, `mcp-setup`, `motif-endpoint`, `korean`); Claude/Codex skill import and marketplace skill installation; 5 built-in subagents (`explorer`, `reviewer`, `tester`, `planner`, `patcher`) |
 | MCP | stdio, Streamable HTTP and legacy SSE servers; CLI registration and Codex/Claude config import; `/mcp` connection controls; `mcp-setup` for natural-language setup; server tools follow session permissions |
 | Endpoint | The key asked for once and saved to `~/.motif/.env`, withheld from every command the agent runs; a 401 that says which side of the key it is on; a 429 retried after the server's `Retry-After`; `motif doctor` reports what the server actually returns |
 | Screen | Shrinking the window mid-session leaves no stale rows; five themes (`motif`, `claude`, `mono`, `solarized`, `dracula`) swapped in place |
@@ -289,6 +291,12 @@ enter send · \ + enter newline · esc interrupt or clear · ctrl-c twice quit �
 
 A skill is a `SKILL.md` with frontmatter (`name`, `description`) and the
 instructions as the body; `$ARGUMENTS` is replaced by what follows the command.
+YAML metadata, invocation policies and supporting resource directories are
+preserved. Skills load on demand and accepted bodies reach the model whole.
+Use `motif skills import claude` or `motif skills import codex` to discover
+existing skills, and `motif skills add SOURCE` to install a selected source.
+The built-in `/skill-setup` guides this process. See [Skills](docs/skills.md)
+for marketplace examples, commands and compatibility limits.
 A subagent is Markdown with frontmatter — `name`, `description`, `tools` (a
 count, or a prefix of the canonical list), `readOnly`, `maxTurns`. A plugin is
 a directory with `plugin.json` and its own `skills/` and `agents/`.
@@ -298,6 +306,7 @@ a directory with `plugin.json` and its own `skills/` and `agents/`.
 ~/.motif/.env               the credential
 ~/.motif/mcp.json           MCP server registrations
 ~/.motif/skills/<n>/SKILL.md, ~/.motif/agents/<n>.md      yours, on every project
+~/.motif/skills-installed.json, ~/.motif/skill-packages/ managed skill copies and sources
 <repo>/.motif/settings.json the project's settings and hooks — applied once `motif trust` approves it
 <repo>/.motif/skills/, agents/, NOTES.md                    the project's
 ~/.motif/plugins/<n>/, <repo>/.motif/plugins/<n>/          plugin.json + skills/ + agents/

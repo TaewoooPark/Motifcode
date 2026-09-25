@@ -145,6 +145,7 @@ npx motifcode          # 첫 실행: 키를 물어본 뒤 `motif` 명령 설치�
 | `motif mcp import codex\|claude PATH` | 다른 클라이언트의 서버 설정 미리보기; `--write NEW_PATH`로 비활성 항목 저장 |
 | `motif sessions` · `motif resume <file>` | 기록된 세션 목록; 중단된 세션 이어 가기 |
 | `motif skills` · `agents` · `plugins` · `config` | 로드된 것들, 그리고 유효한 설정과 각각의 출처 |
+| `motif skills add` · `import` · `marketplace` | 로컬·Git·Claude·Codex·마켓플레이스에서 선택한 스킬 설치 |
 | `motif trust` | 이 저장소의 `.motif/settings.json` 훅을 승인 |
 
 플래그: `--model`, `--endpoint`, `--env-file`, `--theme`, `--thinking`,
@@ -244,6 +245,7 @@ Infron의 [무료 모델 약관](https://infron.ai/docs/overview/free-models)에
 | `/cwd [path]` | 작업 디렉터리를 보거나 바꿈 |
 | `/notes` (`/memory`), `/hooks` | 모든 작업이 읽는 프로젝트 메모; 도구 주변에서 도는 훅 |
 | `/skills`, `/agents`, `/plugins` | 로드된 것들; 각 스킬은 `/<skill> [input]`으로도 실행됨 |
+| `/skill-setup <출처 또는 요청>` | 기존 클라이언트나 마켓플레이스의 스킬 조회·설치·검증 |
 | `/new` (`/clear`) | 새 대화 시작; 작업 트리는 건드리지 않음 |
 | `/sessions`, `/resume [n\|file]` | 기록된 세션; 그중 하나에서 이어 가기 |
 | `/quit` (`/exit`, `/q`) | 종료 |
@@ -266,14 +268,20 @@ enter send · \ + enter newline · esc interrupt or clear · ctrl-c twice quit �
 | 권한 | 명령·파일 쓰기·패치·터미널이 실행되기 전에 번호로 답하는 창; "이 도구는 다시 묻지 않기"; 거절하면 모델에게 그 사실이 전달됨; Shift-Tab이나 `/permissions auto`로 전부 자동 실행 |
 | 대화 | 각 작업은 앞선 작업들을 전부 봄; `--continue`와 `/resume`으로 기록된 대화를 다시 불러옴; 실행 중에 보낸 메시지는 대기열에; Esc로 중단; 컨텍스트가 창의 `compactAt`을 넘으면 Codex 방식으로 압축(모델이 인수인계 요약을 쓰고 내 메시지는 원문 그대로 남김), `/compact <초점>`으로 직접 실행 |
 | 백엔드 | Claude Code의 `.claude/`와 같은 배치의 `.motif/`: 사용자·프로젝트 설정, 스킬, 에이전트, 플러그인, 메모, 작업마다 저널 하나, 히스토리; 프로젝트 훅은 `motif trust`로 승인한 뒤 적용 |
-| 스킬과 에이전트 | 내장 스킬 16개(`explore`, `plan`, `explain`, `code-review`, `security-review`, `test-fix`, `debug`, `refactor`, `commit`, `pr-body`, `docs`, `init`, `skill-creator`, `mcp-setup`, `motif-endpoint`, `korean`); 내장 서브에이전트 5개(`explorer`, `reviewer`, `tester`, `planner`, `patcher`)는 도구 목록의 앞부분만 받고 로컬 스케줄러로 돎; Claude Code 배치를 따르는 플러그인 |
+| 스킬과 에이전트 | 내장 스킬 17개(`explore`, `plan`, `explain`, `code-review`, `security-review`, `test-fix`, `debug`, `refactor`, `commit`, `pr-body`, `docs`, `init`, `skill-creator`, `skill-setup`, `mcp-setup`, `motif-endpoint`, `korean`); 내장 서브에이전트 5개(`explorer`, `reviewer`, `tester`, `planner`, `patcher`)는 도구 목록의 앞부분만 받고 로컬 스케줄러로 돎; Claude/Codex 스킬 가져오기와 마켓플레이스 스킬 설치 |
 | MCP | stdio·Streamable HTTP·기존 SSE 서버; CLI 등록과 Codex/Claude 설정 가져오기; `/mcp` 연결 제어; `mcp-setup` 자연어 설정; 서버 도구에도 세션 권한 적용 |
 | 엔드포인트 | 키는 한 번만 물어보고 `~/.motif/.env`에 저장하며, 에이전트가 실행하는 모든 명령으로부터 차단; 401이면 키의 어느 쪽이 문제인지 알려 줌; 429는 서버의 `Retry-After`에 맞춰 재시도; `motif doctor`가 서버가 실제로 무엇을 내놓는지 보고 |
 | 화면 | 사용 도중 창을 줄여도 줄이 남지 않음; 테마 다섯 개(`motif`, `claude`, `mono`, `solarized`, `dracula`)를 제자리에서 교체 |
 | 스크립트 | `motif -p "질문"`은 답변만 출력; `motif "작업"`은 작업 하나를 실행하고 종료 |
 
 스킬은 프런트매터(`name`, `description`)와 본문의 지시문으로 된 `SKILL.md`이고,
-`$ARGUMENTS`는 명령 뒤에 쓴 말로 치환됩니다. 서브에이전트는 프런트매터 — `name`,
+`$ARGUMENTS`는 명령 뒤에 쓴 말로 치환됩니다. YAML 메타데이터와 호출 정책을
+해석하며, 참조 파일·스크립트·공유 자료를 보존합니다. `motif skills import claude`나
+`motif skills import codex`로 후보를 조회하고, `motif skills add SOURCE`로 설치합니다.
+내장 `/skill-setup`이 선택과 검증을 안내합니다. 전체 플러그인 실행 환경이 아닌 스킬
+가져오기이며, 명령 예시와 호환 범위는 [스킬 문서](docs/skills.md)를 참고하세요.
+
+서브에이전트는 프런트매터 — `name`,
 `description`, `tools`(개수, 또는 정해진 순서 목록의 앞부분), `readOnly`, `maxTurns` —
 와 본문의 지시문으로 된 마크다운입니다. 플러그인은 `plugin.json`과 자체 `skills/`,
 `agents/`를 가진 디렉터리입니다.
@@ -283,6 +291,7 @@ enter send · \ + enter newline · esc interrupt or clear · ctrl-c twice quit �
 ~/.motif/.env               자격 증명
 ~/.motif/mcp.json           MCP 서버 등록
 ~/.motif/skills/<n>/SKILL.md, ~/.motif/agents/<n>.md      내 것, 모든 프로젝트에서
+~/.motif/skills-installed.json, ~/.motif/skill-packages/ 설치한 스킬 사본과 출처
 <repo>/.motif/settings.json 프로젝트의 설정과 훅 — `motif trust`로 승인한 뒤 적용
 <repo>/.motif/skills/, agents/, NOTES.md                    프로젝트의 것
 ~/.motif/plugins/<n>/, <repo>/.motif/plugins/<n>/          plugin.json + skills/ + agents/

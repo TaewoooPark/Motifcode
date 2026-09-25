@@ -50,9 +50,24 @@ Register a custom local stdio server with `motif mcp add NAME -- COMMAND [ARGS..
 Inside a session, `/mcp` manages connections. The built-in `mcp-setup` skill
 also handles clear natural-language MCP setup requests containing a URL;
 `/mcp-setup <URL>` invokes it explicitly. Relaunch Motif after adding or editing
-a registration. `motif skills` lists all 16 built-in skills and any custom ones.
+a registration. `motif skills` lists all 17 built-in skills and any custom ones.
 See the [MCP guide](https://github.com/TaewoooPark/Motifcode/blob/main/docs/mcp.md)
 for credentials, configuration import and supported features.
+
+Import skills from existing clients or add a local/Git source:
+
+```bash
+motif skills import claude
+motif skills import codex --json
+motif skills add anthropics/skills --path skills/webapp-testing
+motif skills --help
+```
+
+Use `/skill-setup <source or request>` for guided inspection, selection and
+verification. Marketplace imports preserve skill resources without activating
+plugin hooks, MCP servers or connectors. See the
+[skills guide](https://github.com/TaewoooPark/Motifcode/blob/main/docs/skills.md)
+for selection, scope, updates and compatibility limits.
 
 Needs Node 20.3+. The bundle is a single file with no runtime dependencies.
 
