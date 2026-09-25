@@ -68,6 +68,7 @@ import { doctor, formatChecks } from "./doctor.js";
 import { ToolExecutor } from "./executor.js";
 import { policyForAgent } from "./policy.js";
 import { buildAgentPrompt, buildSystemPrompt } from "./prompt.js";
+import type { McpSession } from "@motifcode/mcp";
 
 export interface ChatOptions {
   screen: Screen;
@@ -81,6 +82,7 @@ export interface ChatOptions {
   hooks: HookConfig;
   projectNotes?: string;
   tools: Tool[];
+  mcp?: McpSession;
   /** Where each task's journal is written. */
   journalDir: string;
   version: string;
@@ -186,7 +188,7 @@ export class Chat {
   /** A `!command` in flight; tasks sent meanwhile wait behind it. */
   private shellBusy = false;
   /** A tool call waiting for the person's yes or no, and which of the three answers is selected. */
-  private pendingConfirm: { call: ToolInvocation; resolve: (v: "allow" | "deny") => void; selected: number } | null = null;
+  private pendingConfirm: { call: ToolInvocation; resolve: (v: "allow" | "deny") => void; selected: number; force: boolean } | null = null;
   /** A question with numbered answers in place of the prompt, and which one is selected. */
   private pendingChoice: { title: string; lines: string[]; options: string[]; selected: number; resolve: (v: number | null) => void } | null = null;
   /** A secret being typed in place of the prompt — the API key at login. */
@@ -273,7 +275,7 @@ export class Chat {
           text: "no API key is configured: /login, or set MOTIF_API_KEY in ~/.motif/.env or ./.env, then /doctor",
         });
       }
-      this.screen.attachInput(this.opts.stdin, (key) => this.onKey(key));
+      this.screen.attachInput(this.opts.stdin, (key) => this.onKey(key), () => this.stop());
       this.refresh();
       void this.start();
     });
@@ -532,17 +534,21 @@ export class Chat {
       this.refresh();
       return;
     }
-    if (choice === 2) this.alwaysAllowed.add(pending.call.name);
+    if (choice === 2 && !pending.force) this.alwaysAllowed.add(this.permissionKey(pending.call));
     this.pendingConfirm = null;
     pending.resolve(choice === 3 ? "deny" : "allow");
     this.refresh();
   }
 
   /** Put a tool call to the person, unless the mode or an earlier `a` says not to. */
-  private confirm(call: ToolInvocation): Promise<"allow" | "deny"> {
-    if (this.settings.permissions === "auto" || this.alwaysAllowed.has(call.name)) return Promise.resolve("allow");
+  private permissionKey(call: ToolInvocation): string {
+    return call.name === "mcp" ? `mcp:${String(call.arguments.server)}/${String(call.arguments.method)}` : call.name;
+  }
+
+  private confirm(call: ToolInvocation, force = false): Promise<"allow" | "deny"> {
+    if (!force && (this.settings.permissions === "auto" || this.alwaysAllowed.has(this.permissionKey(call)))) return Promise.resolve("allow");
     return new Promise((resolve) => {
-      this.pendingConfirm = { call, resolve, selected: 1 };
+      this.pendingConfirm = { call, resolve, selected: 1, force };
       this.refresh();
     });
   }
@@ -574,11 +580,17 @@ export class Chat {
         title = "Send this to the terminal?";
         lines = preview(text("keystrokes"), 6);
         break;
+      case "mcp":
+        title = `Call ${text("server")}/${text("method")}?`;
+        lines = preview(JSON.stringify(a.args, null, 2), 10);
+        break;
       default:
         title = `Run ${call.name}?`;
         lines = preview(JSON.stringify(a), 4);
     }
-    const options = ["1. Yes", `2. Yes, and don't ask again for ${call.name} this session`, "3. No, and tell the model what to do instead"];
+    const options = ["1. Yes", this.pendingConfirm?.force
+      ? "2. Yes, for this call (the server requires human confirmation)"
+      : `2. Yes, and don't ask again for ${this.permissionKey(call)} this session`, "3. No, and tell the model what to do instead"];
     return {
       title,
       lines,
@@ -1063,6 +1075,7 @@ export class Chat {
         tools: this.opts.tools,
         system: (ch) => this.systemFor(ch),
         userTask: task,
+        context: await this.opts.mcp?.prepare(task, abort.signal),
         history: this.history,
         executor: this.executor,
         emit,
@@ -1204,6 +1217,11 @@ export class Chat {
     }
   }
 
+  /** Abort active work and let the owner await connection cleanup. */
+  stop(): void {
+    this.quit();
+  }
+
   private quit(): void {
     if (this.quitting) return;
     this.quitting = true;
@@ -1249,6 +1267,10 @@ export class Chat {
       hooks: this.opts.hooks,
       skills: this.opts.skills,
       policy: policyForAgent({ root: cwd, tools: toolNames, readOnly: false }),
+      callMcp: this.opts.mcp ? (server, method, args, signal) => this.opts.mcp!.invoke(server, method, args, {
+        scopeId: "root", signal,
+        confirmInteraction: (server, method, args) => this.confirm({ id: "mcp-interaction", name: "mcp", arguments: { server, method, args }, validated: true, repaired: false }, true).then((answer) => answer === "allow"),
+      }) : undefined,
       confirm: (call) => this.confirm(call),
       onHook: (event, label, ok) => this.screen.apply({ type: "hook", event, label, ok }),
       runAgent: async (name, prompt, callId) => {
@@ -1274,6 +1296,10 @@ export class Chat {
           const childExecutor = new ToolExecutor({
             cwd: this.settings.cwd,
             skills: this.opts.skills,
+            callMcp: this.opts.mcp ? (server, method, args, signal) => this.opts.mcp!.invoke(server, method, args, {
+              scopeId: childScope.scopeId, signal,
+              confirmInteraction: (server, method, args) => this.confirm({ id: "mcp-interaction", name: "mcp", arguments: { server, method, args }, validated: true, repaired: false }, true).then((answer) => answer === "allow"),
+            }) : undefined,
             confirm: (call) => this.confirm(call),
             policy: policyForAgent({
               root: this.settings.cwd,
@@ -1312,6 +1338,7 @@ export class Chat {
                   cwd: this.settings.cwd,
                 }),
               userTask: prompt,
+              context: def.toolCount >= CORE_TOOL_NAMES.length && !def.readOnly ? await this.opts.mcp?.prepare(prompt, active.abort.signal, childScope.scopeId) : undefined,
               executor: childExecutor,
               emit: childEmit,
               onCheckpoint: active.journal.checkpointFor(childScope),
@@ -1340,6 +1367,7 @@ export class Chat {
             };
           } finally {
             childExecutor.close();
+            this.opts.mcp?.clearScope(childScope.scopeId);
           }
         });
       },

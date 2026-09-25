@@ -33,7 +33,7 @@ motif "fix the failing test in tests/"  # one task, then exit
 motif -p "what does src/loop.ts do?"    # print only the reply, for pipes
 ```
 
-Needs Node 20+. The bundle is a single file with no runtime dependencies.
+Needs Node 20.3+. The bundle is a single file with no runtime dependencies.
 
 Full documentation, the design notes on why this harness is shaped the way it is, and the Korean
 edition are in the repository: **https://github.com/TaewoooPark/Motifcode**.

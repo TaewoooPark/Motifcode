@@ -117,7 +117,7 @@ Motifcode는 Claude Code의 모양을 한 터미널 코딩 에이전트입니다
 
 ## 설치와 사용법
 
-**Node 20 이상**이 필요합니다. 패키지는 런타임 의존성이 없는 파일 하나입니다.
+**Node 20.3 이상**이 필요합니다. 패키지는 런타임 의존성이 없는 파일 하나입니다.
 
 ```bash
 cd your-project
@@ -144,6 +144,17 @@ npx motifcode          # 첫 실행: 키를 물어본 뒤 `motif` 명령 설치�
 플래그: `--model`, `--endpoint`, `--env-file`, `--theme`, `--thinking`,
 `--verbose`, `--permissions ask|auto`, `--cwd`, `--channel`, `--max-turns`,
 `--max-output-tokens`, `--seed`, `--no-hero`. 전체 목록은 `motif --help`에 있습니다.
+
+---
+
+## MCP 서버 연결 (개발 브랜치)
+
+`mcp-adapter` 브랜치는 stdio·Streamable HTTP·기존 SSE 서버 연결,
+Codex/Claude 설정 가져오기, 실제 Motif-3 실험으로 보완한 도구 검색과 결과 처리를
+추가합니다. 아직 npm 0.3.4 배포본에는 없습니다. 이 체크아웃을 빌드한 뒤
+`motif mcp list`, `motif mcp doctor --connect`, `motif mcp import`를 사용하세요.
+[설정·권한·호환 범위](docs/mcp.md)와 [실험 및 구현 보고서](docs/mcp-validation.ko.md)를
+참고해주세요.
 
 ---
 

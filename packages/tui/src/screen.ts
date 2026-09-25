@@ -319,7 +319,7 @@ export class Screen {
    * A terminal left in raw mode after a crash needs `reset` to type in again,
    * which is a worse outcome than never having offered the shortcut.
    */
-  attachInput(stdin: NodeJS.ReadStream = process.stdin, handler?: KeyHandler): void {
+  attachInput(stdin: NodeJS.ReadStream = process.stdin, handler?: KeyHandler, onSignal?: (signal: NodeJS.Signals) => void): void {
     if (!this.interactive || !stdin.isTTY || this.detachInput) return;
 
     const decoder = new KeyDecoder();
@@ -364,7 +364,9 @@ export class Screen {
     };
     const onFatal = (signal: NodeJS.Signals) => (): void => {
       this.finish();
-      process.kill(process.pid, signal);
+      // The owner may need to await external tool shutdown before exiting.
+      if (onSignal) onSignal(signal);
+      else process.kill(process.pid, signal);
     };
     const handlers: [NodeJS.Signals, () => void][] = [
       ["SIGINT", onFatal("SIGINT")],

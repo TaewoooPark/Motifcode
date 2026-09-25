@@ -31,6 +31,7 @@ const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
 
 /** Workspace aliases, mirroring tsconfig `paths` and the vitest config. */
 const WORKSPACE = [
+  "mcp",
   "protocol",
   "tools",
   "core",
@@ -69,6 +70,9 @@ for (const { entry, out } of ENTRIES) {
     bundle: true,
     platform: "node",
     format: "esm",
+    // The MCP SDK's cross-spawn dependency uses CommonJS for Node built-ins.
+    // Keep the distributable self-contained while allowing those built-ins.
+    banner: { js: 'import { createRequire as motifCreateRequire } from "node:module"; const require = motifCreateRequire(import.meta.url);' },
     target: "node20",
     alias,
     define: { "process.env.MOTIF_BUILD_VERSION": JSON.stringify(pkg.version) },

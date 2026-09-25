@@ -26,7 +26,7 @@
   "author": "Taewoo Park",
   "license": "Apache-2.0",
   "engines": {
-    "node": ">=20"
+    "node": ">=20.3.0"
   },
   "bin": {
     "motif": "dist/motif.js",
@@ -45,6 +45,7 @@
   },
   "dependencies": {},
   "devDependencies": {
+    "@motifcode/mcp": "workspace:*",
     "@motifcode/agents": "workspace:*",
     "@motifcode/core": "workspace:*",
     "@motifcode/eval": "workspace:*",

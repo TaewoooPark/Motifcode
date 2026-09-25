@@ -63,6 +63,8 @@ import { TransportError, backoffDelay, sleep, type Transport } from "./transport
 export interface ToolResult {
   ok: boolean;
   output: string;
+  /** The MCP host already bounded this JSON and retained its original result. */
+  bounded?: boolean;
 }
 
 export interface Executor {
@@ -109,6 +111,8 @@ export interface LoopOptions {
    * Ignored when `resume` is set, which carries its own transcript.
    */
   history?: Message[];
+  /** Append-only runtime data, after the task; never inserted in the system prefix. */
+  context?: string;
   executor: Executor;
   emit: EventSink;
   channel?: ChannelId;
@@ -343,6 +347,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
     initialMessages: [...(opts.history ?? []), { role: "user", content: opts.userTask }],
   });
   if (resume) session.restoreMessages(resume.messages);
+  if (opts.context) session.append({ role: "user", content: opts.context });
   const budget = resume ? BreakageBudget.restore(resume.breakage) : new BreakageBudget();
   const guard = resume ? LoopGuard.restore(resume.loopGuard) : new LoopGuard();
   const ctx = repairContext(tools);
@@ -473,6 +478,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
         ].join("\n"),
       },
     ]);
+    if (opts.context) session.append({ role: "user", content: opts.context });
     budget.onChannelChange();
     guard.reset();
     pendingDone = null;
@@ -496,6 +502,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
         const turns = [...(opts.compaction.userTurns ?? [])];
         if (turns[turns.length - 1] !== opts.userTask) turns.push(opts.userTask);
         session.restart(system(channel), buildCompactedHistory(turns, summary));
+        if (opts.context) session.append({ role: "user", content: opts.context });
         emit({ type: "compaction", beforeTokens: before, summaryChars: summary.length, summary });
         checkpoint();
       } catch (err) {
@@ -863,7 +870,9 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
       });
       const started = Date.now();
       const result = await executor.run(call, signal);
-      const output = clampOutput(result.output);
+      // Cutting a result envelope destroys both JSON and the handle needed to
+      // recover omitted data. The MCP host enforces its own serialized budget.
+      const output = result.bounded ? result.output : clampOutput(result.output);
       emit({ type: "tool_end", id: call.id, ok: result.ok, output, ms: Date.now() - started });
       session.appendAll(
         codec.serializeObservation({

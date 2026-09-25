@@ -55,7 +55,7 @@ export interface ExecutorOptions {
   /** Runs a subagent; supplied by the CLI so this module stays loop-agnostic. The call id lets it report progress against the parent's cell. */
   runAgent?: (agent: string, prompt: string, callId?: string) => Promise<SubagentOutcome>;
   /** Called for MCP proxy calls. Absent means no servers are connected. */
-  callMcp?: (server: string, method: string, args: unknown) => Promise<string>;
+  callMcp?: (server: string, method: string, args: unknown, signal?: AbortSignal) => Promise<string | ToolResult>;
   onHook?: (event: HookEvent, label: string, ok: boolean) => void;
   timeoutMs?: number;
   /**
@@ -466,7 +466,8 @@ export class ToolExecutor implements Executor {
       return { ok: false, output: `refused by execution policy: ${decision.reason}` };
     }
 
-    if (this.opts.confirm && CONFIRMED_TOOLS.has(call.name)) {
+    const localMcpControl = call.name === "mcp" && call.arguments.server === "__motif_host__";
+    if (this.opts.confirm && CONFIRMED_TOOLS.has(call.name) && !localMcpControl) {
       const verdict = await this.opts.confirm(call);
       if (verdict === "deny") {
         // Worded for the model: what happened, and what to do about it. Not
@@ -632,17 +633,22 @@ export class ToolExecutor implements Executor {
       case "mcp": {
         const callMcp = this.opts.callMcp;
         if (!callMcp) return { ok: false, output: "no MCP servers are connected" };
-        let parsed: unknown = {};
-        const raw = str(args, "args");
-        if (raw) {
+        let parsed: unknown = args.args ?? {};
+        // Old programmatic callers can still send strings. New sessions only
+        // advertise an object, so their prefix does not change during a run.
+        if (typeof parsed === "string") {
           try {
-            parsed = JSON.parse(raw);
+            parsed = JSON.parse(parsed);
           } catch {
-            return { ok: false, output: `args must be a JSON object string; got: ${raw.slice(0, 200)}` };
+            return { ok: false, output: "args must be an object (or a valid legacy JSON object string)" };
           }
         }
+        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+          return { ok: false, output: "args must be an object" };
+        }
         try {
-          return { ok: true, output: await callMcp(str(args, "server"), str(args, "method"), parsed) };
+          const outcome = await callMcp(str(args, "server"), str(args, "method"), parsed, signal);
+          return typeof outcome === "string" ? { ok: true, output: outcome } : outcome;
         } catch (err) {
           return { ok: false, output: String(err) };
         }

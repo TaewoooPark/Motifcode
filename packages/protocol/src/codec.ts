@@ -37,7 +37,7 @@ import { getChannel, type Action, type ChannelId, type ChannelParse } from "./ch
 import { renderPrompt } from "./template.js";
 import { SAMPLING_DEFAULTS, TURN_END } from "./tokens.js";
 import type { RepairContext } from "./toolcall.js";
-import type { Message, Tool } from "./types.js";
+import { toolCallParts, type Message, type Tool } from "./types.js";
 import type { CompletionRequest, CompletionResponse } from "./wire.js";
 
 /** What a codec needs from the session: the transcript, and how it renders. */
@@ -164,11 +164,19 @@ class ToolCallCodec implements ChannelCodec {
     const msg: Message = { role: "assistant", content: hasCalls ? parsed.content : parsed.content || body };
     if (reasoning) msg.reasoning_content = reasoning;
     if (hasCalls) {
-      msg.tool_calls = calls.map((c) => ({
-        id: c.id,
-        type: "function" as const,
-        function: { name: c.name, arguments: c.arguments },
-      }));
+      msg.tool_calls = calls.map((c, i) => {
+        const original = parsed.structuredCalls?.[i];
+        const wire = original ? toolCallParts(original) : undefined;
+        // The object proxy removes an inner JSON encoding, not the wire JSON
+        // string. Keep the exact native arguments and interleaved reasoning.
+        let args: string | Record<string, unknown> = c.arguments;
+        if (c.name === "mcp" && wire?.name === c.name && typeof wire.args === "string") {
+          try {
+            if (JSON.stringify(JSON.parse(wire.args)) === JSON.stringify(c.arguments)) args = wire.args;
+          } catch { /* A refused malformed call must not replace the next valid call in history. */ }
+        }
+        return { id: c.id, type: "function" as const, function: { name: c.name, arguments: args } };
+      });
     }
     return [msg];
   }

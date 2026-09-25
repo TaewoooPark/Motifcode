@@ -123,7 +123,7 @@ context used and how much of the prompt the server served from cache.
 
 ## Install and use
 
-Needs **Node 20+**. The package is one file with no runtime dependencies.
+Needs **Node 20.3+**. The package is one file with no runtime dependencies.
 
 ```bash
 cd your-project
@@ -156,6 +156,17 @@ If your terminal is configured to render East Asian Ambiguous characters as
 two columns, launch with `MOTIF_AMBIGUOUS_WIDTH=2 motif` to match its cursor and
 wrapping behavior. The default is one column. Set this in the shell environment;
 it is a terminal preference, not an API configuration value in `.env`.
+
+---
+
+## MCP servers (development branch)
+
+The `mcp-adapter` branch adds stdio, Streamable HTTP and legacy SSE servers,
+Codex/Claude config import, and bounded discovery/results tuned through live
+Motif-3 tasks. This is not yet in npm 0.3.4. Build this checkout, then use
+`motif mcp list`, `motif mcp doctor --connect`, or `motif mcp import`.
+See [configuration, permissions and compatibility](docs/mcp.md) and the
+[Motif-3 validation report](docs/mcp-validation.ko.md).
 
 ---
 
