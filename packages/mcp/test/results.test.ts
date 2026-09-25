@@ -172,4 +172,20 @@ describe("ResultStore", () => {
     expect(store.size).toBe(0);
     expect(() => new ResultStore({ maxOutputBytes: 10 })).toThrow();
   });
+
+  it("points oversized compound browser results at the actual snapshot rather than host guidance", () => {
+    const store = new ResultStore({ maxOutputBytes: 15_800 });
+    const text = '- textbox "수령인" [ref=e6]\n' + "observation\n".repeat(1400);
+    const result = store.present("browser", { action: { content: [] }, observation: {
+      server: "playwright", method: "browser_snapshot", args: {}, outcome: {
+        ok: true, execution: "completed", result: { content: [{ type: "text", text }] },
+      },
+    }, guidance: "Use exact references from the snapshot, not this guidance string." });
+    const shown = object(result);
+    expect(shown.nextCall.args.pointer).toBe("/observation/outcome/result/content/0/text");
+    const page = object(store.read("browser", shown.nextCall.args));
+    expect(page.value).toContain('[ref=e6]');
+    expect(page.coverage.complete).toBe(false);
+    expect(size(shown)).toBeLessThanOrEqual(15_800);
+  });
 });

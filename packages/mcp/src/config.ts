@@ -9,6 +9,8 @@ export interface McpServerConfig {
   enabled: boolean;
   transport: "stdio" | "http" | "sse";
   protocol?: "legacy" | "modern" | "auto";
+  /** Explicitly opted-in server behavior; never inferred from its name or URL. */
+  profile?: "playwright";
   command?: string;
   args?: string[];
   cwd?: string;
@@ -50,7 +52,7 @@ export function isSupportedHeaderName(name: string): boolean {
     && !lower.startsWith("mcp-") && !lower.startsWith("proxy-") && !lower.startsWith("sec-");
 }
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const SERVER_FIELDS = new Set(["id", "enabled", "transport", "protocol", "command", "args", "cwd", "url", "env", "envVars", "headers", "allowedTools", "deniedTools", "startupTimeoutMs", "toolTimeoutMs", "catalogTtlMs"]);
+const SERVER_FIELDS = new Set(["id", "enabled", "transport", "protocol", "profile", "command", "args", "cwd", "url", "env", "envVars", "headers", "allowedTools", "deniedTools", "startupTimeoutMs", "toolTimeoutMs", "catalogTtlMs"]);
 export const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 export const configHash = (text: string): string => createHash("sha256").update(text).digest("hex");
 export const defaultMcpConfigPath = (home = homedir()): string => join(home, ".motif", "mcp.json");
@@ -92,6 +94,7 @@ export function parseMcpConfig(text: string, sourcePath = defaultMcpConfigPath()
     if (!["stdio", "http", "sse"].includes(String(entry.transport))) error("unsupported_transport", "Transport must be stdio, http, or sse.", id, "transport");
     if (entry.enabled !== undefined && typeof entry.enabled !== "boolean") error("invalid_field", "enabled must be a boolean.", id, "enabled");
     if (entry.protocol !== undefined && !["legacy", "modern", "auto"].includes(String(entry.protocol))) error("invalid_field", "protocol must be legacy, modern, or auto.", id, "protocol");
+    if (entry.profile !== undefined && entry.profile !== "playwright") error("invalid_field", "profile must be playwright when explicitly enabled.", id, "profile");
     for (const field of ["args", "envVars", "allowedTools", "deniedTools"] as const) {
       const value = entry[field];
       if (value !== undefined && (!Array.isArray(value) || !value.every((item) => typeof item === "string" && !item.includes("\0")))) error("invalid_field", "Expected a string array without NUL characters.", id, field);

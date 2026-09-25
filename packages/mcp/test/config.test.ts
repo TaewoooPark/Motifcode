@@ -36,6 +36,21 @@ describe("MCP configuration authorization", () => {
     expect(JSON.stringify(parseMcpConfig('{"API_KEY":"very-secret"'))).not.toContain("very-secret");
     expect(JSON.stringify(parseMcpConfig(document({ transport: "http", command: undefined, url: "https://user:very-secret@example.test/mcp" })))).not.toContain("very-secret");
   });
+  it("requires explicit trusted configuration for the optional Playwright profile", () => {
+    expect(parseMcpConfig(document({})).servers[0]?.profile).toBeUndefined();
+    const text = document({ profile: "playwright" });
+    const parsed = parseMcpConfig(text);
+    expect(parsed.diagnostics).toEqual([]);
+    expect(resolveServerConfig(parsed.servers[0]!, {}).profile).toBe("playwright");
+    for (const profile of [true, null, "auto", "Playwright", { name: "playwright" }]) {
+      expect(parseMcpConfig(document({ profile })).servers).toEqual([]);
+    }
+    const cwd = fixture(); const file = join(cwd, "mcp.json");
+    writeFileSync(file, text);
+    expect(loadMcpConfig({ home: cwd, path: file }).servers[0]).toMatchObject({ profile: "playwright", enabled: false });
+    expect(loadMcpConfig({ home: cwd, path: file, trustHash: configHash(text) }).servers[0]).toMatchObject({ profile: "playwright", enabled: true });
+    expect(loadMcpConfig({ home: cwd, path: file, trustHash: configHash(document({})) }).servers[0]?.enabled).toBe(false);
+  });
 });
 
 describe("MCP connection configuration", () => {

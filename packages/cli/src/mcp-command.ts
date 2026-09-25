@@ -85,7 +85,7 @@ export async function runMcpCommand(
         }
       }
     }
-    emit({ mode: flags.connect ? "connection-check" : "offline", sources: config.sources, servers: config.servers.map((server) => ({ id: server.id, enabled: server.enabled, transport: server.transport, protocol: server.protocol, allowedTools: server.allowedTools, deniedTools: server.deniedTools })), connections, diagnostics });
+    emit({ mode: flags.connect ? "connection-check" : "offline", sources: config.sources, servers: config.servers.map((server) => ({ id: server.id, enabled: server.enabled, transport: server.transport, protocol: server.protocol, profile: server.profile, allowedTools: server.allowedTools, deniedTools: server.deniedTools })), connections, diagnostics });
     return interruptedExitCode ?? (diagnostics.some((diagnostic) => diagnostic.severity === "error") ? 1 : 0);
   }
   if (command !== "import") return usage("Unknown MCP command.");

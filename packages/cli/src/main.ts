@@ -970,7 +970,7 @@ async function main(): Promise<number> {
       hooks,
       skills,
       policy: policyForAgent({ root: cwd, tools: activeToolNames, readOnly: false }),
-      callMcp: (server, method, values, signal) => mcp.invoke(server, method, values, { scopeId: "root", signal }),
+      callMcp: (server, method, values, signal, observe) => mcp.invoke(server, method, values, { scopeId: "root", signal, observe }),
     });
     try {
       const result = await runLoop({
@@ -979,6 +979,7 @@ async function main(): Promise<number> {
         system: (ch) => buildSystemPrompt({ mode: "chat", channel: ch, tools: activeTools, skills, agents, ...(projectNotes !== undefined ? { projectNotes } : {}), cwd }),
         userTask: task,
         context: await mcp.prepare(task, abort.signal),
+        replyRecovery: (content) => mcp.replyRecovery(content),
         signal: abort.signal,
         executor,
         emit: (e) => {
@@ -1071,7 +1072,7 @@ async function main(): Promise<number> {
     hooks,
     skills,
     policy: policyForAgent({ root: cwd, tools: activeToolNames, readOnly: false }),
-    callMcp: (server, method, values, signal) => mcp.invoke(server, method, values, { scopeId: "root", signal }),
+    callMcp: (server, method, values, signal, observe) => mcp.invoke(server, method, values, { scopeId: "root", signal, observe }),
     onHook: (event, label, ok) => emit({ type: "hook", event, label, ok }),
     runAgent: async (name, prompt) => {
       const def = agents.get(name);
@@ -1100,7 +1101,7 @@ async function main(): Promise<number> {
         const childExecutor = new ToolExecutor({
           cwd,
           skills,
-          callMcp: (server, method, values, signal) => mcp.invoke(server, method, values, { scopeId: childScope.scopeId, signal }),
+          callMcp: (server, method, values, signal, observe) => mcp.invoke(server, method, values, { scopeId: childScope.scopeId, signal, observe }),
           policy: policyForAgent({
             root: cwd,
             tools: CORE_TOOL_NAMES.slice(0, def.toolCount),
@@ -1130,6 +1131,7 @@ async function main(): Promise<number> {
               }),
             userTask: prompt,
             context: def.toolCount >= CORE_TOOLS.length && !def.readOnly ? await mcp.prepare(prompt, abort.signal, childScope.scopeId) : undefined,
+            replyRecovery: def.toolCount >= CORE_TOOLS.length && !def.readOnly ? (content) => mcp.replyRecovery(content) : undefined,
             signal: abort.signal,
             executor: childExecutor,
             // Subagent events are journalled under their own scope but not
@@ -1175,6 +1177,7 @@ async function main(): Promise<number> {
       system: systemFor,
       userTask: task,
       context: await mcp.prepare(task, abort.signal),
+      replyRecovery: (content) => mcp.replyRecovery(content),
       signal: abort.signal,
       executor,
       emit,

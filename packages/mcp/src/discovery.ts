@@ -156,15 +156,35 @@ export class ToolCatalog {
       return { entry, score, explicit };
     }).filter(({ score, explicit }) => explicit || score >= this.minScore).sort((a, b) => Number(b.explicit) - Number(a.explicit) || b.score - a.score || `${a.entry.tool.server}/${a.entry.tool.name}`.localeCompare(`${b.entry.tool.server}/${b.entry.tool.name}`));
     if (!scored.length) return this.empty("No sufficiently relevant tools found. Try a capability name, server/tool name, or a more specific query.");
-    const selected = scored.slice(0, boundedInt(options.limit, this.maxCards, this.maxCards));
+    return this.cards(scored.slice(0, boundedInt(options.limit, this.maxCards, this.maxCards)).map(({ entry }) => entry.tool));
+  }
+
+  /** Host-selected hints still use only catalog members and the same schema/byte limits. */
+  select(references: readonly { server: string; method: string }[], limit?: number): DiscoveryResult {
+    const selected: CatalogTool[] = [];
+    for (const reference of references.slice(0, 64)) {
+      const found = this.entries.find(({ tool }) => tool.server === reference.server && tool.name === reference.method)?.tool;
+      if (found && !selected.includes(found)) selected.push(found);
+      if (selected.length >= boundedInt(limit, this.maxCards, this.maxCards)) break;
+    }
+    if (!selected.length) return this.empty("No requested tools are available in the allowed catalog.");
+    return this.cards(selected);
+  }
+
+  private cards(selected: readonly CatalogTool[]): DiscoveryResult {
     const result: DiscoveryResult = { kind: "mcp_discovery", ok: true, cards: [], abstained: false };
-    for (const { entry } of selected) {
-      const card = this.card(entry.tool);
+    for (const tool of selected) {
+      const card = this.card(tool);
       if (utf8Size({ ...result, cards: [...result.cards, card], omitted: selected.length }) <= this.budget) result.cards.push(card);
     }
     if (result.cards.length < selected.length) result.omitted = selected.length - result.cards.length;
     if (!result.cards.length) return this.empty("Matching schemas exceed the discovery budget. Describe a specific server/tool.");
     return result;
+  }
+
+  /** Membership only: no connection, schema rendering, or action execution. */
+  has(server: string, name: string): boolean {
+    return this.entries.some(({ tool }) => tool.server === server && tool.name === name);
   }
 
   describe(server: string, name: string): DiscoveryResult {

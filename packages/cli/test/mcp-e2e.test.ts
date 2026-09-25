@@ -51,13 +51,13 @@ function call(name: string, args: unknown, id: string, reasoning = "test reasoni
 const mcp = (method: string, args: unknown, id: string) => call("mcp", { server: "lab", method, args }, id);
 const reply = (text: string): Reply => ({ message: { content: text, reasoning_content: "The observed result is sufficient to answer." } });
 
-function setup() {
+function setup(allowedTools = ["echo", "business"]) {
   const dir = mkdtempSync(join(tmpdir(), "motif-mcp-e2e-")); dirs.push(dir);
   const log = join(dir, "events.ndjson"); const envAudit = join(dir, "env-audit.json"); const wrapper = join(dir, "server.mjs");
   // Record only booleans for fake secrets. Never record the host environment.
   writeFileSync(wrapper, `import { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(envAudit)}, JSON.stringify({ motif: Boolean(process.env.MOTIF_API_KEY), openai: Boolean(process.env.OPENAI_API_KEY), explicit: process.env.MCP_TEST_VALUE === 'allowed' }));\nawait import(${JSON.stringify(pathToFileURL(FIXTURE).href)});\n`);
   const configPath = join(dir, "mcp.json");
-  const configText = JSON.stringify({ version: 1, servers: { lab: { enabled: true, transport: "stdio", protocol: "legacy", command: process.execPath, args: [wrapper, log], env: { MCP_TEST_VALUE: "allowed" }, allowedTools: ["echo", "business"], startupTimeoutMs: 3000, toolTimeoutMs: 2000, catalogTtlMs: 60000 } } });
+  const configText = JSON.stringify({ version: 1, servers: { lab: { enabled: true, transport: "stdio", protocol: "legacy", command: process.execPath, args: [wrapper, log], env: { MCP_TEST_VALUE: "allowed" }, allowedTools, startupTimeoutMs: 3000, toolTimeoutMs: 2000, catalogTtlMs: 60000 } } });
   writeFileSync(configPath, configText);
   return { dir, log, envAudit, configPath, hash: configHash(configText), events: (): Event[] => existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as Event) : [] };
 }
@@ -98,6 +98,70 @@ afterEach(async () => {
 });
 
 describe("MCP through the actual CLI process", () => {
+  it("recovers MCP arguments in prose through a new model turn and one validated dispatch", async () => {
+    const f = setup(); const text = '한글 "quotes"\nC:\\temp ${literal} `backtick`';
+    const printed = `먼저 호출합니다.\n\n\`\`\`json\n${JSON.stringify({ server: "lab", method: "echo", args: { text } })}\n\`\`\``;
+    const model = new MockModel((turn) => turn === 1 ? reply(printed) : turn === 2 ? mcp("echo", { text }, "recovered-call") : reply("정식 호출 완료")); await model.start();
+    const result = await run(f, model);
+    expect(result, result.stderr).toMatchObject({ code: 0, stdout: "정식 호출 완료\n", timedOut: false });
+    expect(model.bodies).toHaveLength(3);
+    expect(model.bodies[1]!.messages.find((message) => message.role === "assistant")).toMatchObject({ content: printed, reasoning_content: "The observed result is sufficient to answer." });
+    expect(model.bodies[1]!.messages.at(-1)?.content).toContain("mcp");
+    expect(f.events().filter((event) => event.event === "call")).toMatchObject([{ name: "echo", args: { text } }]);
+    expect(observations(model.bodies[2]!)[0]).toMatchObject({ ok: true, execution: "completed" });
+    for (const body of model.bodies) expect(body.tools).toEqual(model.bodies[0]!.tools);
+    assertClosed(f);
+  }, 25_000);
+
+  it("does not execute a quoted example and caps repeated ambiguous replies", async () => {
+    const f = setup(); const printed = `예시입니다.\n\`\`\`\n${JSON.stringify({ server: "lab", method: "echo", args: { text: "example" } })}\n\`\`\``;
+    const model = new MockModel(() => reply(printed)); await model.start();
+    const result = await run(f, model);
+    expect(result, result.stderr).toMatchObject({ code: 1, timedOut: false });
+    expect(model.bodies).toHaveLength(2);
+    expect(result.stderr).toContain("no_action_limit");
+    expect(f.events().filter((event) => event.event === "call")).toEqual([]);
+    assertClosed(f);
+  }, 25_000);
+
+  it("keeps remote interaction approval in force on a recovered call", async () => {
+    const f = setup(["gated"]);
+    const model = new MockModel((turn) => turn === 1 ? reply(JSON.stringify({ server: "lab", method: "gated", args: {} }))
+      : turn === 2 ? mcp("gated", {}, "needs-approval") : reply("사용자 승인이 필요합니다")); await model.start();
+    const result = await run(f, model);
+    expect(result.code).toBe(0);
+    expect(model.bodies).toHaveLength(3);
+    expect(observations(model.bodies[2]!)[0]).toMatchObject({ ok: false, execution: "not_started", error: { code: "interaction_required" } });
+    expect(f.events().filter((event) => event.event === "call")).toEqual([]);
+    assertClosed(f);
+  }, 25_000);
+
+  it("does not replay an unknown execution when the model retries after format recovery", async () => {
+    const f = setup(["lose_ack"]);
+    const model = new MockModel((turn) => turn === 1 || turn === 3 ? mcp("lose_ack", {}, `lost-${turn}`)
+      : turn === 2 ? reply(JSON.stringify({ server: "lab", method: "lose_ack", args: {} })) : reply("이전 실행 여부를 확인할 수 없습니다")); await model.start();
+    const result = await run(f, model);
+    expect(result.code).toBe(0);
+    expect(model.bodies).toHaveLength(4);
+    expect(observations(model.bodies[1]!)[0]).toMatchObject({ ok: false, execution: "unknown" });
+    expect(observations(model.bodies[3]!)[1]).toMatchObject({ ok: false, execution: "not_started", error: { code: "previous_execution_unknown" } });
+    expect(f.events().filter((event) => event.event === "call")).toHaveLength(1);
+    assertClosed(f);
+  }, 25_000);
+
+  it("keeps completed observations when clarifying a later example without replaying it", async () => {
+    const f = setup(); const args = { text: "already done" };
+    const model = new MockModel((turn) => turn === 1 ? mcp("echo", args, "original")
+      : turn === 2 ? reply(JSON.stringify({ server: "lab", method: "echo", args })) : reply("이전 호출 예시이며 이미 완료됐습니다")); await model.start();
+    const result = await run(f, model);
+    expect(result.code).toBe(0);
+    expect(model.bodies).toHaveLength(3);
+    expect(observations(model.bodies[2]!)[0]).toMatchObject({ ok: true, execution: "completed" });
+    expect(model.bodies[2]!.messages.at(-1)?.content).toContain("Do not repeat completed writes");
+    expect(f.events().filter((event) => event.event === "call")).toHaveLength(1);
+    assertClosed(f);
+  }, 25_000);
+
   it("round-trips object arguments and reasoning with a stable nine-tool prefix, then closes its server", async () => {
     const f = setup(); const text = '한글 "quotes"\nC:\\temp\\x ${literal} `backtick`';
     const model = new MockModel((turn) => turn === 1 ? mcp("echo", { text }, "call-exact") : reply("MCP 응답 확인 완료")); await model.start();

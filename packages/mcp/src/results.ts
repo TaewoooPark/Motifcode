@@ -304,7 +304,7 @@ export class ResultStore {
     let firstText: string | undefined;
     let longestText = -1;
     let singleLine = false;
-    for (let i = 0; i < queue.length && i < 30; i++) {
+    for (let i = 0; i < queue.length && i < 64; i++) {
       const item = queue[i]!;
       if (typeof item.value === "string" && item.value.length > longestText) {
         firstText = item.pointer;
@@ -315,7 +315,10 @@ export class ResultStore {
         const entry: JsonValue = { pointer: item.pointer, type: typeOf(item.value), ...(typeof item.value === "string" ? { characters: item.value.length, lines: item.value.split("\n").length } : {}) };
         if (paths.length < 8 && byteSize({ ...result, paths: [...paths, entry] }) < this.outputBudget - 250) paths.push(entry);
       }
-      if (item.depth >= 3) continue;
+      // Composite action/observation results nest the actual text deeper than
+      // a plain MCP result. Reach that evidence instead of pointing at a short
+      // host guidance string; both traversal size and depth remain bounded.
+      if (item.depth >= 6) continue;
       const children = Array.isArray(item.value) ? item.value.slice(0, 4).map((v, index) => [String(index), v] as const)
         : isObject(item.value) ? Object.entries(item.value).slice(0, 8) : [];
       for (const [key, child] of children) queue.push({ value: child, pointer: `${item.pointer}/${pointerPart(key)}`, depth: item.depth + 1 });

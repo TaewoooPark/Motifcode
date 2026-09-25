@@ -1076,6 +1076,7 @@ export class Chat {
         system: (ch) => this.systemFor(ch),
         userTask: task,
         context: await this.opts.mcp?.prepare(task, abort.signal),
+        replyRecovery: (content) => this.opts.mcp?.replyRecovery(content),
         history: this.history,
         executor: this.executor,
         emit,
@@ -1267,8 +1268,8 @@ export class Chat {
       hooks: this.opts.hooks,
       skills: this.opts.skills,
       policy: policyForAgent({ root: cwd, tools: toolNames, readOnly: false }),
-      callMcp: this.opts.mcp ? (server, method, args, signal) => this.opts.mcp!.invoke(server, method, args, {
-        scopeId: "root", signal,
+      callMcp: this.opts.mcp ? (server, method, args, signal, observe) => this.opts.mcp!.invoke(server, method, args, {
+        scopeId: "root", signal, observe,
         confirmInteraction: (server, method, args) => this.confirm({ id: "mcp-interaction", name: "mcp", arguments: { server, method, args }, validated: true, repaired: false }, true).then((answer) => answer === "allow"),
       }) : undefined,
       confirm: (call) => this.confirm(call),
@@ -1296,8 +1297,8 @@ export class Chat {
           const childExecutor = new ToolExecutor({
             cwd: this.settings.cwd,
             skills: this.opts.skills,
-            callMcp: this.opts.mcp ? (server, method, args, signal) => this.opts.mcp!.invoke(server, method, args, {
-              scopeId: childScope.scopeId, signal,
+            callMcp: this.opts.mcp ? (server, method, args, signal, observe) => this.opts.mcp!.invoke(server, method, args, {
+              scopeId: childScope.scopeId, signal, observe,
               confirmInteraction: (server, method, args) => this.confirm({ id: "mcp-interaction", name: "mcp", arguments: { server, method, args }, validated: true, repaired: false }, true).then((answer) => answer === "allow"),
             }) : undefined,
             confirm: (call) => this.confirm(call),
@@ -1339,6 +1340,7 @@ export class Chat {
                 }),
               userTask: prompt,
               context: def.toolCount >= CORE_TOOL_NAMES.length && !def.readOnly ? await this.opts.mcp?.prepare(prompt, active.abort.signal, childScope.scopeId) : undefined,
+              replyRecovery: def.toolCount >= CORE_TOOL_NAMES.length && !def.readOnly ? (content) => this.opts.mcp?.replyRecovery(content) : undefined,
               executor: childExecutor,
               emit: childEmit,
               onCheckpoint: active.journal.checkpointFor(childScope),

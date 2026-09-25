@@ -55,7 +55,7 @@ export interface ExecutorOptions {
   /** Runs a subagent; supplied by the CLI so this module stays loop-agnostic. The call id lets it report progress against the parent's cell. */
   runAgent?: (agent: string, prompt: string, callId?: string) => Promise<SubagentOutcome>;
   /** Called for MCP proxy calls. Absent means no servers are connected. */
-  callMcp?: (server: string, method: string, args: unknown, signal?: AbortSignal) => Promise<string | ToolResult>;
+  callMcp?: (server: string, method: string, args: unknown, signal?: AbortSignal, observe?: () => Promise<ToolResult>) => Promise<string | ToolResult>;
   onHook?: (event: HookEvent, label: string, ok: boolean) => void;
   timeoutMs?: number;
   /**
@@ -458,6 +458,7 @@ export class ToolExecutor implements Executor {
 
   async run(call: ToolInvocation, signal?: AbortSignal): Promise<ToolResult> {
     const { cwd, hooks } = this.opts;
+    if (signal?.aborted) return { ok: false, output: "Tool call cancelled before execution." };
 
     // Policy first. A call the agent is not allowed to make should not reach a
     // hook, which might have side effects of its own.
@@ -480,6 +481,7 @@ export class ToolExecutor implements Executor {
       }
     }
 
+    if (signal?.aborted) return { ok: false, output: "Tool call cancelled before execution." };
     if (hooks) {
       const pre = await runHooks(hooks, {
         event: "PreToolUse",
@@ -494,9 +496,10 @@ export class ToolExecutor implements Executor {
       }
     }
 
+    if (signal?.aborted) return { ok: false, output: "Tool call cancelled before execution." };
     const result = await this.dispatch(call, signal);
 
-    if (hooks) {
+    if (hooks && !signal?.aborted) {
       const paths =
         call.name === "apply_patch"
           ? patchPaths(str(call.arguments, "patch"))
@@ -516,6 +519,10 @@ export class ToolExecutor implements Executor {
       // the model should see without it looking like the tool itself failed.
       const failed = post.filter((h) => !h.ok);
       if (failed.length > 0) {
+        // Bounded outputs are protocol envelopes, not free-form terminal text.
+        // Keep their JSON, result handles and execution state byte-for-byte;
+        // onHook above reports the independent post-processing failure.
+        if (result.bounded) return result;
         return {
           ok: result.ok,
           output: `${result.output}\n\n[hooks] ${failed.map((h) => `${h.label}: ${h.output}`).join("; ")}`,
@@ -646,8 +653,23 @@ export class ToolExecutor implements Executor {
         if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
           return { ok: false, output: "args must be an object" };
         }
+        const server = str(args, "server");
+        const method = str(args, "method");
+        let observed = false;
+        // A trusted profile may request one fixed observation. Re-enter the
+        // ordinary executor so no approval, policy or hook boundary is bypassed.
+        const observe = method === "browser_snapshot" ? undefined : async (): Promise<ToolResult> => {
+          if (observed) return { ok: false, output: "MCP snapshot observation was already attempted; no tool was dispatched." };
+          observed = true;
+          if (signal?.aborted) return { ok: false, output: "MCP snapshot observation cancelled before execution." };
+          return this.run({
+            id: `${call.id}-snapshot`, name: "mcp",
+            arguments: { server, method: "browser_snapshot", args: {} },
+            validated: true, repaired: false,
+          }, signal);
+        };
         try {
-          const outcome = await callMcp(str(args, "server"), str(args, "method"), parsed, signal);
+          const outcome = await callMcp(server, method, parsed, signal, observe);
           return typeof outcome === "string" ? { ok: true, output: outcome } : outcome;
         } catch (err) {
           return { ok: false, output: String(err) };

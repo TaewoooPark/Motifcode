@@ -47,6 +47,8 @@ export interface LoopCheckpoint {
   breakage: BudgetSnapshot;
   loopGuard: LoopGuardSnapshot;
   repairsThisTask: number;
+  /** Printed-arguments correction is task-wide; older journals start at zero. */
+  replyRepairs?: number;
   /** Normalised summary of a `done` awaiting confirmation, or null. */
   pendingDone: string | null;
   /**

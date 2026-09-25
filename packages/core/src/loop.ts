@@ -142,6 +142,13 @@ export interface LoopOptions {
    */
   replyEnds?: boolean;
   /**
+   * Optional, read-only check for arguments printed as prose in toolcall mode.
+   * Return corrective feedback, never an action. At most one extra model turn
+   * is requested per task, including across resume; normal gates still apply
+   * to whatever the model returns. Repeated ambiguous output is not success.
+   */
+  replyRecovery?: (content: string) => string | undefined;
+  /**
    * Challenge the first `done` and require a confirming second one.
    *
    * On by default: a hallucinated completion then costs one turn instead of
@@ -378,6 +385,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
 
   let turn = resume?.turn ?? 0;
   let repairsThisTask = resume?.repairsThisTask ?? 0;
+  let replyRepairs = resume?.replyRepairs ?? 0;
   // Consecutive turns that produced nothing, and the last tool output, so the
   // instruction sent after one of them can point at something concrete instead
   // of repeating itself.
@@ -414,6 +422,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
       breakage: budget.capture(),
       loopGuard: guard.capture(),
       repairsThisTask,
+      replyRepairs,
       pendingDone,
       nextCallSequence: callSequence,
       transportErrors,
@@ -655,6 +664,24 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
         (channel === "toolcall" &&
           (looksLikeLeakedToolCall(parseToolCalls(split.content, ctx)) ||
             contentLeaksToolCall(split.content, ctx)));
+      const recovery = channel === "toolcall" && !leaked && response.finishReason !== "length"
+        ? opts.replyRecovery?.(split.content) : undefined;
+      if (recovery !== undefined) {
+        if (replyRepairs >= 1) {
+          session.appendAll(codec.serializeAssistant(split.content, split.reasoning, parsed));
+          checkpoint();
+          const summary = "The model still returned tool arguments as prose after one recovery attempt. No call was dispatched from that response; check earlier tool results before trying again.";
+          emit({ type: "notice", level: "warn", text: summary });
+          return finish("no_action_limit", summary);
+        }
+        replyRepairs++;
+        pendingDone = null;
+        handBack(recovery);
+        emit({ type: "repair", kind: "parse", reason: "unexecuted tool arguments", attempt: replyRepairs, max: 1 });
+        await lifecycle("OnRepair", "unexecuted tool arguments");
+        checkpoint();
+        continue;
+      }
       if (replyEnds && !leaked && response.finishReason !== "length") {
         session.appendAll(codec.serializeAssistant(split.content, split.reasoning, parsed));
         checkpoint();

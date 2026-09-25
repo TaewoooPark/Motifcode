@@ -136,7 +136,42 @@ For large results, the host can also select up to six literal terms from the ori
 
 Handles are not files. They are scoped to a conversation or child, expire after 15 minutes and can be evicted (64 entries, 32 MiB total, 8 MiB per original result). They do not survive process restart/resume. A missing handle is not permission to repeat a write. Character offsets use UTF-16 units; pagination does not split a surrogate pair. Exact-match counts establish only that literal predicate over the visible projection, not global business success.
 
-The adapter validates the original JSON Schema locally, without coercion, injected defaults or fetching external references. Invalid arguments never reach the remote tool. Error responses distinguish `not_started`, `completed` and `unknown`. Business `isError` is a failed tool result, even when the transport succeeded. Calls are never automatically retried; identical in-flight/unknown calls are blocked across child scopes for the lifetime of the manager. Reconcile an unknown write with an independent read or with the service operator.
+The adapter validates the original JSON Schema locally, without coercion, injected defaults or fetching external references. Invalid arguments never reach the remote tool. Error responses distinguish `not_started`, `completed` and `unknown`. Business `isError` is a failed tool result, even when the transport succeeded. The adapter never automatically replays a remote call; identical in-flight/unknown calls are blocked across child scopes for the lifetime of the manager. This ledger is in memory, not durable across process restarts. Reconcile an unknown write with an independent read or with the service operator.
+
+### Bounded format recovery
+
+In the default `toolcall` channel, Motif-3 occasionally prints `{server, method, args}` as an answer instead of calling `mcp`. A strict detector recognizes complete JSON objects or JSON/bare Markdown fences for tools in the already-allowed catalog. It does not execute, repair or translate that text. Instead, the loop asks the model once to issue a proper call if the original task authorizes an unfinished action, or to explain in ordinary prose if it was only an example. The next call still passes the usual schema, policy and human-approval checks.
+
+The one-attempt budget belongs to the task and is saved in its checkpoint. Successful tool calls, context compaction and resume do not replenish it. Existing cancellation and turn limits apply. If the model again returns invocation-shaped JSON, the task stops as `no_action_limit` with a visible explanation. Ordinary responses add no model round trip. A legitimate JSON example matching this narrow shape can incur one clarification; it is never executed by the detector. The experimental `object` and `raw` channels do not use this recovery.
+
+This handles an unissued call, not an unknown remote outcome. Invalid arguments can already be corrected by the model using the returned schema/error. A completed business error may have partial effects, and a lost response may hide a completed write; neither authorizes a blind retry. Recovery guidance explicitly retains the earlier results and warns against repeating completed or unknown writes.
+
+### Playwright profile
+
+Opt into `"profile":"playwright"` on a trusted Playwright server entry to pair browser actions with one fresh `browser_snapshot({})` observation. Both arrive in the same model turn, avoiding a separate model request just to retrieve the screen. This profile does not add native tools or change remote arguments. For the tested `@playwright/mcp@0.0.82`, the recommended server configuration is:
+
+```json
+{
+  "servers": [{
+    "id": "playwright",
+    "enabled": true,
+    "transport": "stdio",
+    "profile": "playwright",
+    "command": "npx",
+    "args": ["-y", "@playwright/mcp@0.0.82", "--headless", "--isolated", "--browser", "chrome", "--image-responses", "omit", "--snapshot-mode", "none", "--codegen", "none"]
+  }]
+}
+```
+
+In default `prefetch` mode, a clear browser form-filling request prioritizes the original navigate, fill_form and click schemas, within the existing three-card/byte budget. This prevents names mentioned in a prohibition (such as “do not use browser_evaluate”) from crowding out the form contract. It only selects tools already in the allowed catalog and never dispatches them. If multiple Playwright profiles exist, a single explicitly quoted server ID is required to choose one; ambiguous tasks keep ordinary search ranking. Unavailable tools are skipped, and absence of all three falls back to ordinary search. `catalog` and `search` comparison modes are unchanged. This is a narrow prefetch heuristic, not a natural-language permission interpreter.
+
+The supported [`snapshot-mode` and `codegen` settings](https://github.com/microsoft/playwright-mcp#configuration) remove the automatic snapshot file and echoed code. An explicit `browser_snapshot({})` still supplies inline accessibility text. Motifcode does not silently change your configured server arguments. Without these flags, the profile still observes but can duplicate the server's snapshot work.
+
+The observation re-enters the ordinary executor: allowlists, execution policy, per-method confirmation, hooks, original-schema validation and mandatory interaction approval all remain in force. The profile must be explicitly configured; a server's read-only annotation alone never enables it. If `browser_snapshot` is missing, denied, cancelled or fails, a completed action remains completed and is not replayed. Unknown/not-started actions have no automatic follow-up. The separate observation outcome is retained in the result and visible in the journal; it is not counted as another model-generated tool call.
+
+A failing non-blocking `PostToolUse` hook cannot append plain text to a bounded MCP envelope: the original JSON, execution state and snapshot references remain intact. Hook failure still emits the existing `onHook` event for connected UI/journal consumers; callers without that callback do not receive the hook detail in model-facing MCP output.
+
+This covers navigate/back, click, fill_form, type, press_key and select_option. A completed business error can also be followed by a snapshot to show the actual state; the original error remains an error. Snapshot reads never trigger another snapshot. The runtime guidance explains bare reference values, numeric `spinbutton` inputs using the schema's `textbox` fill type, filling related fields together, and checking actual values before submission. It does not invent selectors or rewrite field values. Oversized combined results keep bounded handles and point to the nested snapshot text for retrieval. Other MCP servers retain the generic behavior.
 
 Validation errors include bounded field paths, missing/additional property names and expected types. A complete original input schema is included when it is at most 8,000 bytes and fits the response budget; otherwise a concrete `describe` call guides recovery. A schema-change error omits the previously fetched stale schema. No automatic corrected call is made.
 

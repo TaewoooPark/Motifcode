@@ -16,7 +16,9 @@ interface GradeSpec {
   files?: { path: string; equals: string }[];
   requiredMcpMethods?: { server: string; method: string }[];
   forbiddenCoreTools?: string[];
+  forbiddenMcpMethods?: { server: string; method: string }[];
   finalIncludes?: string[];
+  finalIncludesAny?: string[][];
   memory?: { file: string; entities?: Record<string, unknown>[]; relations?: Record<string, unknown>[] };
 }
 interface ToolTrace {
@@ -66,12 +68,14 @@ function grade(spec: GradeSpec, cwd: string, tools: ToolTrace[], final: string):
   checks.push({ name: "at least one successful remote MCP call", passed: successfulMcp.length > 0 });
   for (const expected of spec.requiredMcpMethods ?? []) checks.push({ name: `MCP ${expected.server}/${expected.method}`, passed: successfulMcp.some((tool) => tool.arguments.server === expected.server && tool.arguments.method === expected.method) });
   for (const forbidden of spec.forbiddenCoreTools ?? ["bash", "write", "apply_patch", "read", "term", "task", "skill"]) checks.push({ name: `no native ${forbidden} shortcut`, passed: !tools.some((tool) => tool.name === forbidden) });
+  for (const forbidden of spec.forbiddenMcpMethods ?? []) checks.push({ name: `no MCP ${forbidden.server}/${forbidden.method} shortcut`, passed: !tools.some((tool) => tool.name === "mcp" && tool.arguments.server === forbidden.server && tool.arguments.method === forbidden.method) });
   for (const expected of spec.files ?? []) {
     const file = within(cwd, expected.path);
     const actual = existsSync(file) ? readFileSync(file, "utf8") : undefined;
     checks.push({ name: `exact file ${expected.path}`, passed: actual === expected.equals, detail: actual === undefined ? "missing" : `${Buffer.byteLength(actual)} UTF-8 bytes` });
   }
   for (const expected of spec.finalIncludes ?? []) checks.push({ name: `final answer includes ${expected}`, passed: final.includes(expected) });
+  for (const alternatives of spec.finalIncludesAny ?? []) checks.push({ name: `final answer includes one of ${alternatives.join(" | ")}`, passed: alternatives.some((expected) => final.includes(expected)) });
   if (spec.memory) {
     const file = within(cwd, spec.memory.file);
     let records: Record<string, unknown>[] = [];
@@ -86,7 +90,7 @@ function grade(spec: GradeSpec, cwd: string, tools: ToolTrace[], final: string):
 async function main(): Promise<void> {
   const flags = argsFor(process.argv.slice(2));
   if (flags.has("help")) {
-    process.stdout.write("Usage: pnpm exec tsx scripts/mcp-live-eval.ts --config FILE --cwd SCRATCH --task-file FILE --output FILE [--grade-file FILE] [--mode prefetch|catalog|search] [--seed 101] [--max-turns 6] [--timeout-ms 300000] [--max-output-tokens 4096]\n");
+    process.stdout.write("Usage: pnpm exec tsx scripts/mcp-live-eval.ts --config FILE --cwd SCRATCH --task-file FILE --output FILE [--grade-file FILE] [--mode prefetch|catalog|search] [--seed 101] [--max-turns 6] [--timeout-ms 300000] [--max-output-tokens 4096] [--replay-first-content FILE]\nThe replay option injects one recorded prose response, then uses the live model. Evidence labels it separately; it is not a natural live trial.\n");
     return;
   }
   for (const required of ["config", "cwd", "output"]) if (!flags.has(required)) throw new Error(`--${required} is required`);
@@ -101,6 +105,8 @@ async function main(): Promise<void> {
   const seed = boundedNumber(flags.get("seed"), 101, 0, 2147483647);
   const timeout = boundedNumber(flags.get("timeout-ms"), 300000, 1000, 900000);
   const maxOutputTokens = boundedNumber(flags.get("max-output-tokens"), 4096, 128, 16384);
+  const replayContent = flags.has("replay-first-content") ? readFileSync(resolve(flags.get("replay-first-content")!), "utf8") : undefined;
+  if (replayContent !== undefined && (!replayContent.trim() || replayContent.length > 65_536)) throw new Error("Replay content must be non-empty and at most 65536 characters");
   const spec: GradeSpec = flags.has("grade-file") ? JSON.parse(readFileSync(resolve(flags.get("grade-file")!), "utf8")) as GradeSpec : {};
   mkdirSync(cwd, { recursive: true });
   mkdirSync(dirname(output), { recursive: true });
@@ -134,8 +140,13 @@ async function main(): Promise<void> {
       const at = Date.now();
       const index = requests.length + 1;
       if (index > maxTurns) throw new Error("Evaluation request budget exceeded");
-      const item: Record<string, unknown> = { index, startedMs: at - started };
+      const replay = index === 1 && replayContent !== undefined;
+      const item: Record<string, unknown> = { index, startedMs: at - started, source: replay ? "replayed_content" : "live_model" };
       requests.push(item);
+      if (replay) {
+        Object.assign(item, { elapsedMs: 0, finishReason: "stop", contentCharacters: replayContent.length, nativeToolCallCount: 0 });
+        return { content: replayContent, reasoningContent: "", rawText: replayContent, ms: 0, finishReason: "stop" };
+      }
       try {
         const response = await http.complete({ ...request, onDelta: (delta) => {
           if (item.firstDeltaMs === undefined && (delta.reasoning || delta.content || delta.tool)) item.firstDeltaMs = Date.now() - at;
@@ -163,7 +174,7 @@ async function main(): Promise<void> {
   const executor = new ToolExecutor({
     cwd,
     policy: policyForAgent({ root: cwd, tools: [...CORE_TOOL_NAMES], readOnly: false }),
-    callMcp: (server, method, values, signal) => session.invoke(server, method, values, { scopeId: "evaluation-root", signal }),
+    callMcp: (server, method, values, signal, observe) => session.invoke(server, method, values, { scopeId: "evaluation-root", signal, observe }),
   });
   let summary = "", reason = "harness_error", turns = 0, fatal: string | undefined;
   let contextBytes = 0;
@@ -174,6 +185,7 @@ async function main(): Promise<void> {
       transport, tools: [...CORE_TOOLS],
       system: (channel) => buildSystemPrompt({ mode: "chat", channel, tools: [...CORE_TOOLS], cwd }),
       userTask: task, context, executor, emit,
+      replyRecovery: (content) => session.replyRecovery(content),
       scopeId: "evaluation-root", repo: { cwd }, channel: "toolcall", channelPolicy: "fixed",
       maxTurns, maxServerRetries: 0, maxOutputTokens, seed, temperature: 1, topP: 0.95,
       replyEnds: true, confirmDone: false, stream: true, signal: controller.signal,
@@ -190,15 +202,16 @@ async function main(): Promise<void> {
   const report = {
     version: 1, timestamp: new Date().toISOString(), model: connection.model, node: process.version, source,
     mode, seed, task, configSha256: createHash("sha256").update(configText).digest("hex"),
-    servers: config.servers.map((server) => ({ id: server.id, transport: server.transport, protocol: server.protocol })),
+    ...(replayContent !== undefined ? { faultInjection: { kind: "replay_first_content", sha256: createHash("sha256").update(replayContent).digest("hex"), characters: replayContent.length } } : {}),
+    servers: config.servers.map((server) => ({ id: server.id, transport: server.transport, protocol: server.protocol, ...(server.profile ? { profile: server.profile } : {}) })),
     nativeTools: CORE_TOOL_NAMES, maxTurns, maxOutputTokens, timeoutMs: timeout,
-    elapsedMs: Date.now() - started, contextBytes, requests, usage: { ...totals, perTurn: usages },
+    elapsedMs: Date.now() - started, contextBytes, requests, liveModelRequests: requests.filter((request) => request.source === "live_model").length, usage: { ...totals, perTurn: usages },
     reasoningCharacters, toolTrace, failures, finalAnswer: summary, reason, turns,
     ...(fatal ? { fatal } : {}), grade: { ...grading, passed: reason === "done" && !fatal && grading.passed },
     limitations: ["No reasoning text is recorded.", "A successful model answer alone is insufficient: grade checks remote MCP tool traces and supplied ground truth.", "Usage totals include only reported successful response usage; absent usage is not proven zero cost."],
   };
   writeFileSync(output, redact(JSON.stringify(report, null, 2)) + "\n", { mode: 0o600 });
-  process.stdout.write(JSON.stringify({ output, reason, requests: requests.length, remoteMcpCalls: toolTrace.filter((call) => call.name === "mcp" && call.arguments.server !== HOST_SERVER_ID).length, passed: report.grade.passed, elapsedMs: report.elapsedMs }) + "\n");
+  process.stdout.write(JSON.stringify({ output, reason, requests: requests.length, modelMcpDispatches: toolTrace.filter((call) => call.name === "mcp" && call.arguments.server !== HOST_SERVER_ID).length, passed: report.grade.passed, elapsedMs: report.elapsedMs }) + "\n");
   if (!report.grade.passed) process.exitCode = 1;
 }
 
