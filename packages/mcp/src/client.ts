@@ -40,6 +40,8 @@ export class McpConnection {
   private readonly transport: Transport;
   private readonly lifetime = new AbortController();
   private closePromise?: Promise<void>;
+  private opening = false;
+  private startupAuthError?: McpClientError;
   private generation = 0;
   private cached?: { tools: Tool[]; expires: number; generation: number };
   closed = false;
@@ -58,11 +60,24 @@ export class McpConnection {
         cwd: config.cwd, env: config.env, stderr: 'ignore', maxBufferSize: 10 * 1024 * 1024 });
     } else {
       const url = new URL(config.url!);
-      const guardedFetch: typeof fetch = (input, init) => {
+      const guardedFetch: typeof fetch = async (input, init) => {
         const destination = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
         if (destination.origin !== url.origin) return Promise.reject(new McpClientError('origin_changed', 'MCP request crossed the configured origin.'));
         const signals = [this.lifetime.signal, ...(init?.signal ? [init.signal] : [])];
-        return fetchImpl(input, { ...init, redirect: 'error', signal: AbortSignal.any(signals) });
+        const response = await fetchImpl(input, { ...init, redirect: 'error', signal: AbortSignal.any(signals) });
+        if (response.status === 401 || response.status === 403) {
+          // Only HTTP status is trusted here; never surface response bodies,
+          // authentication challenges, URLs, or credential-bearing headers.
+          const error = response.status === 401
+            ? new McpClientError('authentication_required', 'MCP credentials are missing, expired, or rejected. OAuth login and refresh are not supported; configure an environment-backed authentication header and reconnect.')
+            : new McpClientError('permission_denied', 'The MCP server denied access (HTTP 403). Check account permissions and credential scopes; OAuth login and refresh are not supported.');
+          if (this.opening) this.startupAuthError = error;
+          // Discard the unread body before throwing so failed HTTP responses
+          // cannot retain a connection or copy server-controlled diagnostics.
+          await response.body?.cancel().catch(() => {});
+          throw error;
+        }
+        return response;
       };
       const options = { requestInit: { headers: config.headers, redirect: 'error' as const }, fetch: guardedFetch };
       this.transport = config.transport === 'sse'
@@ -75,9 +90,16 @@ export class McpConnection {
 
   async open(signal?: AbortSignal): Promise<void> {
     const ms = this.config.startupTimeoutMs ?? 10_000;
+    this.opening = true;
     try {
       await deadline(ms, signal, abortSignal => this.client.connect(this.transport, { signal: abortSignal, timeout: ms, maxTotalTimeout: ms }), () => { void this.close(); });
-    } catch (error) { await this.close(); throw error; }
+    } catch (error) {
+      // Legacy SSE EventSource wraps fetch failures. Preserve only the fixed
+      // diagnostic captured at our HTTP boundary, without replacing deadlines.
+      const diagnostic = error instanceof McpClientError ? error : this.startupAuthError ?? error;
+      await this.close();
+      throw diagnostic;
+    } finally { this.opening = false; this.startupAuthError = undefined; }
   }
 
   invalidate(): void { this.generation++; this.cached = undefined; }
