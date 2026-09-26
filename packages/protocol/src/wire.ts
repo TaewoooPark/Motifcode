@@ -50,6 +50,15 @@ export interface StreamDelta {
   tool?: string;
 }
 
+/** Provider-reported charge for one request, never a token-price estimate. */
+export interface ReportedCost {
+  provider: "infron";
+  unit: "credits";
+  amount: number;
+  /** Documented numeric charge components only. */
+  details?: Record<string, number>;
+}
+
 export interface CompletionResponse {
   /** Assistant text with reasoning already separated, when the server did it. */
   content: string;
@@ -75,6 +84,7 @@ export interface CompletionResponse {
     completionTokens?: number;
     /** Prompt tokens the server says it served from its prefix cache, when it says. */
     cachedTokens?: number;
+    reportedCost?: ReportedCost;
   };
   /** Wall-clock for the request, used for the tok/s readout. */
   ms: number;

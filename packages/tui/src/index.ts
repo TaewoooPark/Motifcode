@@ -9,5 +9,6 @@ export * from "./theme.js";
 export * from "./keys.js";
 export * from "./composer.js";
 export * from "./menu.js";
+export * from "./panel.js";
 export * from "./mention.js";
 export * from "./screen.js";

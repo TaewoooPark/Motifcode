@@ -66,6 +66,11 @@ describe("key decoding", () => {
     ]);
   });
 
+  it("decodes transcript paging keys even across input chunks", () => {
+    expect(decode(`${ESC}[5~${ESC}[6~`)).toEqual([{ type: "page-up" }, { type: "page-down" }]);
+    expect(decode(`${ESC}[`, "5", "~")).toEqual([{ type: "page-up" }]);
+  });
+
   it("treats a lone escape as the Escape key", () => {
     expect(decode(ESC)).toEqual([{ type: "escape" }]);
     expect(decode(`${ESC}x`)).toEqual([{ type: "escape" }, { type: "text", text: "x" }]);

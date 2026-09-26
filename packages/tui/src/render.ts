@@ -15,7 +15,7 @@
 
 import type { Cell, ViewState } from "./cells.js";
 import { sanitize } from "./sanitize.js";
-import { displayWidth, truncateEndToWidth, truncateToWidth } from "./width.js";
+import { displayWidth, truncateEndToWidth, truncateToWidth, wrapToWidth } from "./width.js";
 
 export interface RenderOptions {
   width: number;
@@ -28,7 +28,7 @@ export interface RenderOptions {
    * and dim, for anyone debugging what the model was doing.
    */
   showThinking?: boolean;
-  /** Cap on tool output lines shown inline. */
+  /** Cap on physical tool-output rows shown inline; Infinity expands all output. */
   outputLines?: number;
   /**
    * The working directory, so a path under it is shown relative to it.
@@ -57,7 +57,7 @@ export interface StyledLine {
   tone: Tone;
 }
 
-const DEFAULTS = { outputLines: 6 };
+const DEFAULTS = { outputLines: 3 };
 
 /** The bullet before the model's prose and each of its tool calls. */
 export const BULLET = "⏺";
@@ -86,10 +86,25 @@ function rule(label: string, width: number, trailing = ""): string {
   return head + "─".repeat(fill) + tail;
 }
 
-function clip(text: string, maxLines: number): { lines: string[]; hidden: number } {
-  const all = text.replace(/\s+$/, "").split("\n");
-  if (all.length <= maxLines) return { lines: all, hidden: 0 };
-  return { lines: all.slice(0, maxLines), hidden: all.length - maxLines };
+/** A notice must not turn a tiny preview into many terminal rows itself. */
+function compactLine(candidates: string[], width: number): string {
+  return candidates.find((text) => displayWidth(text) <= width) ?? truncateToWidth(candidates.at(-1) ?? "", width);
+}
+
+/** Budget the safe, decorated physical rows, not the source's newline count. */
+function toolPreview(lines: StyledLine[], maxRows: number, opts: RenderOptions): StyledLine[] {
+  const width = Math.max(1, opts.width);
+  const rows = lines.flatMap((l) => wrapToWidth(sanitize(l.text), width).map((text) => ({ text, tone: l.tone })));
+  const shown = rows.slice(0, maxRows);
+  const hidden = rows.length - shown.length;
+  if (hidden > 0) {
+    const count = `… +${hidden} lines`;
+    const choices = opts.showShortcuts
+      ? [`     ${count} (ctrl-o to expand)`, `${count} · ctrl-o`, `+${hidden} · ctrl-o`, `+${hidden}`]
+      : [`     ${count}`, count, `+${hidden}`];
+    shown.push(line(compactLine(choices, width), "dim"));
+  }
+  return shown;
 }
 
 /** `s` with every mention of the working directory shortened to a relative path. */
@@ -130,7 +145,7 @@ function toolHead(cell: Extract<Cell, { kind: "tool" }>, width: number, cwd?: st
   const suffix = cell.repaired ? " · repaired" : "";
   const room = Math.max(8, width - displayWidth(`${BULLET} ${title}()${suffix}`));
   const arg = truncateToWidth(headArg(cell.name, cell.args, cwd), room);
-  return `${BULLET} ${title}(${arg})${suffix}`;
+  return truncateToWidth(sanitize(`${BULLET} ${title}(${arg})${suffix}`).replace(/\n/g, " "), Math.max(1, width));
 }
 
 /** Result lines under a bullet: the first behind `⎿`, the rest aligned to it. */
@@ -178,15 +193,11 @@ export function proseLines(text: string, firstPrefix: string, restPrefix = "  ")
 }
 
 /** A unified diff's lines, toned: additions, removals, hunk headers. */
-function diffLines(patch: string, max: number): StyledLine[] {
-  const all = patch.replace(/\s+$/, "").split("\n");
-  const shown = all.slice(0, max);
-  const out = shown.map((l) => {
+function diffLines(patch: string): StyledLine[] {
+  return sanitize(patch).replace(/[ \t\n]+$/, "").split("\n").map((l) => {
     const tone: Tone = l.startsWith("+++") || l.startsWith("---") ? "dim" : l.startsWith("+") ? "ok" : l.startsWith("-") ? "bad" : l.startsWith("@@") ? "dim" : "plain";
     return line(`     ${l}`, tone);
   });
-  if (all.length > max) out.push(line(`     … +${all.length - max} lines`, "dim"));
-  return out;
 }
 
 /**
@@ -211,7 +222,8 @@ function line(text: string, tone: Tone = "plain"): StyledLine {
 
 function renderCellRaw(cell: Cell, opts: RenderOptions): StyledLine[] {
   const width = opts.width;
-  const outputLines = opts.outputLines ?? DEFAULTS.outputLines;
+  const expanded = opts.outputLines === Infinity;
+  const outputLines = expanded ? Infinity : Math.max(0, Math.floor(Number.isFinite(opts.outputLines) ? opts.outputLines! : DEFAULTS.outputLines));
   const blank = line("");
 
   switch (cell.kind) {
@@ -257,25 +269,21 @@ function renderCellRaw(cell: Cell, opts: RenderOptions): StyledLine[] {
       const out: StyledLine[] = [line(toolHead(cell, width, opts.cwd), "bullet")];
       // A patch is worth seeing as a diff, whatever it did.
       if (cell.name === "apply_patch" && typeof cell.args["patch"] === "string") {
-        out.push(...diffLines(cell.args["patch"], Math.max(outputLines, 12)));
+        out.push(...toolPreview(diffLines(cell.args["patch"]), outputLines, opts));
       }
       if (cell.ok === undefined) {
-        out.push(line(`  ${RESULT}  Running…${cell.progress ? ` · ${cell.progress}` : ""}`, "dim"));
-      } else if (!cell.ok) {
-        const { lines, hidden } = clip(cell.output ?? "", outputLines);
-        const body = lines.length > 0 && lines[0] !== "" ? lines : ["(failed)"];
-        out.push(...results([`Error: ${body[0]}`, ...body.slice(1)]).map((l) => line(l, "bad")));
-        if (hidden > 0) out.push(line(`     … +${hidden} lines`, "dim"));
-      } else if (cell.name === "read") {
-        // The model read it; the person does not need it dumped again. A count
-        // says the call worked, and the file is a `cat` away.
+        out.push(...toolPreview([line(`  ${RESULT}  Running…${cell.progress ? ` · ${cell.progress}` : ""}`, "dim")], outputLines, opts));
+      } else if (cell.ok && cell.name === "read" && !expanded) {
+        // Keep the compact count until the person asks to inspect the content.
         const count = (cell.output ?? "").replace(/\s+$/, "").split("\n").filter((l) => l !== "").length;
-        out.push(line(`  ${RESULT}  Read ${count} line${count === 1 ? "" : "s"}`, "dim"));
+        const summary = `  ${RESULT}  Read ${count} line${count === 1 ? "" : "s"}`;
+        const choices = opts.showShortcuts ? [`${summary} (ctrl-o to expand)`, `${summary} · ctrl-o`, summary] : [summary];
+        out.push(line(compactLine(choices, Math.max(1, width)), "dim"));
       } else {
-        const { lines, hidden } = clip(cell.output ?? "", outputLines);
-        const body = lines.length > 0 && lines[0] !== "" ? lines : ["(no output)"];
-        out.push(...results(body).map((l) => line(l, "dim")));
-        if (hidden > 0) out.push(line(`     … +${hidden} lines${opts.showShortcuts ? " (ctrl-o to expand)" : ""}`, "dim"));
+        const body = sanitize(cell.output ?? "").replace(/[ \t\n]+$/, "").split("\n");
+        if (body.length === 1 && body[0] === "") body[0] = cell.ok ? "(no output)" : "(failed)";
+        if (!cell.ok) body[0] = `Error: ${body[0]}`;
+        out.push(...toolPreview(results(body).map((l) => line(l, cell.ok ? "dim" : "bad")), outputLines, opts));
       }
       // A hook that passed is silent, as in Claude Code; one that failed is
       // the thing the person needs to see.
@@ -300,7 +308,7 @@ function renderCellRaw(cell: Cell, opts: RenderOptions): StyledLine[] {
       return [line(`⇄ channel ${cell.from} → ${cell.to} · ${cell.reason}`, "warn"), blank];
 
     case "queue":
-      return [line(`${BULLET} Task(${cell.agent}) · ${cell.state}`, "dim"), blank];
+      return [line(`${BULLET} Task(${cell.agent}) · ${cell.state}`, cell.state === "failed" ? "bad" : "dim"), blank];
 
     case "notice": {
       const mark = cell.level === "error" ? "✗" : cell.level === "warn" ? "!" : "·";

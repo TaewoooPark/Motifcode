@@ -34,10 +34,11 @@ import {
   type CompletionRequest,
   type CompletionResponse,
   type Message,
+  type ReportedCost,
   type StreamDelta,
   type ToolCall,
 } from "@motifcode/protocol";
-import { normalizeEndpoint } from "./config.js";
+import { isInfronEndpoint, normalizeEndpoint } from "./config.js";
 
 export type { CompletionRequest, CompletionResponse };
 
@@ -303,12 +304,14 @@ export function requestUrl(req: CompletionRequest, endpoint: string): string {
 export class HttpTransport implements Transport {
   readonly endpoint: string;
   readonly model: string;
+  private readonly infronAccounting: boolean;
   private readonly apiKey?: string;
   private readonly fetchImpl: typeof fetch;
   private readonly requestTimeoutMs: number;
 
   constructor(opts: HttpTransportOptions) {
     this.endpoint = normalizeEndpoint(opts.endpoint);
+    this.infronAccounting = isInfronEndpoint(opts.endpoint);
     this.model = opts.model;
     this.apiKey = opts.apiKey;
     this.fetchImpl = opts.fetchImpl ?? globalThis.fetch;
@@ -319,6 +322,7 @@ export class HttpTransport implements Transport {
     const started = Date.now();
     const url = requestUrl(req, this.endpoint);
     const body = requestBody(req, this.model);
+    if (this.infronAccounting) body["usage"] = { include: true };
 
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (this.apiKey) headers["authorization"] = `Bearer ${this.apiKey}`;
@@ -394,6 +398,8 @@ export class HttpTransport implements Transport {
 
     let json: {
       choices?: ChatChoice[];
+      cost?: unknown;
+      cost_details?: unknown;
       usage?: Record<string, unknown> & { prompt_tokens_details?: { cached_tokens?: number } };
     };
     // A server — or a proxy in front of one — may answer a streaming request
@@ -445,6 +451,7 @@ export class HttpTransport implements Transport {
     // prefix cache. That is the first direct measurement this harness has had
     // of the thing its frozen tool order exists to protect, so it is kept.
     const cached = json.usage?.prompt_tokens_details?.cached_tokens;
+    const cost = this.infronAccounting ? parseCost(json) : undefined;
     return {
       content,
       ...(reasoning !== undefined && reasoning !== null ? { reasoningContent: reasoning } : {}),
@@ -455,6 +462,7 @@ export class HttpTransport implements Transport {
         promptTokens: numberOr(json.usage?.["prompt_tokens"]),
         completionTokens: numberOr(json.usage?.["completion_tokens"]),
         ...(typeof cached === "number" ? { cachedTokens: cached } : {}),
+        ...(cost ? { reportedCost: { provider: "infron" as const, unit: "credits" as const, ...cost } } : {}),
       },
       ms: Date.now() - started,
     };
@@ -465,7 +473,28 @@ function numberOr(v: unknown): number | undefined {
   return typeof v === "number" ? v : undefined;
 }
 
+// Infron documents these top-level fields. Do not keep arbitrary metadata
+// (including strings) from a provider response in journals or usage displays.
+const COST_DETAIL_KEYS = [
+  "audio_cost", "cache_prompt_cost", "cache_write_cost", "generation_cost",
+  "image_cost", "input_prompt_cost", "output_prompt_cost", "tools_cost", "video_cost",
+] as const;
+
+function parseCost(raw: { cost?: unknown; cost_details?: unknown }): Pick<ReportedCost, "amount" | "details"> | undefined {
+  if (typeof raw.cost !== "number" || !Number.isFinite(raw.cost) || raw.cost < 0) return undefined;
+  const details: Record<string, number> = {};
+  if (typeof raw.cost_details === "object" && raw.cost_details !== null && !Array.isArray(raw.cost_details)) {
+    for (const key of COST_DETAIL_KEYS) {
+      const value = (raw.cost_details as Record<string, unknown>)[key];
+      if (typeof value === "number" && Number.isFinite(value) && value >= 0) details[key] = value;
+    }
+  }
+  return { amount: raw.cost, ...(Object.keys(details).length > 0 ? { details } : {}) };
+}
+
 interface StreamChunk {
+  cost?: unknown;
+  cost_details?: unknown;
   choices?: {
     delta?: {
       content?: string | null;
@@ -492,7 +521,7 @@ async function readStream(
   res: Response,
   onDelta: (d: StreamDelta) => void,
   signal: AbortSignal | undefined,
-): Promise<{ choices?: ChatChoice[]; usage?: Record<string, unknown> & { prompt_tokens_details?: { cached_tokens?: number } } }> {
+): Promise<{ choices?: ChatChoice[]; cost?: number; cost_details?: Record<string, number>; usage?: Record<string, unknown> & { prompt_tokens_details?: { cached_tokens?: number } } }> {
   if (!res.body) throw new TransportError("server sent no body to stream", { kind: "protocol" });
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
@@ -502,6 +531,7 @@ async function readStream(
   let sawReasoning = false;
   let finish: string | undefined;
   let usage: Record<string, unknown> | undefined;
+  let cost: Pick<ReportedCost, "amount" | "details"> | undefined;
   const calls = new Map<number, { id?: string; name: string; arguments: string }>();
 
   const handle = (line: string): boolean => {
@@ -516,7 +546,11 @@ async function readStream(
       // for shape by the caller.
       return false;
     }
+    if (typeof chunk !== "object" || chunk === null) return false;
     if (chunk.usage) usage = chunk.usage;
+    // Accounting may arrive after finish_reason, in a chunk with no choices.
+    // Each value is a request total: keep the last valid report, never sum it.
+    cost = parseCost(chunk) ?? cost;
     const choice = chunk.choices?.[0];
     if (!choice) return false;
     if (choice.finish_reason) finish = choice.finish_reason;
@@ -545,6 +579,7 @@ async function readStream(
     return false;
   };
 
+  let finished = false;
   for (;;) {
     if (signal?.aborted) {
       await reader.cancel().catch(() => undefined);
@@ -554,16 +589,18 @@ async function readStream(
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
     let nl = buffer.indexOf("\n");
-    let finished = false;
     while (nl !== -1) {
       const line = buffer.slice(0, nl).replace(/\r$/, "");
       buffer = buffer.slice(nl + 1);
-      if (handle(line)) finished = true;
+      if (handle(line)) {
+        finished = true;
+        break;
+      }
       nl = buffer.indexOf("\n");
     }
     if (finished) break;
   }
-  if (buffer.trim() !== "") handle(buffer.trim());
+  if (!finished && buffer.trim() !== "") handle(buffer.trim());
 
   const toolCalls = [...calls.entries()]
     .sort((a, b) => a[0] - b[0])
@@ -579,6 +616,7 @@ async function readStream(
         ...(finish !== undefined ? { finish_reason: finish } : {}),
       },
     ],
+    ...(cost ? { cost: cost.amount, ...(cost.details ? { cost_details: cost.details } : {}) } : {}),
     ...(usage ? { usage: usage as Record<string, unknown> & { prompt_tokens_details?: { cached_tokens?: number } } } : {}),
   };
 }
