@@ -803,8 +803,16 @@ export class Chat {
     // through streaming and tool execution, but pause while a person decides.
     this.screen.setWorking(Boolean(this.active) && !this.pendingConfirm && !this.pendingChoice && !this.pendingSecret);
     const items = this.menuItems();
+    // Use the same registry as submission, including aliases and skills. Derive
+    // the range from the draft so typing, Tab, history and edits stay in sync.
+    const command = /^(\s*)(\/\S+)/u.exec(this.composer.text);
+    const name = command?.[2]?.slice(1);
+    const start = [...(command?.[1] ?? "")].length;
     const view: ComposerView = {
       draft: this.composer.snapshot(),
+      ...(name && (findCommand(name) || this.opts.skills.get(name))
+        ? { commandRange: { start, end: start + [...command![2]!].length } }
+        : {}),
       placeholder: PLACEHOLDER,
       ...(this.pendingConfirm ? { confirm: this.confirmView(this.pendingConfirm.call, this.pendingConfirm.selected) } : {}),
       ...(this.pendingChoice

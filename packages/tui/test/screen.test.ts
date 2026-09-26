@@ -351,3 +351,31 @@ describe("working indicator", () => {
     s.finish();
   });
 });
+
+describe("composer command colour", () => {
+  afterEach(() => { vi.unstubAllEnvs(); });
+
+  it.each([false, true])("colours only the token and respects NO_COLOR=%s", async (plain) => {
+    vi.stubEnv("NO_COLOR", plain ? "1" : undefined);
+    vi.stubEnv("TERM", "xterm-256color");
+    vi.resetModules();
+    const { Screen: CommandScreen } = await import("../src/screen.js");
+    const { style: palette } = await import("../src/theme.js");
+    const out: string[] = [];
+    const s = new CommandScreen({ write: (chunk) => out.push(chunk), interactive: true, columns: () => 30 });
+    try {
+      s.setComposer({ draft: { text: "/model 한글🙂", cursor: 10 }, commandRange: { start: 0, end: 6 } });
+      const output = out.join("");
+      if (plain) {
+        expect(output).not.toMatch(/\x1b\[[\d;]*m/);
+        expect(output).toContain("/model 한글🙂");
+      } else {
+        expect(output).toContain(`${palette.accent}/model${palette.reset} 한글🙂`);
+      }
+      out.length = 0;
+      s.setComposer({ draft: { text: "/model", cursor: 6 }, commandRange: { start: 0, end: 6 }, secret: { title: "Key", lines: [], prompt: "> " } });
+      expect(out.join("")).not.toContain("/model");
+      expect(out.join("")).not.toContain(`${palette.accent}••••••`);
+    } finally { s.finish(); }
+  });
+});

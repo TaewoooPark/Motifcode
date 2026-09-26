@@ -86,6 +86,8 @@ export interface ScreenOptions {
  */
 export interface ComposerView {
   draft: ComposerSnapshot;
+  /** Recognized slash-command token, in code points of the draft. */
+  commandRange?: { start: number; end: number };
   placeholder?: string;
   /**
    * A question in place of the input: what is about to run, and the
@@ -687,6 +689,7 @@ export class Screen {
       width: inner,
       prompt: view.secret ? view.secret.prompt : "> ",
       ...(view.placeholder !== undefined && !view.secret ? { placeholder: view.placeholder } : {}),
+      ...(view.commandRange && !view.secret ? { commandRange: view.commandRange } : {}),
     });
     const border = (l: string, r: string): Row => ({
       text: paint(`${l}${"─".repeat(inner + 2)}${r}`, style.faint),
@@ -734,7 +737,10 @@ export class Screen {
       header = body.length;
     }
     for (const row of render.rows) {
-      const body = render.placeholder ? paint(row.body, style.faint) : row.body;
+      const range = row.commandRange;
+      const body = render.placeholder ? paint(row.body, style.faint) : range
+        ? row.body.slice(0, range.start) + paint(row.body.slice(range.start, range.end), style.accent) + row.body.slice(range.end)
+        : row.body;
       const plainWidth = displayWidth(row.prefix) + displayWidth(row.body);
       const pad = " ".repeat(Math.max(0, inner - plainWidth));
       rows.push({

@@ -170,6 +170,79 @@ describe("interactive session", () => {
     expect(t.seen).toHaveLength(0);
   });
 
+  it("marks a manually completed command and removes the mark when editing makes it incomplete", () => {
+    const t = new GateTransport([]);
+    const s = session(t);
+    open.push(s);
+    const compose = vi.spyOn(s.terminal, "setComposer");
+    const current = () => compose.mock.calls.at(-1)![0]!;
+    s.type("/sta");
+    expect(current().commandRange).toBeUndefined();
+    s.type("tus");
+    expect(current().commandRange).toEqual({ start: 0, end: 7 });
+    s.type("\x7f");
+    expect(current().commandRange).toBeUndefined();
+    s.type("sx");
+    expect(current().commandRange).toBeUndefined();
+    s.type("\x7f argument /help");
+    expect(current().commandRange).toEqual({ start: 0, end: 7 });
+    expect(current().draft.text).toBe("/status argument /help");
+    expect(current().draft.text).not.toContain(ESC);
+    expect(t.seen).toHaveLength(0);
+  });
+
+  it("marks a Tab completion with arguments and submits its original plain text", async () => {
+    const t = new GateTransport([]);
+    const s = session(t);
+    open.push(s);
+    const compose = vi.spyOn(s.terminal, "setComposer");
+    s.type("/mod\t");
+    expect(compose.mock.calls.at(-1)![0]).toMatchObject({
+      draft: { text: "/model ", cursor: 7 },
+      commandRange: { start: 0, end: 6 },
+    });
+    s.type("other/모델🙂");
+    const draft = compose.mock.calls.at(-1)![0]!;
+    expect(draft.commandRange).toEqual({ start: 0, end: 6 });
+    expect(draft.draft).toEqual({ text: "/model other/모델🙂", cursor: [..."/model other/모델🙂"].length });
+    s.type("\r");
+    await vi.waitFor(() => expect(s.screen()).toContain("model set to other/모델🙂"));
+    expect(t.seen).toHaveLength(0);
+  });
+
+  it("recognizes aliases and complete token boundaries using command execution semantics", () => {
+    const s = session(new GateTransport([]));
+    open.push(s);
+    const compose = vi.spyOn(s.terminal, "setComposer");
+    for (const [text, range] of [
+      ["/CoSt", { start: 0, end: 5 }],
+      ["  /STATUS verbose", { start: 2, end: 9 }],
+      ["/status/extra", undefined],
+      ["/unknown", undefined],
+      ["text /status", undefined],
+      ["/", undefined],
+    ] as const) {
+      s.type(text);
+      expect(compose.mock.calls.at(-1)![0]!.commandRange, text).toEqual(range);
+      s.type(ESC);
+    }
+  });
+
+  it("marks installed skills with their exact registered spelling", () => {
+    const skills = new SkillRegistry();
+    skills.register({ name: "Review🙂", description: "project review", body: "Review changes.", source: "project" });
+    const s = session(new GateTransport([]), { skills });
+    open.push(s);
+    const compose = vi.spyOn(s.terminal, "setComposer");
+    s.type("/Review🙂 changes 한글");
+    const view = compose.mock.calls.at(-1)![0]!;
+    expect(view.commandRange).toEqual({ start: 0, end: 8 });
+    expect(view.draft.text).toBe("/Review🙂 changes 한글");
+    s.type(ESC);
+    s.type("/review🙂");
+    expect(compose.mock.calls.at(-1)![0]!.commandRange).toBeUndefined();
+  });
+
   it("applies a setting to the next task", async () => {
     const seenSettings: string[] = [];
     const t = new GateTransport([...done("x")]);

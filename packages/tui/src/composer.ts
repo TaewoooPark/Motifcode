@@ -257,6 +257,8 @@ export interface ComposerRow {
   /** The prompt on the first row, blanks of the same width after that. */
   prefix: string;
   body: string;
+  /** UTF-16 slice offsets of the command fragment within this plain body. */
+  commandRange?: { start: number; end: number };
 }
 
 export interface ComposerRender {
@@ -272,6 +274,8 @@ export interface ComposerRenderOptions {
   width: number;
   prompt?: string;
   placeholder?: string;
+  /** Recognized command token, in code points of the unstyled draft. */
+  commandRange?: { start: number; end: number };
 }
 
 const DEFAULT_PROMPT = "❯ ";
@@ -305,11 +309,13 @@ export function renderComposer(state: ComposerSnapshot, opts: ComposerRenderOpti
   let cursorCol = prefixWidth;
   let index = 0; // code-point index of the character about to be placed
   let body = "";
+  let commandRange: ComposerRow["commandRange"];
   let used = 0;
 
   const flush = (): void => {
-    rows.push({ prefix: rows.length === 0 ? prompt : continuation, body });
+    rows.push({ prefix: rows.length === 0 ? prompt : continuation, body, ...(commandRange ? { commandRange } : {}) });
     body = "";
+    commandRange = undefined;
     used = 0;
   };
 
@@ -329,6 +335,9 @@ export function renderComposer(state: ComposerSnapshot, opts: ComposerRenderOpti
       // The cursor character itself wrapped; follow it.
       cursorRow = rows.length;
       cursorCol = prefixWidth;
+    }
+    if (opts.commandRange && index >= opts.commandRange.start && index < opts.commandRange.end) {
+      commandRange = { start: commandRange?.start ?? body.length, end: body.length + ch.length };
     }
     body += ch;
     used += w;
