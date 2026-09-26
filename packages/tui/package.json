@@ -6,5 +6,8 @@
   "description": "Terminal UI: typed cells, two-region streaming, local instruments",
   "main": "./src/index.ts",
   "exports": { ".": "./src/index.ts" },
-  "dependencies": { "@motifcode/core": "workspace:*" }
+  "dependencies": {
+    "@motifcode/core": "workspace:*",
+    "get-east-asian-width": "1.7.0"
+  }
 }

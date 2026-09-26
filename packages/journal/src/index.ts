@@ -33,7 +33,7 @@
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { LoopCheckpoint, LoopEvent, SessionEndReason } from "@motifcode/core";
+import { resumeBlock, type LoopCheckpoint, type LoopEvent, type SessionEndReason } from "@motifcode/core";
 import type { ChannelId, Message } from "@motifcode/protocol";
 
 export const JOURNAL_VERSION = 2;
@@ -431,10 +431,10 @@ export function checkResumable(
   if (state.header.model.id !== current.model) {
     return `recorded against model ${state.header.model.id}, now ${current.model}`;
   }
-  const inflight = state.checkpoint.inFlightTool;
-  if (inflight?.mutating) {
+  const blocker = resumeBlock(state.checkpoint, null);
+  if (blocker?.kind === "execution_uncertain") {
     return (
-      `the run stopped while \`${inflight.name}\` (${inflight.id}) was running, and whether it ` +
+      `the run stopped while \`${blocker.tool}\` (${blocker.id}) was running, and whether it ` +
       "took effect is unknowable from here. Inspect the working tree, then start a new run"
     );
   }

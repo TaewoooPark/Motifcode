@@ -101,6 +101,8 @@ export const term = {
   /** Top-left of the visible screen. */
   home: `${ESC}H`,
   lineStart: "\r",
+  /** Reserve a blank row before painting live content; may scroll at the bottom. */
+  index: "\x1bD",
   up: (n: number) => (n > 0 ? `${ESC}${n}A` : ""),
   down: (n: number) => (n > 0 ? `${ESC}${n}B` : ""),
   /** Absolute column, 1-based in the terminal; this takes 0-based. */

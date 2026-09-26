@@ -1,6 +1,6 @@
 {
   "name": "motifcode",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "private": true,
   "description": "A coding agent harness built specifically for Motif-3",
   "type": "module",
@@ -19,6 +19,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.20.1",
+    "@xterm/headless": "6.0.0",
     "esbuild": "^0.28.2",
     "tsx": "^4.23.12",
     "typescript": "^5.9.3",
