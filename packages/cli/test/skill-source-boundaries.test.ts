@@ -17,8 +17,8 @@ const catalogUrl = "https://example.invalid/catalog.git";
 function temp(): string { const root = mkdtempSync(join(tmpdir(), "motif-skill-boundary-test-")); roots.push(root); return root; }
 function file(root: string, path: string, text: string): void { const target = join(root, path); mkdirSync(dirname(target), { recursive: true }); writeFileSync(target, text); }
 function skill(root: string, path: string, name: string): void { file(root, join(path, "SKILL.md"), `---\nname: ${name}\ndescription: Skill source boundary fixture.\n---\nRead references/data.txt.\n`); file(root, join(path, "references/data.txt"), name); }
-function repository(url: string, populate: (root: string) => void): { source: string; commit: string } {
-  const source = temp(); populate(source);
+function repository(url: string, populate: (root: string) => void, source = temp()): { source: string; commit: string } {
+  populate(source);
   const git = (...args: string[]) => actual.execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...args], { cwd: source, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
   git("init", "--quiet"); git("add", "."); git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "fixture");
   remotes.set(url, source); return { source, commit: git("rev-parse", "HEAD") };
@@ -88,7 +88,49 @@ describe("Git skill folder boundaries", () => {
     try {
       const [receipt] = installSkillCandidates(inspected, { home, cwd });
       expect(readFileSync(join(home, ".motif", receipt!.snapshot, "references/data.txt"), "utf8")).toBe("explicit");
+      expect(updateInstalledSkill(receipt!.id, { home, cwd })[0]!.digest).toBe(receipt!.digest);
     } finally { inspected.cleanup(); }
+  });
+});
+
+describe("managed source identity on update", () => {
+  it("treats an explicit HTTPS source as remote before the first installation", () => {
+    const home = temp(); const cwd = temp(); repository(sourceUrl, root => skill(root, "", "remote"));
+    skill(resolve(cwd, sourceUrl), "", "wrong-local");
+    const [receipt] = install(sourceUrl, { home, cwd });
+    expect(receipt!.origin).toMatchObject({ kind: "git", source: sourceUrl });
+    expect(receipt!.name).toBe("remote");
+    const [local] = install(resolve(cwd, sourceUrl), { home, cwd });
+    expect(local!.origin.kind).toBe("local"); expect(local!.name).toBe("wrong-local");
+  });
+
+  it.each(["standalone", "catalog"] as const)("does not replace a saved %s remote with a cwd Git repository", kind => {
+    const home = temp(); const cwd = temp();
+    const input = kind === "catalog" ? catalogUrl : sourceUrl;
+    const options = { home, cwd, ...(kind === "catalog" ? { plugin: "chosen" } : {}) };
+    const populate = (root: string, data: string) => {
+      const path = kind === "catalog" ? "plugin" : "";
+      skill(root, path, "preserved"); file(root, join(path, "references/data.txt"), data);
+      if (kind === "catalog") file(root, ".claude-plugin/marketplace.json", JSON.stringify({ name: "catalog", plugins: [{ name: "chosen", source: "./plugin" }] }));
+    };
+    repository(input, root => populate(root, "remote payload"));
+    const [receipt] = install(input, options);
+    repository("https://example.invalid/shadow.git", root => populate(root, "cwd payload"), resolve(cwd, input));
+    const [updated] = updateInstalledSkill(receipt!.id, { home, cwd });
+    expect(updated!.origin).toEqual(receipt!.origin);
+    expect(updated!.digest).toBe(receipt!.digest);
+    expect(readFileSync(join(home, ".motif", updated!.snapshot, "references/data.txt"), "utf8")).toBe("remote payload");
+    expect(vi.mocked(execFileSync).mock.calls.filter(([, args]) => Array.isArray(args) && args.includes("fetch") && args.includes(input))).toHaveLength(2);
+  });
+
+  it("continues updating an explicitly selected local Git reference", () => {
+    const home = temp(); const cwd = temp(); const local = repository(sourceUrl, root => skill(root, "", "local-git"));
+    const [receipt] = install(local.source, { home, cwd, ref: "HEAD" });
+    repository(sourceUrl, root => file(root, "references/data.txt", "updated local payload"), local.source);
+    const [updated] = updateInstalledSkill(receipt!.id, { home, cwd });
+    expect(updated!.origin.source).toBe(receipt!.origin.source);
+    expect(updated!.origin.kind).toBe("git"); expect(updated!.origin.commit).not.toBe(receipt!.origin.commit);
+    expect(readFileSync(join(home, ".motif", updated!.snapshot, "references/data.txt"), "utf8")).toBe("updated local payload");
   });
 });
 

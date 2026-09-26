@@ -138,7 +138,9 @@ function gitSource(input: string, options: SkillInstallOptions, cwd: string): Gi
   return { remote, ref, ...(path ? { path } : {}) };
 }
 function acquire(input: string, options: SkillInstallOptions, sourceKind: "explicit" | "remote" = "explicit"): { root: string; boundary: string; origin: SkillOrigin; cleanup: () => void } {
-  const cwd = settings(options).cwd; const local = sourceKind === "explicit" ? resolve(cwd, input) : undefined;
+  // Saved Git remotes are canonical HTTPS URLs; updates must preserve that
+  // identity even when the cwd contains a directory with a URL-shaped name.
+  const cwd = settings(options).cwd; const local = sourceKind === "explicit" && !/^https:\/\//i.test(input) ? resolve(cwd, input) : undefined;
   const localExists = local !== undefined && existsSync(local);
   if (localExists && !options.ref) {
     const root = realpathSync(local);
