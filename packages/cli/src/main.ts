@@ -390,7 +390,7 @@ Flags
   --interactive             open the prompt after the task, or with no task at all
   --continue                open the prompt with the most recent conversation here loaded
   --thinking                show the model's reasoning in the transcript
-  --verbose                 show tool output in full (ctrl-o toggles it in the session)
+  --verbose                 show full inline tool output (ctrl-o opens the output viewer)
   --theme <name>            colour theme (motif, claude, mono, solarized, dracula)
   --permissions <mode>      ask (default) before commands, writes and patches run, or auto
   --no-hero                 skip the splash

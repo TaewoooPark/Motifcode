@@ -451,7 +451,7 @@ export class Screen {
     this.paint();
   }
 
-  /** Show tool output whole, or clipped to a few lines. Ctrl-O in the session. */
+  /** Change the inline output setting; Ctrl-O opens the independent viewer. */
   toggleVerbose(): void {
     this.verbose = !this.verbose;
     this.committedCells = 0;
