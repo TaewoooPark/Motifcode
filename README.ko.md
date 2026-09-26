@@ -153,44 +153,238 @@ npx motifcode          # 첫 실행: 키를 물어본 뒤 `motif` 명령 설치�
 플래그: `--model`, `--endpoint`, `--env-file`, `--theme`, `--thinking`,
 `--verbose`, `--permissions ask|auto`, `--cwd`, `--channel`, `--max-turns`,
 `--max-output-tokens`, `--seed`, `--no-hero`. 전체 목록은 `motif --help`에 있습니다.
+`mcp`, `skills`, `plugins` 명령은 [MCP 서버](#mcp-서버)와 [스킬](#스킬)에서 자세히 설명합니다.
 
 ---
 
-## MCP 서버 연결
+## MCP 서버
 
-로컬 stdio 서버, Streamable HTTP 엔드포인트, 기존 SSE 서비스를 연결할 수 있습니다.
-내장 프리셋을 선택한 뒤 연결을 확인하세요.
+MCP 서버를 연결하면 Motif가 바깥 도구를 쓸 수 있습니다. 라이브러리 문서, GitHub,
+브라우저, 직접 만든 로컬 서비스 같은 것들입니다. stdio, Streamable HTTP, 기존 SSE
+서버를 지원합니다. 모든 서버는 `mcp` 도구 하나 뒤에 있어서, 서버를 연결해도 모델의
+도구 목록은 바뀌지 않습니다. 각 서버 도구는 자기 이름과 JSON Schema로 호출되고,
+인자는 보내기 전에 검사합니다. 서버 도구에도 세션 권한이 그대로 적용되며, 결과를
+알 수 없는 쓰기 작업은 스스로 다시 실행하지 않습니다.
+
+### 기본 제공 프리셋
+
+프리셋 8개가 함께 들어 있습니다. 목록은 오프라인으로 볼 수 있고, 등록해도 무언가를
+내려받거나 실행하거나 로그인하지 않습니다.
+
+| 프리셋 | 추가되는 것 | 연결 방식 | 필요한 것 |
+|---|---|---|---|
+| `context7` | 최신 라이브러리·프레임워크 문서 | HTTP | 없음; API 키는 계정 한도를 늘릴 때만 필요 |
+| `github` | 저장소, 이슈, PR, 워크플로 | HTTP | GitHub CLI(`gh`); `gh`에 저장된 계정을 그대로 사용 |
+| `playwright` | 브라우저 이동과 페이지 확인 | stdio (`npx`) | Node/npm과 Chrome; 격리된 프로필로 headless 실행 |
+| `filesystem` | 지정한 폴더 안의 파일 도구 | stdio (`npx`) | 직접 고른 기존 폴더 |
+| `hugging-face` | 공개 모델·데이터셋·저장소 정보 | HTTP | 없음; 인증이 필요한 기능에는 Hugging Face 토큰 |
+| `openai-docs` | OpenAI 개발자 문서 | HTTP | 없음 |
+| `tauri` | Tauri 앱 확인(커뮤니티 서버) | stdio (`npx`) | MCP 브리지 플러그인을 넣고 실행 중인 Tauri 2 앱 |
+| `gmail` | Gmail(미리보기) | HTTP | 직접 준비한 Google OAuth 액세스 토큰; 내장 로그인 없음 |
+
+`npx` 프리셋은 첫 연결 때 버전이 고정된 패키지를 내려받습니다. 자세한 조건은
+[프리셋별 요구 사항](docs/mcp.md#built-in-server-presets)을 참고하세요.
+
+### 서버 추가하기
+
+**세션 안에서.** `/mcp`를 입력하면 등록된 서버와 추가할 수 있는 프리셋이 나옵니다.
+프리셋을 고르면 필요한 것과 저장 위치를 보여 주고, 확인하면 등록과 연결까지 마칩니다.
+재시작 없이 같은 세션에서 바로 그 도구를 쓸 수 있습니다. `/mcp list`,
+`/mcp connect NAME`, `/mcp disconnect NAME`, `/mcp reconnect NAME`,
+`/mcp login NAME`으로 프롬프트에서 직접 제어할 수도 있습니다.
+
+**셸에서 프리셋 등록.**
 
 ```bash
-motif mcp presets
+motif mcp presets                                  # 프리셋 목록 (오프라인)
+motif mcp presets playwright                       # 프리셋 하나의 요구 사항
 motif mcp install context7 --enable
-motif mcp list
-motif mcp doctor --connect
+motif mcp install filesystem --root /absolute/project/path --enable
+motif mcp install github --enable && motif mcp login github
 ```
 
-Context7, Playwright, Filesystem, Hugging Face, OpenAI Docs, Tauri, Gmail을
-기본 목록으로 제공합니다. `install`은 `--enable`이 없으면 비활성 상태로 등록하며,
-로컬 서버 패키지는 첫 연결 때 내려받습니다. Filesystem은 `--root`로 접근 폴더를
-지정해야 하고, Tauri는 앱 브리지, Gmail은 별도로 준비한 OAuth 인증이 필요합니다.
-[프리셋별 요구 사항](docs/mcp.md#built-in-server-presets)을 확인하세요.
+`install`은 등록만 하며, `--enable`이 없으면 비활성 상태로 저장합니다.
 
-등록은 `~/.motif/mcp.json`에 저장됩니다. `doctor --connect`는 활성 서버를 시작해
-도구 목록을 확인한 뒤 연결을 닫습니다. 세션 안에서 `/mcp`로 연결 관리 화면을 열거나,
-`/mcp list`, `/mcp connect NAME`, `/mcp disconnect NAME`,
-`/mcp reconnect NAME`으로 직접 제어할 수도 있습니다. 표준 OAuth 서버의 인증이
-필요하면 브라우저 로그인을 안내합니다. `/mcp login NAME` 또는 CLI의
-`motif mcp connect NAME --login`으로 직접 시작할 수도 있습니다.
+**그 밖의 서버.** Motif 옵션은 `--` 앞에, 서버 실행 명령은 그 뒤에 씁니다.
+HTTP·SSE 서버는 URL을 받습니다.
 
-내장 `mcp-setup` 스킬은 GitHub 저장소나 서비스 URL을 받아 설치 절차를 안내합니다.
-예를 들어 “https://github.com/TaewoooPark/Trendchaser-mcp 이 MCP를 motifcode에
-연결해줘. 연결되는지도 확인해줘.”처럼 요청하면 스킬을 자동으로 불러옵니다.
-`/mcp-setup <URL>`로 직접 실행할 수도 있습니다. 서버의 설치 문서를 확인하고,
-기존 실행 권한에 따라 등록과 연결 진단을 진행합니다.
+```bash
+motif mcp add local -- node /absolute/path/to/server.mjs
+motif mcp add local-api --env-ref TOKEN=SERVICE_TOKEN -- node /absolute/path/to/server.mjs
+motif mcp add docs --transport http https://developers.openai.com/mcp
+motif mcp add remote --transport http --header 'Authorization=Bearer ${SERVICE_TOKEN}' https://example.com/mcp
+motif mcp add legacy --transport sse --header-env X-Api-Key=SERVICE_TOKEN https://example.com/sse
+```
 
-등록을 추가하거나 수정한 뒤에는 Motif를 종료하고 다시 실행해야 설정이 적용됩니다.
-`/new`는 대화만 초기화하며 서버 설정을 다시 읽지 않습니다.
-인증 정보, Codex/Claude 설정 가져오기, 연결 제어와 지원 범위는
-[MCP 사용 안내](docs/mcp.md)를 참고하세요.
+인증 정보는 값 대신 환경 변수 참조(`--env-ref`, `--header-env`, `${VAR}`)로 넘기세요.
+비공개 헤더에는 참조만 쓸 수 있습니다. 등록은 `~/.motif/mcp.json`에 저장되며,
+[직접 편집](docs/mcp.md#configuration-and-trust)할 수도 있습니다.
+
+**Codex·Claude 설정에서 가져오기.**
+
+```bash
+motif mcp import codex ~/.codex/config.toml
+motif mcp import claude /path/to/claude-config.json --write ./mcp.imported.json
+```
+
+`--write`로 새 파일을 지정하기 전까지는 미리보기만 합니다. 가져온 항목은 검토할 수
+있도록 비활성 상태로 남고, 설정에 직접 적힌 비밀값은 복사하지 않습니다.
+
+**요청으로.** 서버의 저장소나 URL과 함께 명확하게 요청하면 내장 `mcp-setup` 스킬이
+이어받습니다.
+
+> https://github.com/TaewoooPark/Trendchaser-mcp 이 MCP를 motifcode에 연결해줘. 연결되는지도 확인해줘.
+
+서버의 설치 문서를 읽고, 평소 권한 안에서 등록과 연결 확인을 진행합니다.
+`/mcp-setup <URL>`로 직접 실행할 수도 있습니다.
+
+### 로그인과 연결 확인
+
+```bash
+motif mcp list                       # 등록된 서버와 프리셋 (오프라인)
+motif mcp doctor --connect           # 활성 서버를 시작해 도구 목록을 확인한 뒤 닫음
+motif mcp connect NAME --login       # 연결하고, 필요하면 브라우저로 로그인
+motif mcp login NAME --no-browser    # 브라우저 대신 로그인 URL을 출력 (SSH·headless 환경)
+```
+
+표준 MCP OAuth를 쓰는 서버는 브라우저로 로그인합니다. Motif가 제공자의 로그인
+페이지를 열고, loopback 포트로 콜백을 받은 뒤, 토큰을 `~/.motif/auth` 아래의 비공개
+파일에 보관합니다. `mcp.json`이나 모델 컨텍스트에는 들어가지 않습니다. 세션 안에서는
+로그인이 필요한 서버가 로그인을 제안하고, 브라우저가 열리지 않을 때를 위해 패널에
+URL도 보여 줍니다. GitHub 프리셋은 대신 GitHub CLI에 저장된 계정을 빌려 씁니다.
+Motif는 위임 기록만 남기고 토큰은 `gh`가 보관하며, 재시작해도 로그인이 유지됩니다.
+`motif mcp logout NAME`은 Motif의 인증 정보만 지우고, 제공자나 `gh`의 로그인은 그대로
+둡니다.
+
+`~/.motif/mcp.json`은 신뢰된 설정입니다. 프로젝트 안의 설정 파일은 자동으로 읽지
+않습니다. 파일을 검토한 뒤 `--mcp-config FILE`과 함께, 그때 출력되는 SHA-256을
+`--trust-mcp`로 넘기세요. `/mcp`에서 추가한 서버는 바로 연결되고, 다른 터미널에서
+수정한 설정은 재실행해야 반영됩니다. 도구 허용 목록, 타임아웃, 폼·URL 승인과 전체
+지원 범위는 [MCP 사용 안내](docs/mcp.md)에 있습니다.
+
+---
+
+## 스킬
+
+스킬은 `SKILL.md`(`name`과 `description`이 담긴 YAML 프런트매터, 그 아래 지시문)와
+그 옆에 둔 스크립트·참조 문서·자료로 이루어진 폴더입니다. Claude Code와 Codex가 쓰는
+Agent Skills 형식 그대로이며, Motif는 두 클라이언트의 방식을 모두 읽습니다. 시스템
+프롬프트에는 짧은 목록만 들어가고, 스킬 본문은 쓸 때 불러옵니다.
+
+내장 스킬 18개와, 워크플로 번들 5개에 담긴 스킬 6개가 함께 들어 있습니다.
+`/<이름> [입력]`(`/commit fix the parser`)으로 실행하거나, `@skill:이름`으로
+첨부하거나, 모델이 `skill` 도구로 직접 고르게 둘 수 있습니다. `/skills`는 로드된
+스킬을 보여 줍니다.
+
+### Claude Code·Codex 호환
+
+| 원본 스킬의 요소 | Motif에서 |
+|---|---|
+| `SKILL.md` 프런트매터, 참조 문서, 스크립트, 자료 | 스킬 자신의 폴더를 기준으로 불러옴 |
+| `$ARGUMENTS`, `$ARGUMENTS[N]`, `$N` | 명령 뒤의 입력으로 채움; 따옴표로 묶은 말은 한 덩어리로 유지 |
+| `${CLAUDE_SKILL_DIR}`, `${CLAUDE_PLUGIN_ROOT}` | 스킬 폴더, 그리고 패키지로 설치했다면 그 패키지 루트 |
+| Claude `disable-model-invocation`, `user-invocable` | 그대로 적용: 사용자만 호출하거나, 사용자 목록에서 숨김 |
+| Codex `agents/openai.yaml`의 `allow_implicit_invocation: false` | 사용자만 호출 |
+| Claude `allowed-tools` | 안내와 함께 보존; Motif 권한을 주지는 않음 |
+| `.claude-plugin/marketplace.json`, `.agents/plugins/marketplace.json` | 두 클라이언트의 카탈로그를 모두 조회 |
+| 호스트 전용 훅, fork, 모델 전환 | 지원하지 않는다고 알림; 일부만 흉내 내 실행하지 않음 |
+
+### 스킬 추가하기
+
+**요청으로.** 스킬 링크와 함께 명확하게 요청하면 내장 `skill-setup`이 출처를 확인하고,
+설치한 뒤 검증까지 합니다.
+
+> https://github.com/anthropics/skills/tree/main/skills/webapp-testing 이 스킬을 이 프로젝트에 설치해줘.
+
+"글로벌로" 또는 "모든 프로젝트에서 쓰게" 설치해 달라고 하면 `~/.motif/`에 설치되어
+모든 프로젝트에서 쓸 수 있습니다. `/skill-setup <출처 또는 요청>`으로 직접 실행할 수
+있고, 이미 가진 Claude·Codex 스킬을 가져올 때도 씁니다.
+
+**링크·저장소·폴더에서.**
+
+```bash
+motif skills add https://github.com/anthropics/skills/tree/main/skills/webapp-testing
+motif skills add https://github.com/anthropics/skills/blob/main/skills/brand-guidelines/SKILL.md --scope project
+motif skills add anthropics/skills --path skills/webapp-testing
+motif skills add ./my-skill --scope project
+motif skills inspect ./my-skill                    # 설치하지 않고 미리보기
+```
+
+GitHub 폴더·`SKILL.md`·raw 링크는 스킬 폴더 전체를 설치합니다. `--ref`로 브랜치·태그·
+커밋을 고정하고, `--dry-run`으로 미리 볼 수 있습니다. 설치할 때마다 확인된 커밋과
+내용 digest를 기록합니다.
+
+**Claude Code·Codex에서.**
+
+```bash
+motif skills import claude                         # 후보 목록만 보여 주고, 아직 복사하지 않음
+motif skills import codex --json
+motif skills import claude --skill webapp-testing --scope project
+```
+
+Claude 가져오기는 `~/.claude/skills`, 프로젝트의 `.claude/skills`, Claude Code에서
+켜 둔 플러그인을 읽습니다. Codex 가져오기는 `~/.agents/skills`, `~/.codex/skills`,
+프로젝트부터 Git 루트까지의 `.agents/skills`, Codex에서 켜 둔 플러그인을 읽습니다.
+스킬은 Motif 자체 저장소로 복사되며, 다른 클라이언트의 파일과 설정은 건드리지
+않습니다.
+
+**마켓플레이스에서.**
+
+```bash
+motif skills marketplace OWNER/CATALOG
+motif skills add OWNER/CATALOG --plugin ENTRY --skill SKILL_NAME
+```
+
+**MCP 서버가 딸린 플러그인 패키지.** `motif plugins add OWNER/REPO --skill NAME`으로
+스킬을 설치하고, `motif plugins inspect NAME`으로 딸린 서버를 확인한 뒤,
+`motif plugins connect NAME --login`으로 승인하면 등록과 연결을 진행합니다. 다른
+호스트용 훅·에이전트·명령은 켜지지 않습니다. `/plugin-setup <출처 또는 요청>`으로
+요청해도 같은 과정을 거칩니다.
+
+**직접 작성하기.** 모든 프로젝트용은 `~/.motif/skills/<이름>/SKILL.md`, 한 프로젝트용은
+`<project>/.motif/skills/<이름>/SKILL.md`에 만듭니다. `/skill-creator`가 초안을 써 줄
+수 있습니다.
+
+```markdown
+---
+name: explain-widget
+description: Explain this project's widget lifecycle and check its invariants.
+---
+
+Read references/lifecycle.md relative to this skill's directory.
+Explain the widget named in $ARGUMENTS, citing the relevant source.
+```
+
+설치한 사본은 `motif skills installed`, `motif skills update NAME`,
+`motif skills remove NAME`으로 관리합니다. 새로 설치한 스킬은 실행 중인 세션을 다시
+시작해야 로드됩니다. 우선순위 규칙과 전체 호환 표는 [스킬 문서](docs/skills.md)에
+있습니다.
+
+### 내장 워크플로 번들
+
+플러그인 5개가 함께 들어 있습니다. 번들 스킬은 모든 프로젝트에서 슬래시 명령으로
+실행되고, 지시문과 참조 문서는 쓸 때만 불러옵니다. MCP 서비스와 연결된 번들은 그
+서버가 켜져 있을 때만 모델의 스킬 목록에 오릅니다. 사용자·프로젝트 스킬로 덮어쓸 수
+있고, 플러그인 목록을 봐도 서비스가 시작되지는 않습니다.
+
+| 번들 | 스킬 | 선택 서비스 |
+|---|---|---|
+| `library-docs` | `/library-docs` | Context7 |
+| `browser-web-testing` | `/browser-testing` | Playwright |
+| `github-workflow` | `/github-workflow` | GitHub MCP 또는 로그인된 `gh` CLI |
+| `frontend-quality` | `/frontend-quality`, `/react-composition` | Context7, Playwright |
+| `mcp-builder` | `/mcp-builder` | 개발 중인 서버 |
+
+```bash
+motif plugins list
+motif plugins inspect library-docs --json
+motif plugins connect library-docs
+```
+
+번들 서비스 연결은 따로 승인하는 단계이며, 비대화형 셸에서는 검토한 계획을 `--yes`로
+확정합니다. 기존 등록은 그대로 두고, 번들을 쓸 수 있다고 해서 서비스에 로그인된 것은
+아닙니다. 자세한 내용은 [내장 워크플로](docs/skills.md#built-in-workflow-bundles)를
+참고하세요.
 
 ---
 
@@ -235,7 +429,7 @@ Infron의 [무료 모델 약관](https://infron.ai/docs/overview/free-models)에
 | `/status` (`/cost`) | 연결, 설정, 세션 누적치 |
 | `/config` | 유효한 설정과 각각의 출처, 설정 파일 |
 | `/doctor` | 엔드포인트 점검: 인증, 파서, 캐시, 채널 |
-| `/mcp [list\|connect NAME\|disconnect NAME\|reconnect NAME]` | MCP 연결 관리 화면, 상태 조회와 연결 제어 |
+| `/mcp [list\|connect NAME\|disconnect NAME\|reconnect NAME\|login NAME\|logout NAME]` | MCP 관리 화면에서 프리셋 추가, 연결 상태 조회·제어와 로그인 |
 | `/mcp-setup <URL>` | 내장 스킬로 MCP 서버 등록과 연결 확인 |
 | `/login`, `/logout` | Infron API 키를 붙여 넣어 확인 후 `~/.motif/.env`에 저장; 저장된 키 삭제 |
 | `/model [id]`, `/endpoint [url]` | 다음 작업에 쓸 모델 id나 엔드포인트를 보거나 바꿈 |
@@ -250,6 +444,7 @@ Infron의 [무료 모델 약관](https://infron.ai/docs/overview/free-models)에
 | `/notes` (`/memory`), `/hooks` | 모든 작업이 읽는 프로젝트 메모; 도구 주변에서 도는 훅 |
 | `/skills`, `/agents`, `/plugins` | 로드된 것들; 각 스킬은 `/<skill> [input]`으로도 실행됨 |
 | `/skill-setup <출처 또는 요청>` | 기존 클라이언트나 마켓플레이스의 스킬 조회·설치·검증 |
+| `/plugin-setup <출처 또는 요청>` | Claude/Codex 플러그인 패키지의 스킬 설치와 딸린 MCP 서버 연결 |
 | `/new` (`/clear`) | 새 대화 시작; 작업 트리는 건드리지 않음 |
 | `/sessions`, `/resume [n\|file]` | 기록된 세션; 그중 하나에서 이어 가기 |
 | `/quit` (`/exit`, `/q`) | 종료 |
@@ -272,22 +467,13 @@ enter send · \ + enter newline · esc interrupt or clear · ctrl-c twice quit �
 | 권한 | 명령·파일 쓰기·패치·터미널이 실행되기 전에 번호로 답하는 창; "이 도구는 다시 묻지 않기"; 거절하면 모델에게 그 사실이 전달됨; Shift-Tab이나 `/permissions auto`로 전부 자동 실행 |
 | 대화 | 각 작업은 앞선 작업들을 전부 봄; `--continue`와 `/resume`으로 기록된 대화를 다시 불러옴; 실행 중에 보낸 메시지는 대기열에; Esc로 중단; 컨텍스트가 창의 `compactAt`을 넘으면 Codex 방식으로 압축(모델이 인수인계 요약을 쓰고 내 메시지는 원문 그대로 남김), `/compact <초점>`으로 직접 실행 |
 | 백엔드 | Claude Code의 `.claude/`와 같은 배치의 `.motif/`: 사용자·프로젝트 설정, 스킬, 에이전트, 플러그인, 메모, 작업마다 저널 하나, 히스토리; 프로젝트 훅은 `motif trust`로 승인한 뒤 적용 |
-| 스킬과 에이전트 | 내장 스킬 18개(`explore`, `plan`, `explain`, `code-review`, `security-review`, `test-fix`, `debug`, `refactor`, `commit`, `pr-body`, `docs`, `init`, `skill-creator`, `skill-setup`, `plugin-setup`, `mcp-setup`, `motif-endpoint`, `korean`); 내장 서브에이전트 5개(`explorer`, `reviewer`, `tester`, `planner`, `patcher`)는 도구 목록의 앞부분만 받고 로컬 스케줄러로 돎; Claude/Codex 스킬 가져오기와 마켓플레이스 스킬 설치 |
-| MCP | stdio·Streamable HTTP·기존 SSE 서버; CLI 등록과 Codex/Claude 설정 가져오기; `/mcp` 연결 제어; `mcp-setup` 자연어 설정; 브라우저 OAuth와 폼·URL 사용자 승인; 서버 도구에도 세션 권한 적용 |
+| 스킬과 에이전트 | 내장 스킬 18개(`explore`, `plan`, `explain`, `code-review`, `security-review`, `test-fix`, `debug`, `refactor`, `commit`, `pr-body`, `docs`, `init`, `skill-creator`, `skill-setup`, `plugin-setup`, `mcp-setup`, `motif-endpoint`, `korean`); 내장 서브에이전트 5개(`explorer`, `reviewer`, `tester`, `planner`, `patcher`)는 도구 목록의 앞부분만 받고 로컬 스케줄러로 돎; 내장 워크플로 번들 5개에 스킬 6개 추가; 링크·저장소·마켓플레이스·각 클라이언트에서 Claude Code·Codex 스킬과 플러그인 설치([스킬](#스킬)) |
+| MCP | stdio·Streamable HTTP·기존 SSE 서버; `/mcp`에서 재시작 없이 설정하는 내장 프리셋 8개; CLI 등록과 Codex/Claude 설정 가져오기; 요청으로 설정하는 `mcp-setup`; 브라우저 OAuth(SSH에서는 `--no-browser`), `gh`를 통한 GitHub 로그인, 폼·URL 사용자 승인; 서버 도구에도 세션 권한 적용([MCP 서버](#mcp-서버)) |
 | 엔드포인트 | 키는 한 번만 물어보고 `~/.motif/.env`에 저장하며, 에이전트가 실행하는 모든 명령으로부터 차단; 401이면 키의 어느 쪽이 문제인지 알려 줌; 429는 서버의 `Retry-After`에 맞춰 재시도; `motif doctor`가 서버가 실제로 무엇을 내놓는지 보고 |
 | 화면 | 사용 도중 창을 줄여도 줄이 남지 않음; 테마 다섯 개(`motif`, `claude`, `mono`, `solarized`, `dracula`)를 제자리에서 교체 |
 | 스크립트 | `motif -p "질문"`은 답변만 출력; `motif "작업"`은 작업 하나를 실행하고 종료 |
 
-스킬은 프런트매터(`name`, `description`)와 본문의 지시문으로 된 `SKILL.md`이고,
-`$ARGUMENTS`는 명령 뒤에 쓴 말로 치환됩니다. YAML 메타데이터와 호출 정책을
-해석하며, 참조 파일·스크립트·공유 자료를 보존합니다. `motif skills import claude`나
-`motif skills import codex`로 후보를 조회하고, `motif skills add SOURCE`로 설치합니다.
-스킬 링크와 “이 프로젝트에 설치해줘” 같은 명확한 한국어·영어 요청을 프롬프트에
-입력하면 내장 `skill-setup`을 자동으로 불러와 선택·설치·등록 확인을 진행합니다.
-“글로벌로 설치해줘” 또는 “모든 프로젝트에서 쓰게 설치해줘”는 사용자 범위인
-`~/.motif/`에 설치합니다. 설치 후 Motif를 재실행하면 다른 프로젝트에서도 사용할 수 있습니다.
-GitHub 폴더·SKILL.md·raw 링크를 지원하며 `/skill-setup`으로 직접 호출할 수도 있습니다. 전체 플러그인 실행 환경이 아닌 스킬
-가져오기이며, 명령 예시와 호환 범위는 [스킬 문서](docs/skills.md)를 참고하세요.
+스킬은 [스킬](#스킬)에서 설명합니다.
 
 서브에이전트는 프런트매터 — `name`,
 `description`, `tools`(개수, 또는 정해진 순서 목록의 앞부분), `readOnly`, `maxTurns` —
@@ -298,6 +484,7 @@ GitHub 폴더·SKILL.md·raw 링크를 지원하며 `/skill-setup`으로 직접 
 ~/.motif/settings.json      내 기본값: model, endpoint, channel, 예산, theme, thinking, compactAt, permissions
 ~/.motif/.env               자격 증명
 ~/.motif/mcp.json           MCP 서버 등록
+~/.motif/auth/              MCP 로그인 자격 증명과 위임 기록, 본인만 읽을 수 있음
 ~/.motif/skills/<n>/SKILL.md, ~/.motif/agents/<n>.md      내 것, 모든 프로젝트에서
 ~/.motif/skills-installed.json, ~/.motif/skill-packages/ 설치한 스킬 사본과 출처
 <repo>/.motif/settings.json 프로젝트의 설정과 훅 — `motif trust`로 승인한 뒤 적용
@@ -384,15 +571,16 @@ packages/tools/      고정된 도구 집합과 린터
 packages/core/       에이전트 루프 · 엔드포인트 설정 · 압축 · 깨짐 예산 · 루프 가드
 packages/replay/     전송 계층의 기록, 재생, 의도적 파괴
 packages/tui/        타입 있는 셀 · 두 영역 스트리밍 · 컴포저 · 메뉴 · 테마
-packages/skills/     스킬 레지스트리와 내장 스킬
+packages/mcp/        MCP 클라이언트와 관리자 · 프리셋 · OAuth와 GitHub CLI 로그인 · 스키마 검사
+packages/skills/     Claude/Codex 호환 스킬 해석, 레지스트리와 내장 스킬
 packages/agents/     서브에이전트 정의와 로컬 스케줄러
 packages/hooks/      생명주기 셸 훅
 packages/journal/    추가 전용 세션 로그, 재개, 궤적 내보내기
-packages/cli/        `motif` 명령, 대화형 세션, 로그인, doctor, 플러그인
+packages/cli/        `motif` 명령, 대화형 세션, 로그인, doctor, MCP·스킬·플러그인 설정
 packages/eval/       폴리글랏 스위트, 캠페인 러너, 워크트리 채점기, REPORT.md와 polyglot-bench/ 키트 (위 벤치마크)
 toolkit/             프롬프트 골든(jinja2), 전문가 가지치기 수술, 캠페인 점수표
 corpus/              벤더 템플릿 + 생성된 골든
-docs/                로고, 스크린샷, 벤치마크 그림, 모델 가이드
+docs/                로고, 스크린샷, 벤치마크 그림, 모델 가이드, MCP·스킬 안내
 ```
 
 ```bash

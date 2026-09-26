@@ -160,6 +160,8 @@ does the same without the question.
 Flags: `--model`, `--endpoint`, `--env-file`, `--theme`, `--thinking`,
 `--verbose`, `--permissions ask|auto`, `--cwd`, `--channel`, `--max-turns`,
 `--max-output-tokens`, `--seed`, `--no-hero`. `motif --help` has the full list.
+[MCP servers](#mcp-servers) and [Skills](#skills) walk through the `mcp`, `skills`
+and `plugins` commands.
 
 If your terminal is configured to render East Asian Ambiguous characters as
 two columns, launch with `MOTIF_AMBIGUOUS_WIDTH=2 motif` to match its cursor and
@@ -170,49 +172,216 @@ it is a terminal preference, not an API configuration value in `.env`.
 
 ## MCP servers
 
-Connect local stdio servers, Streamable HTTP endpoints or legacy SSE services.
-Choose a built-in preset and check the connection:
+MCP servers give Motif outside tools: library documentation, GitHub, a browser,
+your own local services. Motif connects to stdio, Streamable HTTP and legacy SSE
+servers. Every server sits behind the one `mcp` tool, so connecting a server
+never changes the model's tool list. Each server tool is still called by its own
+name against its own JSON Schema, and the arguments are checked before they are
+sent. Server tools follow the session's permissions, and a write whose outcome
+is unknown is never repeated on its own.
+
+### Built-in presets
+
+Eight presets ship with Motif. Browsing them is offline, and registering one
+downloads, starts and signs in to nothing.
+
+| Preset | What it adds | Transport | What it needs |
+|---|---|---|---|
+| `context7` | Current library and framework documentation | HTTP | Nothing; an API key only raises account limits |
+| `github` | Repositories, issues, pull requests and workflows | HTTP | GitHub CLI (`gh`); Motif reuses the account `gh` saved |
+| `playwright` | Browser navigation and page inspection | stdio (`npx`) | Node/npm and Chrome; runs headless in an isolated profile |
+| `filesystem` | Filesystem tools inside one directory | stdio (`npx`) | An existing directory you choose explicitly |
+| `hugging-face` | Public model, dataset and repository information | HTTP | Nothing; a Hugging Face token for authenticated features |
+| `openai-docs` | OpenAI developer documentation | HTTP | Nothing |
+| `tauri` | Tauri app inspection (community server) | stdio (`npx`) | A running Tauri 2 app with its MCP bridge plugin |
+| `gmail` | Gmail (preview) | HTTP | Your own Google OAuth access token; no built-in sign-in |
+
+`npx` presets download their pinned package on the first connection. See
+[preset requirements](docs/mcp.md#built-in-server-presets) for the details.
+
+### Add a server
+
+**In a session.** Type `/mcp`. The manager lists the registered servers and the
+presets you can add. Select a preset to see what it needs and where it will be
+saved, then register and connect it. Its tools are usable in the same session,
+with no restart. `/mcp list`, `/mcp connect NAME`, `/mcp disconnect NAME`,
+`/mcp reconnect NAME` and `/mcp login NAME` work straight from the prompt.
+
+**A preset from the shell.**
 
 ```bash
-motif mcp presets
+motif mcp presets                                  # the catalog, offline
+motif mcp presets playwright                       # one preset's requirements
 motif mcp install context7 --enable
-motif mcp list
-motif mcp doctor --connect
+motif mcp install filesystem --root /absolute/project/path --enable
+motif mcp install github --enable && motif mcp login github
 ```
 
-The catalog includes Context7, GitHub, Playwright, Filesystem, Hugging Face, OpenAI Docs,
-Tauri and Gmail. Installation saves a disabled registration unless `--enable` is
-given; local packages are downloaded on first connection. Filesystem needs an
-explicit `--root`, Tauri needs an app bridge, and Gmail needs separately supplied
-OAuth credentials. See [preset requirements](docs/mcp.md#built-in-server-presets).
+`install` saves the registration, disabled unless `--enable` is given.
 
-Registration saves to `~/.motif/mcp.json`. `doctor --connect` starts enabled
-servers, checks their tool lists, then closes them. Inside a session, `/mcp`
-shows registered servers and available built-in presets. Select a preset to review
-its prerequisites, register it and connect in the current session. `/mcp list`, `/mcp connect NAME`,
-`/mcp disconnect NAME` and `/mcp reconnect NAME` also work directly. Standard
-OAuth servers offer browser sign-in on an authentication failure; use `/mcp login
-NAME` explicitly, or `motif mcp connect NAME --login` from the CLI.
+**Any other server.** Motif's options go before `--`, the server's own command
+after it. HTTP and SSE servers take a URL:
 
-The built-in `mcp-setup` skill guides setup from a GitHub repository or a
-service URL. Ask, for example, “Connect this MCP to Motifcode and check it:
-https://github.com/TaewoooPark/Trendchaser-mcp”. Clear setup requests load the
-skill automatically, or use `/mcp-setup <URL>` explicitly. It reads the server's
-installation instructions, registers it and checks the connection using the
-normal execution permissions.
+```bash
+motif mcp add local -- node /absolute/path/to/server.mjs
+motif mcp add local-api --env-ref TOKEN=SERVICE_TOKEN -- node /absolute/path/to/server.mjs
+motif mcp add docs --transport http https://developers.openai.com/mcp
+motif mcp add remote --transport http --header 'Authorization=Bearer ${SERVICE_TOKEN}' https://example.com/mcp
+motif mcp add legacy --transport sse --header-env X-Api-Key=SERVICE_TOKEN https://example.com/sse
+```
 
-Changes made inside `/mcp` take effect immediately. After editing registrations
-from another terminal or file editor, relaunch Motif to load them. `/new` clears
-the conversation but does not reload external edits.
-See the [MCP guide](docs/mcp.md) for credentials, Codex/Claude configuration
-import, connection controls and supported features.
+Pass credentials as environment references (`--env-ref`, `--header-env`,
+`${VAR}`) rather than values; private headers require them. Registrations are
+saved in `~/.motif/mcp.json`, which can also be
+[edited by hand](docs/mcp.md#configuration-and-trust).
+
+**From Codex or Claude.**
+
+```bash
+motif mcp import codex ~/.codex/config.toml
+motif mcp import claude /path/to/claude-config.json --write ./mcp.imported.json
+```
+
+Import is a preview until `--write` names a new file. Imported entries stay
+disabled for review, and inline secrets are not copied.
+
+**By asking.** Paste the server's repository or URL with a clear request, and
+the built-in `mcp-setup` skill takes over:
+
+> Connect this MCP to Motifcode and check it: https://github.com/TaewoooPark/Trendchaser-mcp
+
+It reads the server's installation instructions, registers it and checks the
+connection under your usual permissions. `/mcp-setup <URL>` runs it explicitly.
+
+### Sign in and check
+
+```bash
+motif mcp list                       # registrations and presets, offline
+motif mcp doctor --connect           # start enabled servers, list their tools, close them
+motif mcp connect NAME --login       # connect, signing in through the browser if needed
+motif mcp login NAME --no-browser    # print the sign-in URL instead, for SSH or headless machines
+```
+
+Servers that use standard MCP OAuth sign in through the browser. Motif opens the
+provider's page, receives the callback on a loopback port and keeps the tokens
+in private files under `~/.motif/auth`, never in `mcp.json` or in the model's
+context. In a session, a server that needs sign-in offers it, and the panel also
+shows the URL in case no browser can open. The GitHub preset reuses GitHub CLI's
+saved account instead: Motif stores only a delegation grant, `gh` keeps the
+token, and access survives restarts. `motif mcp logout NAME` removes Motif's
+credentials without signing you out of the provider or of `gh`.
+
+`~/.motif/mcp.json` is trusted. Project files are never picked up automatically:
+review one, then pass `--mcp-config FILE` together with the SHA-256 it prints to
+`--trust-mcp`. Servers added in `/mcp` connect at once; edits made from another
+terminal need a relaunch. The [MCP guide](docs/mcp.md) covers tool allowlists,
+timeouts, form and URL approvals and the full support matrix.
+
+---
+
+## Skills
+
+A skill is a folder with a `SKILL.md` (YAML frontmatter with a `name` and a
+`description`, then the instructions) and any scripts, references and assets
+beside it. It is the Agent Skills format that Claude Code and Codex use, and
+Motif reads both clients' variants. Only a short index sits in the system
+prompt; a skill's full body loads when it is used.
+
+Motif ships 18 core skills and 6 more in five workflow bundles. Run one as
+`/<name> [input]` (`/commit fix the parser`), attach it with `@skill:name`, or
+let the model choose it through the `skill` tool. `/skills` lists what is loaded.
+
+### Claude Code and Codex compatibility
+
+| In the source skill | In Motif |
+|---|---|
+| `SKILL.md` frontmatter, references, scripts, assets | Loaded with the skill's own directory as its base |
+| `$ARGUMENTS`, `$ARGUMENTS[N]`, `$N` | Filled from the words after the command; quoted words stay together |
+| `${CLAUDE_SKILL_DIR}`, `${CLAUDE_PLUGIN_ROOT}` | The skill's directory, and its package root when installed from a package |
+| Claude `disable-model-invocation`, `user-invocable` | Respected: user-only, or hidden from the user |
+| Codex `agents/openai.yaml` with `allow_implicit_invocation: false` | User-only |
+| Claude `allowed-tools` | Kept with a notice; it grants no Motif permission |
+| `.claude-plugin/marketplace.json`, `.agents/plugins/marketplace.json` | Browsable catalogs for both clients |
+| Host-specific hooks, forks, model switches | Reported as unsupported; the skill is not run half-way |
+
+### Add skills
+
+**By asking.** Paste a skill link with a clear request. The built-in
+`skill-setup` inspects the source, installs the skill and checks it:
+
+> Install this skill for this project: https://github.com/anthropics/skills/tree/main/skills/webapp-testing
+
+Asking for it "globally" or "for all projects" installs into `~/.motif/`, for
+every project. `/skill-setup <source or request>` runs it explicitly, including
+for a Claude or Codex skill you already have.
+
+**From a link, a repository or a folder.**
+
+```bash
+motif skills add https://github.com/anthropics/skills/tree/main/skills/webapp-testing
+motif skills add https://github.com/anthropics/skills/blob/main/skills/brand-guidelines/SKILL.md --scope project
+motif skills add anthropics/skills --path skills/webapp-testing
+motif skills add ./my-skill --scope project
+motif skills inspect ./my-skill                    # preview without installing
+```
+
+A GitHub folder, `SKILL.md` or raw link installs the whole skill folder.
+`--ref` pins a branch, tag or commit, `--dry-run` previews, and the resolved
+commit and content digest are recorded with each installation.
+
+**From Claude Code or Codex.**
+
+```bash
+motif skills import claude                         # list candidates; nothing is copied yet
+motif skills import codex --json
+motif skills import claude --skill webapp-testing --scope project
+```
+
+Claude import reads `~/.claude/skills`, the project's `.claude/skills` and the
+plugins enabled in Claude Code. Codex import reads `~/.agents/skills`,
+`~/.codex/skills`, the project's `.agents/skills` up to the Git root and the
+plugins enabled in Codex. Skills are copied into Motif's own store; the other
+client's files and settings are never changed.
+
+**From a marketplace.**
+
+```bash
+motif skills marketplace OWNER/CATALOG
+motif skills add OWNER/CATALOG --plugin ENTRY --skill SKILL_NAME
+```
+
+**A plugin package with its own MCP servers.** `motif plugins add OWNER/REPO
+--skill NAME` installs its skills, `motif plugins inspect NAME` shows the
+servers it brings, and `motif plugins connect NAME --login` registers and
+connects them after you approve. Hooks, agents and commands written for another
+host stay inactive. `/plugin-setup <source or request>` does the same by request.
+
+**Write your own.** Create `~/.motif/skills/<name>/SKILL.md` for every project,
+or `<project>/.motif/skills/<name>/SKILL.md` for one; `/skill-creator` can
+draft it.
+
+```markdown
+---
+name: explain-widget
+description: Explain this project's widget lifecycle and check its invariants.
+---
+
+Read references/lifecycle.md relative to this skill's directory.
+Explain the widget named in $ARGUMENTS, citing the relevant source.
+```
+
+`motif skills installed`, `motif skills update NAME` and `motif skills remove
+NAME` maintain installed copies. Restart a running session to load newly
+installed skills. The [skills guide](docs/skills.md) has the precedence rules
+and the full compatibility table.
 
 ### Built-in workflow bundles
 
-Five plugins ship with Motif. Their skills run as slash commands in every project;
-instructions and supporting references load only when used. A bundle tied to an
-MCP service is listed for the model only while that server is enabled. User and
-project skills can override them. Listing plugins never starts a service.
+Five plugins ship with Motif. Their skills run as slash commands in every
+project, and their instructions and references load only when used. A bundle
+tied to an MCP service is listed for the model only while that server is
+enabled. User and project skills can override them, and listing plugins never
+starts a service.
 
 | Bundle | Skills | Optional service |
 |---|---|---|
@@ -222,21 +391,16 @@ project skills can override them. Listing plugins never starts a service.
 | `frontend-quality` | `/frontend-quality`, `/react-composition` | Context7 and Playwright |
 | `mcp-builder` | `/mcp-builder` | The server being developed |
 
-```sh
+```bash
 motif plugins list
 motif plugins inspect library-docs --json
 motif plugins connect library-docs
-motif plugins connect browser-web-testing
 ```
 
-Connection is a separate, approved action; for reviewed noninteractive setup use
-`--yes`. Existing registrations are preserved. A bundle being available does not
-mean its service is authenticated. The GitHub preset reuses GitHub CLI’s saved
-account: select GitHub in `/mcp`, or run `motif mcp install github --enable` and
-`motif mcp login github`. It offers browser login when needed and stays authorized
-across restarts. Motif stores the delegation grant, while `gh` retains the token
-in its credential store. `motif mcp logout github` stops Motif access without
-logging other GitHub CLI workflows out. See [bundled workflows](docs/skills.md#built-in-workflow-bundles).
+Connecting a bundle's service is a separate step you approve; `--yes` confirms a
+reviewed plan in a noninteractive shell. Existing registrations are preserved,
+and a bundle being available does not mean its service is signed in. See
+[bundled workflows](docs/skills.md#built-in-workflow-bundles).
 
 ---
 
@@ -283,7 +447,7 @@ spawned — the agent's `bash` cannot see it, and neither can a project hook.
 | `/status` (`/cost`) | connection, settings and session totals |
 | `/config` | effective settings, where each came from, and the files |
 | `/doctor` | probe the endpoint: auth, parsers, cache, channels |
-| `/mcp [list\|connect NAME\|disconnect NAME\|reconnect NAME]` | open the MCP connection manager, inspect status or control a connection |
+| `/mcp [list\|connect NAME\|disconnect NAME\|reconnect NAME\|login NAME\|logout NAME]` | open the MCP manager to add a preset, or inspect, control and sign in to a connection |
 | `/mcp-setup <URL>` | use the built-in skill to register and check an MCP server |
 | `/login`, `/logout` | paste an Infron API key, checked and saved to `~/.motif/.env`; remove the saved key |
 | `/model [id]`, `/endpoint [url]` | show or set the model id or endpoint for the next task |
@@ -298,6 +462,7 @@ spawned — the agent's `bash` cannot see it, and neither can a project hook.
 | `/notes` (`/memory`), `/hooks` | the project notes every task reads; the hooks around tools |
 | `/skills`, `/agents`, `/plugins` | what is loaded; each skill also runs as `/<skill> [input]` |
 | `/skill-setup <source or request>` | inspect, install and verify skills from local files, clients or marketplaces |
+| `/plugin-setup <source or request>` | install a Claude/Codex plugin package's skills and connect its MCP servers |
 | `/new` (`/clear`) | start a new conversation; the working tree is untouched |
 | `/sessions`, `/resume [n\|file]` | recorded sessions; continue from one |
 | `/quit` (`/exit`, `/q`) | leave |
@@ -320,24 +485,13 @@ enter send · \ + enter newline · esc interrupt or clear · ctrl-c twice quit �
 | Permissions | A numbered prompt before a command, a write, a patch or the terminal runs; "don't ask again for this tool"; a refusal the model is told about; Shift-Tab or `/permissions auto` runs everything |
 | Conversation | Each task sees the ones before it; `--continue` and `/resume` bring a recorded conversation back; messages sent while a task runs are queued; Esc interrupts; Codex-style compaction past `compactAt` of the window — the model writes a handoff summary and your own messages are kept verbatim — and `/compact <focus>` on demand |
 | Backend | `.motif/` laid out like Claude Code's `.claude/`: user and project settings, skills, agents, plugins, notes, one journal per task, history; project hooks applied once `motif trust` approves them |
-| Skills and agents | 18 core skills (`explore`, `plan`, `explain`, `code-review`, `security-review`, `test-fix`, `debug`, `refactor`, `commit`, `pr-body`, `docs`, `init`, `skill-creator`, `skill-setup`, `plugin-setup`, `mcp-setup`, `motif-endpoint`, `korean`); 6 additional skills in five built-in workflow bundles; Claude/Codex skill import and marketplace skill installation; 5 built-in subagents (`explorer`, `reviewer`, `tester`, `planner`, `patcher`) |
-| MCP | stdio, Streamable HTTP and legacy SSE servers; CLI registration and Codex/Claude config import; `/mcp` connection controls; `mcp-setup` for natural-language setup; browser OAuth and human form/URL approval; server tools follow session permissions |
+| Skills and agents | 18 core skills (`explore`, `plan`, `explain`, `code-review`, `security-review`, `test-fix`, `debug`, `refactor`, `commit`, `pr-body`, `docs`, `init`, `skill-creator`, `skill-setup`, `plugin-setup`, `mcp-setup`, `motif-endpoint`, `korean`); 6 additional skills in five built-in workflow bundles; Claude Code and Codex skills and plugins installed from links, repositories, marketplaces or the clients themselves ([Skills](#skills)); 5 built-in subagents (`explorer`, `reviewer`, `tester`, `planner`, `patcher`) |
+| MCP | stdio, Streamable HTTP and legacy SSE servers; 8 built-in presets set up from `/mcp` without a restart; CLI registration and Codex/Claude config import; `mcp-setup` for setup by request; browser OAuth (`--no-browser` for SSH), GitHub through `gh`, human form/URL approval; server tools follow session permissions ([MCP servers](#mcp-servers)) |
 | Endpoint | The key asked for once and saved to `~/.motif/.env`, withheld from every command the agent runs; a 401 that says which side of the key it is on; a 429 retried after the server's `Retry-After`; `motif doctor` reports what the server actually returns |
 | Screen | Shrinking the window mid-session leaves no stale rows; five themes (`motif`, `claude`, `mono`, `solarized`, `dracula`) swapped in place |
 | Scripts | `motif -p "question"` prints only the reply; `motif "task"` runs one task and exits |
 
-A skill is a `SKILL.md` with frontmatter (`name`, `description`) and the
-instructions as the body; `$ARGUMENTS` is replaced by what follows the command.
-YAML metadata, invocation policies and supporting resource directories are
-preserved. Skills load on demand and accepted bodies reach the model whole.
-Use `motif skills import claude` or `motif skills import codex` to discover
-existing skills, and `motif skills add SOURCE` to install a selected source.
-Clear Korean/English installation requests containing a skill link automatically
-load the built-in `skill-setup`; `/skill-setup` also invokes it explicitly.
-Ask to install “globally” or “for all projects” to use the user library under
-`~/.motif/`, available in every project after restarting Motif. GitHub
-folder, `SKILL.md` and raw-file links preserve supporting files. See [Skills](docs/skills.md)
-for marketplace examples, commands and compatibility limits.
+Skills are covered in [Skills](#skills).
 A subagent is Markdown with frontmatter — `name`, `description`, `tools` (a
 count, or a prefix of the canonical list), `readOnly`, `maxTurns`. A plugin is
 a directory with `plugin.json` and its own `skills/` and `agents/`.
@@ -346,6 +500,7 @@ a directory with `plugin.json` and its own `skills/` and `agents/`.
 ~/.motif/settings.json      your defaults: model, endpoint, channel, budgets, theme, thinking, compactAt, permissions
 ~/.motif/.env               the credential
 ~/.motif/mcp.json           MCP server registrations
+~/.motif/auth/              MCP sign-in credentials and delegation grants, private to you
 ~/.motif/skills/<n>/SKILL.md, ~/.motif/agents/<n>.md      yours, on every project
 ~/.motif/skills-installed.json, ~/.motif/skill-packages/ managed skill copies and sources
 <repo>/.motif/settings.json the project's settings and hooks — applied once `motif trust` approves it
@@ -437,15 +592,16 @@ packages/tools/      the frozen tool set and its linter
 packages/core/       agent loop · endpoint config · compaction · breakage budget · loop guard
 packages/replay/     record, replay and deliberately break the transport
 packages/tui/        typed cells · two-region streaming · composer · menus · themes
-packages/skills/     skill registry and the built-in skills
+packages/mcp/        MCP client and manager · presets · OAuth and GitHub CLI sign-in · schema checks
+packages/skills/     Claude/Codex-compatible skill parsing, the registry and the built-in skills
 packages/agents/     subagent definitions and the local scheduler
 packages/hooks/      lifecycle shell hooks
 packages/journal/    append-only session log, resume, trajectory export
-packages/cli/        the `motif` command, the interactive session, login, doctor, plugins
+packages/cli/        the `motif` command, the interactive session, login, doctor, MCP/skill/plugin setup
 packages/eval/       polyglot suite, campaign runner, worktree grader, REPORT.md and the polyglot-bench/ kit (the benchmark above)
 toolkit/             prompt goldens (jinja2), expert-pruning surgery, campaign score table
 corpus/              vendored template + generated goldens
-docs/                logo, screenshots, benchmark figure, model guide
+docs/                logo, screenshots, benchmark figure, model guide, MCP and skills guides
 ```
 
 ```bash
