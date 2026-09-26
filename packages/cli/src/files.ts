@@ -242,7 +242,15 @@ function installsDependencies(intent: string): boolean {
   return dependency >= 0 && dependency < action && !/(?:스킬|skills?)(?:과|와|\s*및)\s*/i.test(intent.slice(0, dependency));
 }
 
+/** Editing a project file or writing a test that merely mentions a link is not setup. */
+function editsProjectFile(intent: string): boolean {
+  return /\b(?:to|in|into|inside)\s+(?:the\s+|our\s+|this\s+)?(?:README|CHANGELOG|docs\/[\w./-]*|[\w./-]+\.(?:mdx?|rst|txt))(?=$|[\s,.;:!?)])/i.test(intent)
+    || /(?:리드미|README|CHANGELOG|체인지로그|[\w./-]+\.mdx?)(?:에|에다가?)(?=\s|$)/i.test(intent)
+    || /^(?:please\s+)?(?:add|write|create)\s+(?:(?:a|an|the|new|some)\s+)?(?:unit\s+|integration\s+|e2e\s+|regression\s+)?(?:tests?|specs?|fixtures?)\b|\bas\s+(?:a\s+)?(?:test\s+)?fixtures?\b/i.test(intent);
+}
+
 function requestsSetup(intent: string): boolean {
+  if (editsProjectFile(intent)) return false;
   // Informational questions, refusals and reported instructions are not actions.
   if (/^(?:please\s+)?(?:how|why|what|explain|describe|example|inspect|review|compare|read|summarize|documentation|translate|quote|tell\s+me|show\s+me)\b|\b(?:README|document(?:ation)?)\s+(?:says?|reads?)\b|\b(?:do\s+not|don['’]t|never|not\s+yet)\b|\bwithout\s+(?:installing|adding|importing|connecting|registering|configuring)\b|어떻게|방법|설명|예시|검토|번역|인용|가능한지|(?:설치|추가|등록|연결|설정|임포트)(?:은|는|을|를)?\s*(?:하지|안\s*해|없이|말고)/i.test(intent)) return false;
   const english = new RegExp(`^(?:please\\s+)?${SETUP_ACTION}|^(?:can|could|would|will)\\s+you\\s+(?:please\\s+)?${SETUP_ACTION}|^(?:I|we)\\s+(?:want|need|would\\s+like)\\s+(?:you\\s+)?to\\s+${SETUP_ACTION}`, "i").test(intent);

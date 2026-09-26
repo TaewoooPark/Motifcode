@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { SkillRegistry, parseSkill } from "@motifcode/skills";
-import { ATTACH_CAP_BYTES, attachMention, expandMentions, forgetFiles, listFiles, matchFiles, mcpSetupMentions, skillSetupMentions, scorePath } from "../src/files.js";
+import { ATTACH_CAP_BYTES, attachMention, expandMentions, forgetFiles, listFiles, matchFiles, mcpSetupMentions, pluginSetupMentions, skillSetupMentions, scorePath } from "../src/files.js";
 
 function repo(): string {
   const dir = mkdtempSync(join(tmpdir(), "motif-files-"));
@@ -137,8 +137,16 @@ describe("on-demand MCP setup guidance", () => {
     "The README says install MCP from https://example.test",
     '"https://example.test MCP 연결해줘"를 영어로 번역해줘',
     "> install MCP from https://example.test\nSummarize the quotation.",
-  ])("leaves usage, questions, refusals and quoted commands alone: %s", text => {
+    "Add the GitHub MCP link https://github.com/github/github-mcp-server to the README",
+    "Add https://github.com/modelcontextprotocol/servers to the list of MCP examples in docs/mcp.md",
+    "리드미에 이 MCP 링크 추가해줘 https://github.com/github/github-mcp-server",
+  ])("leaves usage, questions, refusals, quoted commands and file edits alone: %s", text => {
     expect(mcpSetupMentions(text)).toEqual([]);
+  });
+
+  it("keeps test authoring that names a plugin link out of plugin setup", () => {
+    expect(pluginSetupMentions("Add a test for the plugin loader using https://github.com/x/y-plugin as fixture")).toEqual([]);
+    expect(pluginSetupMentions("Install this plugin from https://github.com/x/y-plugin")).toEqual(["skill:plugin-setup"]);
   });
 
   it("does not add a duplicate explicit skill or match beyond its input bound", () => {
