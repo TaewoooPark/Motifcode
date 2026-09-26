@@ -66,17 +66,18 @@ describe("built-in skills", () => {
     expect(out.trimEnd().endsWith("</skill>")).toBe(true);
   });
 
-  it("discovers MCP setup in one short bilingual line and loads its complete body on demand", () => {
+  it("discovers MCP setup in one short line and loads its complete body on demand", () => {
     const skill = reg.get("mcp-setup")!;
     const index = reg.index();
     const row = index.split("\n").find(line => line.trim().startsWith("mcp-setup —"))!;
     expect(skill.source).toBe("builtin");
     expect(row.length).toBeLessThan(140);
     expect(row).toContain("GitHub URL");
-    expect(row).toContain("연결/등록");
+    expect(row).toContain("verify it");
     expect(index).not.toContain("motif mcp doctor --connect");
     expect(estimateTokens(skill.body.trim())).toBeLessThanOrEqual(skill.budget!);
-    expect(skill.budget).toBeLessThanOrEqual(900);
+    // The estimate counts characters; English needs more of them than Korean did.
+    expect(skill.budget).toBeLessThanOrEqual(1500);
     expect(reg.render("mcp-setup")).toBe(`<skill name="mcp-setup">\n${skill.body.trim()}\n</skill>`);
   });
 

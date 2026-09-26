@@ -24,10 +24,10 @@ describe("natural plugin setup", () => {
     expect(result.task).toContain("--yes --login");
     expect(result.task).toContain("motif plugins inspect 'NAME' --scope SCOPE --json");
     expect(result.task).toContain("motif plugins installed --scope SCOPE");
-    expect(result.task).toContain("간단한 텍스트 목록으로 등록 이름만 확인");
+    expect(result.task).toContain("find the registered name in the short text list");
     expect(result.task).not.toContain("motif plugins installed --scope user --json");
-    expect(result.task).toContain("3단계의 계획 검토");
-    expect(result.task).toContain("SOURCE 탐색·inspect·add·재설치를 생략");
+    expect(result.task).toContain("plan review in step 3");
+    expect(result.task).toContain("skip exploring the original SOURCE, inspect, add and reinstalling");
   });
   it.each([
     "Explain how to install the plugin from https://github.com/example/plugins",
