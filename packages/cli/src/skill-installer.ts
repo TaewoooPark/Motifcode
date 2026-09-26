@@ -83,7 +83,7 @@ function linkPath(value: string): string {
   return value.split("/").filter(part => part !== "" && part !== ".").join("/");
 }
 function gitSource(input: string, options: SkillInstallOptions, cwd: string): GitSource {
-  if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(input)) return { remote: `https://github.com/${input}.git`, ref: options.ref, path: options.path };
+  if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(input)) return gitSource(`https://github.com/${input}.git`, options, cwd);
   let url: URL; try { url = new URL(input); } catch { return fail("invalid_source", "Use a local directory, GitHub owner/repo, or HTTPS Git URL."); }
   if (url.protocol !== "https:" || url.username || url.password) fail("invalid_source", "Git sources require HTTPS without embedded credentials.");
   const github = url.hostname === "github.com"; const raw = url.hostname === "raw.githubusercontent.com";
@@ -137,16 +137,17 @@ function gitSource(input: string, options: SkillInstallOptions, cwd: string): Gi
   if (options.path !== undefined && linkPath(options.path) !== path) fail("conflicting_path", "--path conflicts with the folder in the GitHub link. Use a repository URL to select a different folder.");
   return { remote, ref, ...(path ? { path } : {}) };
 }
-function acquire(input: string, options: SkillInstallOptions): { root: string; boundary: string; origin: SkillOrigin; cleanup: () => void } {
-  const cwd = settings(options).cwd; const local = resolve(cwd, input);
-  if (existsSync(local) && !options.ref) {
+function acquire(input: string, options: SkillInstallOptions, sourceKind: "explicit" | "remote" = "explicit"): { root: string; boundary: string; origin: SkillOrigin; cleanup: () => void } {
+  const cwd = settings(options).cwd; const local = sourceKind === "explicit" ? resolve(cwd, input) : undefined;
+  const localExists = local !== undefined && existsSync(local);
+  if (localExists && !options.ref) {
     const root = realpathSync(local);
     if (!statSync(root).isDirectory()) fail("invalid_source", "The skill source must be a directory.");
     const selected = options.path ? packagePath(root, options.path) : root;
     return { root: selected, boundary: root, origin: { kind: "local", source: root, ...(options.path ? { subpath: options.path } : {}) }, cleanup() {} };
   }
   if (options.ref?.startsWith("-") || options.ref?.includes("\0")) fail("invalid_ref", "Invalid Git reference.");
-  const { remote, ref, path } = existsSync(local) ? { remote: realpathSync(local), ref: options.ref, path: options.path } : gitSource(input, options, cwd);
+  const { remote, ref, path } = localExists ? { remote: realpathSync(local), ref: options.ref, path: options.path } : gitSource(input, options, cwd);
   const temp = mkdtempSync(join(tmpdir(), "motif-skills-git-"));
   try {
     git(["init", "--quiet"], temp);
@@ -217,8 +218,10 @@ function discover(root: string, origin: SkillOrigin, options: SkillInstallOption
   const files = [...new Set(roots.flatMap(enumerate))].filter(file => !selectedFolder || inside(selectedFolder, file));
   for (const file of files) {
     try {
-      // Direct skill folders may themselves be symlinks (Codex supports this).
-      // A SKILL.md symlink still must stay within that selected folder.
+      // Only explicit local/client selection may follow a skill folder outside
+      // its source. Git-provided links must stay inside the selected package.
+      if (origin.kind === "git") contained(root, file);
+      // A SKILL.md symlink still must stay within its selected skill folder.
       const directRoot = manifest ? root : realpathSync(dirname(file));
       const checked = contained(directRoot, manifest ? file : "SKILL.md"); if (statSync(checked).size > MAX_METADATA) fail("metadata_limit", "SKILL.md exceeds the 2 MiB metadata limit."); const skill = loadSkill(checked, options.scope ?? "user", manifest ? { packageRoot: root } : {});
       const namespace = options.namespace ?? pluginName;
@@ -291,7 +294,9 @@ export function inspectSkillSource(input: string, options: SkillInstallOptions =
       if (!remote) fail("invalid_source", "Remote marketplace source needs a repository.");
       const ref = str(record.sha) ?? str(record.ref); if (record.sha !== undefined && !/^[a-f0-9]{40}$/.test(String(record.sha))) fail("invalid_ref", "Marketplace sha must be a full lowercase Git commit SHA.");
       const childPath = record.source === "git-subdir" ? str(record.path) ?? fail("invalid_source", "git-subdir requires a path.") : undefined;
-      const child = acquire(remote, { ...options, plugin: undefined, path: childPath, ref });
+      // Package-declared remotes must never select a host path, even if a valid
+      // owner/repo or URL happens to name an existing directory in the cwd.
+      const child = acquire(remote, { ...options, plugin: undefined, path: childPath, ref }, "remote");
       root = child.root; origin = { ...child.origin, marketplace: catalog.name }; childCleanup = child.cleanup;
     } else fail("unsupported_source", `Marketplace source ${String(record.source ?? "unknown")} is not supported. Use a local folder or Git source; package commands and lifecycle scripts are never run.`);
     origin = { ...origin, catalog: { source: source.origin.source, ...(source.origin.ref ? { ref: source.origin.ref } : {}), ...(source.origin.subpath ? { path: source.origin.subpath } : {}), entry: options.plugin } };
