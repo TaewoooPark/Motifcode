@@ -36,6 +36,8 @@ export interface StoredSettings {
   compactAt?: number;
   /** Whether the session asks before a tool that changes the world runs. */
   permissions?: "ask" | "auto";
+  /** Seconds a shell command may run when the model's call does not set `timeout_s`. */
+  bashTimeout?: number;
 }
 
 export type SettingsSource = "project" | "user" | "default";
@@ -61,6 +63,7 @@ const KEYS: readonly (keyof StoredSettings)[] = [
   "verbose",
   "compactAt",
   "permissions",
+  "bashTimeout",
 ];
 
 export function userSettingsPath(home = homedir()): string {
@@ -101,7 +104,7 @@ export function parseSettings(text: string): { values: StoredSettings; problems:
     if (obj["channel"] === "toolcall" || obj["channel"] === "object" || obj["channel"] === "raw") values.channel = obj["channel"];
     else problems.push("channel must be toolcall, object or raw");
   }
-  const int = (k: "maxTurns" | "maxOutputTokens" | "seed", min: number): void => {
+  const int = (k: "maxTurns" | "maxOutputTokens" | "seed" | "bashTimeout", min: number): void => {
     if (obj[k] === undefined) return;
     const v = obj[k];
     if (typeof v === "number" && Number.isInteger(v) && v >= min) values[k] = v;
@@ -110,6 +113,7 @@ export function parseSettings(text: string): { values: StoredSettings; problems:
   int("maxTurns", 1);
   int("maxOutputTokens", 1);
   int("seed", 0);
+  int("bashTimeout", 1);
   for (const key of ["thinking", "verbose"] as const) {
     if (obj[key] !== undefined) {
       if (typeof obj[key] === "boolean") values[key] = obj[key];

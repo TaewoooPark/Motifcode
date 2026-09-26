@@ -424,6 +424,7 @@ Flags
   --channel-policy <p>      fixed | adaptive (default fixed)
   --max-turns <n>           turn ceiling (default 100)
   --max-output-tokens <n>   cap on each model step
+  --bash-timeout <s>        seconds a shell command may run when the model sets no timeout (default 120)
   --seed <n>                sampling seed, passed to the server
   --cwd <path>              working directory
   --journal <path>          write the session record here instead of .motif/sessions
@@ -738,6 +739,7 @@ async function main(): Promise<number> {
         ["verbose", String(args.flags["verbose"] === true || stored.values.verbose === true), args.flags["verbose"] === true ? "flag" : (stored.sources.verbose ?? "default")],
         ["compactAt", String(compactAt), stored.sources.compactAt ?? "default"],
         ["permissions", permissions, typeof args.flags["permissions"] === "string" ? "flag" : (stored.sources.permissions ?? "default")],
+        ["bashTimeout", `${flagInt(args.flags, "bash-timeout", stored.values.bashTimeout ?? 120, 1)}s`, args.flags["bash-timeout"] !== undefined ? "flag" : (stored.sources.bashTimeout ?? "default")],
       ];
       for (const [k, v, from] of rows) process.stdout.write(`${k.padEnd(16)} ${v.padEnd(40)} ${from}\n`);
       process.stdout.write(`\nuser file     ${stored.userPath}${existsSync(stored.userPath) ? "" : " (absent)"}\n`);
@@ -850,6 +852,7 @@ async function main(): Promise<number> {
       ? flagInt(args.flags, "max-output-tokens", 0, 1)
       : stored.values.maxOutputTokens;
   const seed = args.flags["seed"] !== undefined ? flagInt(args.flags, "seed", 0, 0) : stored.values.seed;
+  const bashTimeout = flagInt(args.flags, "bash-timeout", stored.values.bashTimeout ?? 120, 1);
 
   // The two body-parsing channels are implemented end to end but have never
   // been run against Motif-3. Saying so with a flag is more honest than a
@@ -977,6 +980,7 @@ async function main(): Promise<number> {
         theme: applyTheme(themeName) ? themeName : "motif",
         compactAt,
         permissions,
+        bashTimeout,
       },
       settingsInfo: stored,
       settingSources: {
@@ -985,7 +989,7 @@ async function main(): Promise<number> {
         endpoint: connection.sources.endpoint,
         ...Object.fromEntries([
           ["channel", "channel"], ["maxTurns", "max-turns"], ["maxOutputTokens", "max-output-tokens"],
-          ["seed", "seed"], ["theme", "theme"], ["thinking", "thinking"],
+          ["seed", "seed"], ["theme", "theme"], ["thinking", "thinking"], ["bashTimeout", "bash-timeout"],
           ["verbose", "verbose"], ["permissions", "permissions"],
         ].filter(([, flag]) => args.flags[flag!] !== undefined).map(([key]) => [key, "flag"])),
       },
@@ -1070,6 +1074,7 @@ async function main(): Promise<number> {
       hooks,
       skills,
       policy: policyForAgent({ root: cwd, tools: activeToolNames, readOnly: false }),
+      timeoutMs: bashTimeout * 1000,
       callMcp: (server, method, values, signal, observe) => mcp.invoke(server, method, values, { scopeId: "root", signal, observe }),
     });
     try {
@@ -1172,6 +1177,7 @@ async function main(): Promise<number> {
     hooks,
     skills,
     policy: policyForAgent({ root: cwd, tools: activeToolNames, readOnly: false }),
+    timeoutMs: bashTimeout * 1000,
     callMcp: (server, method, values, signal, observe) => mcp.invoke(server, method, values, { scopeId: "root", signal, observe }),
     onHook: (event, label, ok) => emit({ type: "hook", event, label, ok }),
     runAgent: async (name, prompt) => {
@@ -1201,6 +1207,7 @@ async function main(): Promise<number> {
         const childExecutor = new ToolExecutor({
           cwd,
           skills,
+          timeoutMs: bashTimeout * 1000,
           callMcp: (server, method, values, signal, observe) => mcp.invoke(server, method, values, { scopeId: childScope.scopeId, signal, observe }),
           policy: policyForAgent({
             root: cwd,

@@ -21,6 +21,12 @@ describe("parsing", () => {
     expect(problems).toHaveLength(2);
   });
 
+  it("takes bashTimeout as whole seconds", () => {
+    expect(parseSettings(JSON.stringify({ bashTimeout: 900 })).values).toEqual({ bashTimeout: 900 });
+    expect(parseSettings(JSON.stringify({ bashTimeout: 0 })).problems[0]).toContain("bashTimeout");
+    expect(parseSettings(JSON.stringify({ bashTimeout: 1.5 })).problems[0]).toContain("bashTimeout");
+  });
+
   it("reports a file that is not JSON rather than throwing", () => {
     expect(parseSettings("{not json").problems[0]).toContain("not JSON");
     expect(parseSettings("[]").problems[0]).toContain("object");

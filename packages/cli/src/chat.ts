@@ -1667,6 +1667,7 @@ export class Chat {
       hooks: this.opts.hooks,
       skills: this.opts.skills,
       policy: policyForAgent({ root: cwd, tools: toolNames, readOnly: false }),
+      timeoutMs: (this.settings.bashTimeout ?? 120) * 1000,
       callMcp: this.mcpInvoker("root"),
       confirm: (call) => this.confirm(call),
       onHook: (event, label, ok) => this.screen.apply({ type: "hook", event, label, ok }),
@@ -1693,6 +1694,7 @@ export class Chat {
           const childExecutor = new ToolExecutor({
             cwd: this.settings.cwd,
             skills: this.opts.skills,
+            timeoutMs: (this.settings.bashTimeout ?? 120) * 1000,
             callMcp: this.mcpInvoker(childScope.scopeId),
             confirm: (call) => this.confirm(call),
             policy: policyForAgent({
@@ -2064,6 +2066,7 @@ export class Chat {
       ["verbose", String(this.screen.verboseOutput), src("verbose")],
       ["compactAt", String(s.compactAt), src("compactAt")],
       ["permissions", s.permissions, src("permissions")],
+      ["bashTimeout", `${s.bashTimeout ?? 120}s`, src("bashTimeout")],
     ];
     const lines = rows.map(([k, v, from]) => `${k.padEnd(16)} ${v.padEnd(40)} ${from}`);
     lines.push("");

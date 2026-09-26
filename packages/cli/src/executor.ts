@@ -57,6 +57,7 @@ export interface ExecutorOptions {
   /** Called for MCP proxy calls. Absent means no servers are connected. */
   callMcp?: (server: string, method: string, args: unknown, signal?: AbortSignal, observe?: () => Promise<ToolResult>) => Promise<string | ToolResult>;
   onHook?: (event: HookEvent, label: string, ok: boolean) => void;
+  /** Limit for a command the model runs without its own `timeout_s`; 120 s when absent. */
   timeoutMs?: number;
   /**
    * Asked before a tool that changes the world runs — bash, write, a patch,
@@ -542,7 +543,7 @@ export class ToolExecutor implements Executor {
         return runBash(
           str(args, "command"),
           cwd,
-          (num(args, "timeout_s") ?? 120) * 1000,
+          (num(args, "timeout_s") ?? this.timeoutMs / 1000) * 1000,
           this.policy,
           () => this.scratchDir(),
           signal,

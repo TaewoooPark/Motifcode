@@ -39,10 +39,12 @@ export interface ChatSettings {
   compactAt: number;
   /** Ask before a tool that changes the world runs, or run everything. */
   permissions: "ask" | "auto";
+  /** Seconds a shell command may run when the model's call does not set `timeout_s` (default 120). */
+  bashTimeout?: number;
 }
 
 /** Settings a command may write to the person's file. */
-export type PersistableKey = "model" | "endpoint" | "channel" | "maxTurns" | "maxOutputTokens" | "seed" | "theme" | "thinking" | "verbose" | "compactAt" | "permissions";
+export type PersistableKey = "model" | "endpoint" | "channel" | "maxTurns" | "maxOutputTokens" | "seed" | "theme" | "thinking" | "verbose" | "compactAt" | "permissions" | "bashTimeout";
 
 export interface CommandContext {
   settings: ChatSettings;
