@@ -456,6 +456,13 @@ describe("Built-in MCP catalog setup", () => {
     expect(install).not.toHaveBeenCalled();
   });
 
+  it("explains that an available preset is not set up yet instead of calling it unknown", async () => {
+    const s = session(controls([]).mcp, undefined, 0.75, { mcpPresets: listMcpPresets, mcpInstall: vi.fn() });
+    s.type("/mcp disconnect context7\r");
+    await vi.waitFor(() => expect(s.output()).toContain("context7 is not set up yet"));
+    expect(s.output()).not.toContain("Unknown MCP server");
+  });
+
   it("keeps Gmail preview prerequisites actionable without soliciting a token", async () => {
     const install = vi.fn(); const s = session(controls([]).mcp, undefined, 0.75, { mcpPresets: listMcpPresets, mcpInstall: install });
     s.type("/mcp install gmail\r");

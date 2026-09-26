@@ -1026,6 +1026,7 @@ export class Chat {
     const before = session?.statuses().find((s) => s.server === server);
     const preset = this.opts.mcpPresets?.().find(entry => entry.id === server);
     if ((!before || !before.enabled) && preset && ["connect", "reconnect", "login"].includes(action)) return this.installMcp(server, action === "login");
+    if (!before && preset) return fail(`${server} is not set up yet. Press enter on it in /mcp, or use /mcp install ${server}.`);
     if (!session || !before) return fail("Unknown MCP server. /mcp list shows configured names and available presets.");
     if (!before.enabled) return fail(mcpFailureHint(before));
     const abort = new AbortController();
