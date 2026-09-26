@@ -20,9 +20,32 @@ skill references work in both interactive chat and one-shot/print runs.
 ## Install and import
 
 The built-in `skill-setup` skill guides source inspection, installation and
-verification. In a session, use `/skill-setup` followed by a repository URL or
-an instruction such as “import my Claude webapp-testing skill”. You can also
-use the commands directly, without a model or API key:
+verification. Paste a skill link into the prompt with a clear installation
+request, for example:
+
+```text
+https://github.com/anthropics/skills/tree/main/skills/webapp-testing 이 스킬을 이 프로젝트에 설치해줘.
+Please install this skill for this project: https://github.com/anthropics/skills/blob/main/skills/brand-guidelines/SKILL.md
+https://github.com/anthropics/skills/tree/main/skills/theme-factory 이 스킬을 글로벌로 설치해줘. 모든 프로젝트에서 쓰고 싶어.
+Install this skill globally: https://github.com/anthropics/skills/tree/main/skills/brand-guidelines
+```
+
+Motif attaches the setup guidance automatically to clear Korean or English
+link-based installation requests, in interactive chat and one-shot/print runs.
+It preserves the original request and session permissions. Quoted examples,
+explanation-only requests and explicit refusals do not trigger this attachment.
+An explicit `/skill-setup <source or request>` also works, including requests to
+import an existing Claude/Codex skill without a link.
+
+The setup flow inspects the source, selects the requested skill, installs it and
+checks its receipt and registration before reporting the result. User scope is
+the default. “Globally”, “all projects”, “글로벌” and “전역” also mean user scope:
+the managed skill is stored under `~/.motif/` and discovered from every project
+for the same user. Ask for “this project” to use the current working directory.
+Restart an existing Motif session to load a newly installed skill. A
+collection with no clear selection needs a skill name; it is not installed in
+bulk automatically. Model-guided setup can still make mistakes; the CLI below
+provides the same operations directly, without a model or API key:
 
 ```sh
 # Discover existing client skills; no files are copied yet.
@@ -36,6 +59,7 @@ motif skills import claude --skill webapp-testing --scope project
 motif skills inspect ./my-skill
 motif skills add ./my-skill --scope project
 motif skills add anthropics/skills --path skills/webapp-testing
+motif skills add https://github.com/anthropics/skills/blob/main/skills/webapp-testing/SKILL.md --scope project
 
 # Inspect a marketplace and install skills from one of its entries.
 motif skills marketplace OWNER/CATALOG --json
@@ -53,7 +77,12 @@ motif skills remove INSTALLED_NAME
 project's managed library. `--dry-run` previews changes. A remote preview may
 fetch the requested repository into temporary storage, but does not register
 skills. `--ref` selects a Git branch, tag or commit. Resolved commits and content
-digests are recorded with each installation.
+digests are recorded with each installation. GitHub `tree` folder links, `blob`
+`SKILL.md` links and `raw.githubusercontent.com` `SKILL.md` links resolve to a
+Git repository, revision and containing folder; supporting files are retained.
+The source receipt records that canonical repository/ref/path. Ambiguous branch
+or tag boundaries require a matching explicit `--ref`; conflicting `--path` or
+`--ref` options are rejected. Other web pages are not standalone skill packages.
 
 Use repeated `--skill` options to select several candidates, or `--all` for
 an intentional bulk import. Ambiguous names are reported; use the returned

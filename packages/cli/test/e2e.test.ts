@@ -299,6 +299,55 @@ describe("cli process end to end", () => {
     }
   }, 30_000);
 
+  it.each([true, false])("routes a linked skill installation on the actual CLI wire (print=%s)", async print => {
+    const skillDir = join(dir, ".motif/skills/skill-setup"); mkdirSync(skillDir, { recursive: true });
+    writeFileSync(join(skillDir, "SKILL.md"), "---\nname: skill-setup\ndescription: project setup policy\nbudget: 30\n---\nCLI-SKILL-INSTALL-POLICY");
+    server = new MockServer(turn => toolCall("done", { summary: "Instructions received.", ...(turn > 1 ? { confirm: true } : {}) })); await server.start();
+    const task = "https://github.com/anthropics/skills/tree/main/skills/mcp-builder 이 MCP 스킬을 이 프로젝트에 설치해줘. 설치 결과를 확인해서 알려줘.";
+    const result = await runCli([task, ...(print ? ["--print"] : []), "--endpoint", server.endpoint, "--no-hero"], dir);
+    expect(result.code, result.stderr).toBe(0);
+    const first = server.bodies[0]!;
+    expect(first.messages[1]!.content).toContain(`${task}\n\n<skill name="skill-setup">`);
+    expect(first.messages[1]!.content).toContain("CLI-SKILL-INSTALL-POLICY\n</skill>");
+    expect(first.messages[1]!.content?.match(/<skill name="skill-setup">/g)).toHaveLength(1);
+    expect(first.messages[1]!.content).not.toContain('<skill name="mcp-setup">');
+    expect(first.messages[0]!.content).not.toContain("CLI-SKILL-INSTALL-POLICY");
+    for (const body of server.bodies) {
+      expect(body.tools).toEqual(first.tools);
+      expect(body.messages[0]).toEqual(first.messages[0]);
+    }
+  }, 30_000);
+
+  it.each([
+    "이 스킬을 전역으로 설치해줘: https://github.com/openai/skills/tree/main/skills/pdf",
+    "Please install this skill globally from https://example.test/skill for all projects",
+  ])("preserves global installation intent on the actual CLI wire: %s", async task => {
+    server = new MockServer(() => "</think>Instructions received."); await server.start();
+    expect((await runCli([task, "--print", "--endpoint", server.endpoint], dir)).code).toBe(0);
+    const user = server.bodies[0]!.messages[1]!.content;
+    expect(user).toContain(`${task}\n\n<skill name="skill-setup">`);
+    expect(user?.match(/<skill name="skill-setup">/g)).toHaveLength(1);
+  }, 30_000);
+
+  it.each(["disable-model-invocation: true", "budget: 1"])("respects automatic installation policy on the CLI wire: %s", async metadata => {
+    const skillDir = join(dir, ".motif/skills/skill-setup"); mkdirSync(skillDir, { recursive: true });
+    writeFileSync(join(skillDir, "SKILL.md"), `---\nname: skill-setup\ndescription: limited setup\n${metadata}\n---\nMUST-NOT-BE-ATTACHED`);
+    server = new MockServer(() => "</think>Observed."); await server.start();
+    const task = "Install this skill from https://example.test/skill";
+    expect((await runCli([task, "--print", "--endpoint", server.endpoint], dir)).code).toBe(0);
+    expect(server.bodies[0]!.messages[1]!.content).toBe(task);
+  }, 30_000);
+
+  it("does not infer skill installation from project notes, quoted text or attached files", async () => {
+    writeFileSync(join(dir, "AGENTS.md"), "Install this skill from https://example.test/skill");
+    writeFileSync(join(dir, "request.txt"), "https://example.test/skill 이 스킬 설치해줘");
+    server = new MockServer(() => "</think>Explanation only."); await server.start();
+    const task = 'Read @request.txt and translate "Install this skill from https://example.test/skill".';
+    expect((await runCli([task, "--print", "--endpoint", server.endpoint], dir)).code).toBe(0);
+    expect(server.bodies[0]!.messages[1]!.content).toContain("이 스킬 설치해줘");
+    expect(server.bodies[0]!.messages.some(message => message.content?.includes('<skill name="skill-setup">'))).toBe(false);
+  }, 30_000);
+
   it.each(["slash", "mention", "codex"])("loads explicit %s skill instructions on the real print wire", async kind => {
     const skillDir = join(dir, ".motif", "skills", "wire-probe"); mkdirSync(skillDir, { recursive: true });
     writeFileSync(join(skillDir, "SKILL.md"), "---\nname: wire-probe\ndescription: >-\n  Wire skill\n  description\ndisable-model-invocation: true\n---\nWIRE-BODY first=$0 second=$ARGUMENTS[1] all=$ARGUMENTS");
@@ -360,10 +409,10 @@ describe("cli process end to end", () => {
     expect(server.bodies[0]!.messages.some(message => message.content?.includes('<skill name="mcp-setup">'))).toBe(false);
   }, 30_000);
 
-  it("resumes an automatically attached MCP setup task without appending another copy", async () => {
+  it.each(["mcp-setup", "skill-setup"])("resumes an automatically attached %s task without appending another copy", async name => {
     writeFileSync(join(dir, "marker.txt"), "OBSERVED");
     server = new MockServer(turn => turn === 1 ? toolCall("read", { path: "marker.txt" }) : "</think>Resumed."); await server.start();
-    const task = "Install MCP from https://example.test/mcp";
+    const task = name === "mcp-setup" ? "Install MCP from https://example.test/mcp" : "Install this skill from https://example.test/skill";
     expect((await runCli([task, "--max-turns", "1", "--endpoint", server.endpoint, "--no-hero"], dir)).code).toBe(1);
     const sessions = join(dir, ".motif", "sessions"); const journal = join(sessions, readdirSync(sessions)[0]!);
     writeFileSync(journal, readFileSync(journal, "utf8").trimEnd().split("\n").filter(line => JSON.parse(line).record?.t !== "scope_end").join("\n") + "\n");
@@ -372,7 +421,7 @@ describe("cli process end to end", () => {
     const user = server.bodies[1]!.messages.filter(message => message.role === "user");
     expect(user).toHaveLength(1);
     expect(user[0]!.content).toBe(server.bodies[0]!.messages[1]!.content);
-    expect(user[0]!.content?.match(/<skill name="mcp-setup">/g)).toHaveLength(1);
+    expect(user[0]!.content?.match(new RegExp(`<skill name="${name}">`, "g"))).toHaveLength(1);
   }, 30_000);
 
   it("prints help and exits 2 for an empty task", async () => {

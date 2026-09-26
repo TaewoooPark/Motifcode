@@ -183,21 +183,112 @@ export function expandMentions(
   return { task: `${text}\n\n${blocks.join("\n\n")}`, attached };
 }
 
-/** Conservative routing of original user prose, never attached files or project notes.
- * This selects guidance only; execution still follows the user's request and policy.
+/** Setup routing considers the bounded original message, before file attachments.
+ * It selects guidance only; execution still follows the user's request and policy.
  */
+const SETUP_LINK = /\uFFFC(\d+)\uFFFC/g;
+const SETUP_ACTION = "(?:globally\\s+)?(?:add|install|import|connect|register|configure|set\\s+up)\\b";
+
+interface SetupClause { text: string; links: URL[]; }
+function setupProse(text: string): SetupClause[] | null {
+  if (text.length > 16_384) return null;
+  let prose = text
+    .replace(/```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)/g, " ")
+    .replace(/^\s*>[^\n]*$/gm, " ")
+    .replace(/<(file|directory|skill)\b[^>]*>[\s\S]*?<\/\1>/gi, " ")
+    .replace(/`[^`]*(?:`|$)|"[^"\n]*"|(?<!\w)'[^'\n]*'|“[^”\n]*”|‘[^’\n]*’/g, quoted => {
+      // Quoting just a URL is ordinary prose; quoting instructions is not.
+      const inner = quoted.slice(1, -1);
+      return /^https?:\/\/[^\s<>"'`]+$/i.test(inner) ? inner : " ";
+    });
+  const urls: URL[] = [];
+  prose = prose.replace(/https?:\/\/[^\s<>"'`]+/gi, raw => {
+    const clean = raw.replace(/[),.;!?]+$/, "");
+    try { urls.push(new URL(clean)); } catch { return " "; }
+    return ` \uFFFC${urls.length - 1}\uFFFC ${raw.slice(clean.length)}`;
+  });
+  if (!urls.length) return null;
+  const clauses = prose.split(new RegExp(`[.!?;\\n]+|\\b(?:and|then)\\s+(?=(?:please\\s+)?${SETUP_ACTION})|그리고\\s*`, "i")).map(text => ({
+    text, links: [...text.matchAll(SETUP_LINK)].flatMap(match => urls[Number(match[1])] ?? []),
+  }));
+  // A URL on its own line can belong to the adjacent request. A URL in another
+  // prose clause ("Read this link. Install this package ...") cannot.
+  return clauses.map((clause, index) => {
+    if (clause.links.length) return clause;
+    const adjacent = [clauses[index - 1], clauses[index + 1]];
+    return { ...clause, links: adjacent.flatMap(other => other?.links.length && /^[\s:,*-]*$/.test(setupIntent(other.text)) ? other.links : []) };
+  });
+}
+
+function setupIntent(clause: string): string {
+  return clause.replace(SETUP_LINK, " ").replace(/[()[\]]/g, " ").trim();
+}
+
+function isSkillLink(url: URL): boolean {
+  if (!["github.com", "raw.githubusercontent.com"].includes(url.hostname.toLowerCase())) return false;
+  const parts = url.pathname.toLowerCase().split("/").filter(Boolean);
+  return parts.length >= 2 && parts.some((part, index) => index > 0 && /^(?:skills?|skill\.md|[\w.-]+-skills?)$/.test(part));
+}
+
+function installsDependencies(intent: string): boolean {
+  const object = /\b(?:install|add|configure|set\s+up)\s+([^.;!?]{0,160})/i.exec(intent)?.[1];
+  if (object) {
+    const dependency = object.search(/\b(?:dependenc(?:y|ies)|prerequisites?|requirements?)\b/i);
+    const skill = object.search(/\bskills?\b/i);
+    if (dependency >= 0 && (skill < 0 || dependency < skill)) return true;
+  }
+  const dependency = intent.search(/의존성|의존\s*패키지|필수\s*패키지/);
+  const action = intent.search(/설치|추가|설정/);
+  return dependency >= 0 && dependency < action && !/(?:스킬|skills?)(?:과|와|\s*및)\s*/i.test(intent.slice(0, dependency));
+}
+
+function requestsSetup(intent: string): boolean {
+  // Informational questions, refusals and reported instructions are not actions.
+  if (/^(?:please\s+)?(?:how|why|what|explain|describe|example|inspect|review|compare|read|summarize|documentation|translate|quote|tell\s+me|show\s+me)\b|\b(?:README|document(?:ation)?)\s+(?:says?|reads?)\b|\b(?:do\s+not|don['’]t|never|not\s+yet)\b|\bwithout\s+(?:installing|adding|importing|connecting|registering|configuring)\b|어떻게|방법|설명|예시|검토|번역|인용|가능한지|(?:설치|추가|등록|연결|설정|임포트)(?:은|는|을|를)?\s*(?:하지|안\s*해|없이|말고)/i.test(intent)) return false;
+  const english = new RegExp(`^(?:please\\s+)?${SETUP_ACTION}|^(?:can|could|would|will)\\s+you\\s+(?:please\\s+)?${SETUP_ACTION}|^(?:I|we)\\s+(?:want|need|would\\s+like)\\s+(?:you\\s+)?to\\s+${SETUP_ACTION}`, "i").test(intent);
+  const korean = /(?:등록|추가|연결|설치|설정|임포트)(?:을|를)?\s*(?:좀\s*)?(?:해\s*(?:줘(?:요)?|주세요|주십시오|줄래(?:요)?)|하(?:자|세요|고\s*싶(?:어(?:요)?|다)?)|부탁(?:해(?:요)?|드립니다)?)(?=$|[\s,:.!?])/.test(intent)
+    || /(?:등록|추가|연결|설치|설정|임포트)하고[^.!?\n]{0,80}(?:확인|검증)해\s*(?:줘(?:요)?|주세요|줄래(?:요)?)(?=$|[\s,:.!?])/.test(intent)
+    || /가져(?:와\s*(?:줘(?:요)?|주세요)|오(?:고\s*싶(?:어(?:요)?|다)?|세요))(?=$|[\s,:.!?])/.test(intent);
+  return english || korean;
+}
+
+function explicitlySelected(text: string, name: string): boolean {
+  return new RegExp(`(?:@skill:|\\$)${name}\\b|^\\s*\\/${name}\\b|<skill\\s+name=["']${name}["']`, "i").test(text);
+}
+
+function namesSkill(intent: string): boolean { return /\bskills?\b|스킬/i.test(intent); }
+
+/** Link-based skill installation, including unmistakable GitHub skill paths. */
+export function skillSetupMentions(text: string): string[] {
+  if (explicitlySelected(text, "skill-setup")) return [];
+  const prose = setupProse(text);
+  if (!prose) return [];
+  const selected = prose.some(clause => {
+    const intent = setupIntent(clause.text);
+    if (!clause.links.length || !requestsSetup(intent) || installsDependencies(intent)) return false;
+    if (namesSkill(intent)) return true;
+    if (!clause.links.some(isSkillLink) || /\bmcp\b/i.test(intent)) return false;
+    // An explicit skill URL can stand for "this", but not for another named
+    // target such as "install its dependencies" or "install Node.js".
+    return /^(?:(?:please\s+)?|(?:can|could|would|will)\s+you\s+(?:please\s+)?)(?:globally\s+)?(?:install|add|import)[\s:]*(?:(?:this|that|it)(?:\s+(?:link|repo(?:sitory)?))?(?=\s+(?:from|at|in|into|for|to|globally|system-wide|and|then)\b|[\s:]*$)|the\s+(?:link|repo(?:sitory)?)\b|from\b|(?:for|in|into|to|globally|system-wide)\b|$)/i.test(intent)
+      || /(?:이거|이것|이걸|이\s*링크|여기)/.test(intent)
+      || /^(?:설치|추가|등록|임포트)해/.test(intent);
+  });
+  return selected ? ["skill:skill-setup"] : [];
+}
+
 export function mcpSetupMentions(text: string): string[] {
-  if (text.length > 16_384 || /@skill:mcp-setup\b|^\s*\/mcp-setup\b|<skill\s+name=["']mcp-setup["']/i.test(text)) return [];
-  const prose = text.replace(/```[\s\S]*?(?:```|$)/g, " ").replace(/^\s*>[^\n]*$/gm, " ");
-  const urls = /https?:\/\/[^\s<>"'`]+/gi;
-  if (!urls.test(prose)) return [];
-  const intent = prose.replace(urls, " ").replace(/`[^`]*(?:`|$)|"[^"\n]*"|'[^'\n]*'|“[^”\n]*”|‘[^’\n]*’/g, " ").trim();
-  if (!/\bmcp\b/i.test(intent)) return [];
-  // Prefer a missed convenience attachment over treating a question or refusal as setup.
-  if (/\b(?:how|why|explain|describe|example|inspect|review|compare|documentation|translate|quote)\b|\b(?:do\s+not|don['’]t|never|not\s+yet|without)\b|어떻게|방법|설명|예시|검토|번역|인용|알려|가능한지|하지\s*(?:마|말)|(?:등록|추가|연결|설치)(?:은|는|을|를)?\s*(?:하지|안\s*해|없이)/i.test(intent)) return [];
-  const action = "(?:add|install|connect|register|configure|set\\s+up)\\b";
-  const english = new RegExp(`^(?:please\\s+)?${action}|\\b(?:can|could|would|will)\\s+you\\s+(?:please\\s+)?${action}|\\b(?:I|we)\\s+(?:want|need|would\\s+like)\\s+(?:you\\s+)?to\\s+${action}`, "i").test(intent);
-  const korean = /(?:등록|추가|연결|설치)(?:을|를)?\s*(?:좀\s*)?(?:해\s*(?:줘|주|줄)|하(?:자|세요|고\s*싶)|부탁)/.test(intent)
-    || /(?:등록|추가|연결|설치)하고[^.!?\n]{0,80}(?:확인|검증)해\s*(?:줘|주|줄)/.test(intent);
-  return english || korean ? ["skill:mcp-setup"] : [];
+  if (explicitlySelected(text, "mcp-setup")) return [];
+  const prose = setupProse(text);
+  if (!prose) return [];
+  const selected = prose.some(clause => {
+    const intent = setupIntent(clause.text);
+    if (!clause.links.length || !requestsSetup(intent) || !/\bmcp\b(?![-_])/i.test(intent)) return false;
+    // "mcp-builder skill" or "MCP skill" installs instructions, not a server.
+    // Separate clear clauses can still select both setup skills.
+    return !namesSkill(intent)
+      || /\b(?:and|plus)\s+(?:(?:the|this)\s+)?mcp\s+(?:server|service|endpoint)\b|\bmcp\s+(?:server|service|endpoint)\s+(?:and|plus)\s+(?:(?:the|this)\s+)?(?:[\w-]+\s+)?skills?\b/i.test(intent)
+      || /(?:및|와|과)\s*mcp(?:\s*서버)?|\bmcp\s*서버(?:와|과)\s*(?:[가-힣]+\s+)?스킬|\bmcp(?:\s*서버)?(?:를|을|도)?\s*(?:연결|등록|설정)(?:해|하)/i.test(intent);
+  });
+  return selected ? ["skill:mcp-setup"] : [];
 }

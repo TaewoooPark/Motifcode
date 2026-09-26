@@ -13,7 +13,11 @@ export const SKILLS_HELP = `Usage:
   motif skills update NAME [--ref REF] [--scope user|project] [--dry-run] [--json]
   motif skills remove NAME [--scope user|project] [--dry-run] [--json]
 
-SOURCE is a local directory, GitHub owner/repo, or HTTPS Git repository URL.
+SOURCE is a local directory, GitHub owner/repo, HTTPS Git repository URL, or a
+GitHub tree folder / blob SKILL.md / raw.githubusercontent.com SKILL.md link.
+File links install the complete containing folder. Ambiguous branch/tag links
+require a matching --ref; conflicting --ref/--path overrides are rejected.
+Nested plugin skills retain shared package resources and register only the selection.
 --plugin selects a skills package from .agents/plugins/marketplace.json or
 .claude-plugin/marketplace.json. List its entries with 'skills marketplace SOURCE'.
 Import without --skill/--all lists candidates; import with a selection copies them.

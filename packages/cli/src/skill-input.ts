@@ -1,7 +1,7 @@
 /** One skill invocation path for print, one-shot and interactive input. */
 import type { SkillRegistry } from "@motifcode/skills";
 import { mentionsIn } from "@motifcode/tui";
-import { expandMentions, mcpSetupMentions } from "./files.js";
+import { expandMentions, mcpSetupMentions, skillSetupMentions } from "./files.js";
 
 export interface ExpandedSkillInput { task: string; attached: string[]; errors: string[]; }
 export function expandSkillInput(text: string, opts: { cwd: string; skills: SkillRegistry; automatic?: boolean; slash?: boolean }): ExpandedSkillInput {
@@ -24,9 +24,9 @@ export function expandSkillInput(text: string, opts: { cwd: string; skills: Skil
     const result = opts.skills.load(name, { invocation: "user", arguments: input, cwd: opts.cwd });
     if (result.ok) bodies.set(name, result.output); else errors.push(result.output);
   }
-  if (opts.automatic !== false) for (const token of mcpSetupMentions(text)) {
+  if (opts.automatic !== false) for (const token of [...skillSetupMentions(text), ...mcpSetupMentions(text)]) {
     const name = token.slice(6);
-    if (bodies.has(name)) continue;
+    if (explicit.has(name) || bodies.has(name)) continue;
     const skill = opts.skills.get(name);
     if (!skill || skill.disableModelInvocation) continue;
     const result = opts.skills.load(name, { invocation: "model", cwd: opts.cwd });

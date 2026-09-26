@@ -295,7 +295,11 @@ YAML metadata, invocation policies and supporting resource directories are
 preserved. Skills load on demand and accepted bodies reach the model whole.
 Use `motif skills import claude` or `motif skills import codex` to discover
 existing skills, and `motif skills add SOURCE` to install a selected source.
-The built-in `/skill-setup` guides this process. See [Skills](docs/skills.md)
+Clear Korean/English installation requests containing a skill link automatically
+load the built-in `skill-setup`; `/skill-setup` also invokes it explicitly.
+Ask to install “globally” or “for all projects” to use the user library under
+`~/.motif/`, available in every project after restarting Motif. GitHub
+folder, `SKILL.md` and raw-file links preserve supporting files. See [Skills](docs/skills.md)
 for marketplace examples, commands and compatibility limits.
 A subagent is Markdown with frontmatter — `name`, `description`, `tools` (a
 count, or a prefix of the canonical list), `readOnly`, `maxTurns`. A plugin is

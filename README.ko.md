@@ -278,7 +278,11 @@ enter send · \ + enter newline · esc interrupt or clear · ctrl-c twice quit �
 `$ARGUMENTS`는 명령 뒤에 쓴 말로 치환됩니다. YAML 메타데이터와 호출 정책을
 해석하며, 참조 파일·스크립트·공유 자료를 보존합니다. `motif skills import claude`나
 `motif skills import codex`로 후보를 조회하고, `motif skills add SOURCE`로 설치합니다.
-내장 `/skill-setup`이 선택과 검증을 안내합니다. 전체 플러그인 실행 환경이 아닌 스킬
+스킬 링크와 “이 프로젝트에 설치해줘” 같은 명확한 한국어·영어 요청을 프롬프트에
+입력하면 내장 `skill-setup`을 자동으로 불러와 선택·설치·등록 확인을 진행합니다.
+“글로벌로 설치해줘” 또는 “모든 프로젝트에서 쓰게 설치해줘”는 사용자 범위인
+`~/.motif/`에 설치합니다. 설치 후 Motif를 재실행하면 다른 프로젝트에서도 사용할 수 있습니다.
+GitHub 폴더·SKILL.md·raw 링크를 지원하며 `/skill-setup`으로 직접 호출할 수도 있습니다. 전체 플러그인 실행 환경이 아닌 스킬
 가져오기이며, 명령 예시와 호환 범위는 [스킬 문서](docs/skills.md)를 참고하세요.
 
 서브에이전트는 프런트매터 — `name`,

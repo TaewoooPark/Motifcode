@@ -37,6 +37,53 @@ describe("skill runtime boundaries", () => {
     expect(expandSkillInput('/mcp-setup hi',{cwd:"/",skills:manual}).errors).toEqual([]);
   });
 
+
+  it.each(["", "@skill:skill-setup ", "$skill-setup ", "/skill-setup "])("attaches the selected project setup guidance once for %s", prefix => {
+    const skills = registry("skill-setup", "", "DEFAULT-SETUP");
+    skills.register(parseSkill("---\nname: skill-setup\ndescription: project policy\nbudget: 40\n---\nPROJECT-SETUP", "project"));
+    skills.register(parseSkill("---\nname: mcp-setup\ndescription: mcp policy\n---\nMCP-POLICY", "builtin"));
+    const task = "Install the mcp-builder skill from https://github.com/anthropics/skills/tree/main/skills/mcp-builder";
+    const result = expandSkillInput(prefix + task, { cwd: "/", skills });
+    expect(result.errors).toEqual([]);
+    expect(result.attached).toEqual(["skill:skill-setup"]);
+    expect(result.task.match(/<skill name="skill-setup">/g)).toHaveLength(1);
+    expect(result.task).toContain("PROJECT-SETUP");
+    expect(result.task).not.toContain("DEFAULT-SETUP");
+    expect(result.task).not.toContain("MCP-POLICY");
+  });
+
+  it("honors automatic capability, model-invocation policy and budget for skill setup", () => {
+    const task = "https://example.test/skill 이 스킬 설치해줘";
+    const automatic = registry("skill-setup", "", "SETUP-GUIDANCE");
+    expect(expandSkillInput(task, { cwd: "/", skills: automatic, automatic: false })).toEqual({ task, attached: [], errors: [] });
+    for (const metadata of ["disable-model-invocation: true", "budget: 1"]) {
+      const skills = registry("skill-setup", metadata, "THIS-BODY-MUST-NOT-BE-INJECTED");
+      expect(expandSkillInput(task, { cwd: "/", skills })).toEqual({ task, attached: [], errors: [] });
+    }
+    const manual = registry("skill-setup", "disable-model-invocation: true", "MANUAL-SETUP");
+    expect(expandSkillInput("/skill-setup " + task, { cwd: "/", skills: manual }).task).toContain("MANUAL-SETUP");
+    const hidden = registry("skill-setup", "user-invocable: false", "MODEL-ONLY-SETUP");
+    expect(expandSkillInput(task, { cwd: "/", skills: hidden }).task).toContain("MODEL-ONLY-SETUP");
+    const refused = expandSkillInput("@skill:skill-setup " + task, { cwd: "/", skills: hidden });
+    expect(refused.errors).toContainEqual(expect.stringContaining("user-invocable: false"));
+    expect(refused.task).not.toContain("MODEL-ONLY-SETUP");
+    const oversized = registry("skill-setup", "budget: 1", "TOO-LARGE-BODY");
+    expect(expandSkillInput("/skill-setup " + task, { cwd: "/", skills: oversized }).errors).toContainEqual(expect.stringContaining("not injected"));
+  });
+
+  it("does not route requests discovered inside attached files", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "motif-skill-routing-"));
+    const request = "Install skill from https://example.test/skill and connect MCP at https://example.test/mcp";
+    writeFileSync(join(cwd, "request.txt"), request);
+    const skills = registry("skill-setup", "", "SETUP-GUIDANCE");
+    skills.register(parseSkill("---\nname: mcp-setup\ndescription: mcp\n---\nMCP-GUIDANCE"));
+    const result = expandSkillInput("Read @request.txt", { cwd, skills });
+    expect(result.attached).toEqual(["request.txt"]);
+    expect(result.task).toContain(request);
+    expect(result.task).not.toContain("SETUP-GUIDANCE");
+    expect(result.task).not.toContain("MCP-GUIDANCE");
+  });
+
   it("returns real failures and preserves complete bounded skill results", async () => {
     const cwd=mkdtempSync(join(tmpdir(),"motif-skill-executor-"));const skills=registry("large","","HEAD\n"+'x'.repeat(15000)+'\nMIDDLE\n'+'y'.repeat(15000)+'\nTAIL');
     const ex=new ToolExecutor({cwd,skills});

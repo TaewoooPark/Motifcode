@@ -448,61 +448,62 @@ and a design document are three different voices.`,
   /* ---------------------------------------------------------------- */
   `---
 name: skill-setup
-description: Install, import and verify skills from local files, Claude, Codex, GitHub or marketplaces
-budget: 1400
+description: Install a skill from a link, Claude/Codex or a marketplace and verify it — 스킬 설치·가져오기
+budget: 1200
 tags: setup skills
 ---
+사용자가 요청한 스킬을 Motifcode의 관리 라이브러리에 설치하고 결과를 확인한다.
+설치 요청은 실행 요청이다. 설명·검토·미리보기만 요청했다면 설치하지 않는다.
+사용자가 정한 출처·스킬·범위와 현재 실행 권한을 따른다.
 
-Help the person add skills to Motifcode using its supported CLI. Preserve their
-existing library and source-client installations. Follow an explicit request to
-install; do not ask again merely because installation writes local files.
+완료 기준은 선택한 스킬이 설치 영수증과 등록 목록에 나타나고, 출처·이름·범위가
+요청과 일치하는 것이다. 확인하면 사용법과 한계를 보고하고 끝낸다. 설치 확인을
+위해 다른 모델 세션이나 스킬의 예제 업무를 실행하지 않는다.
 
-1. Identify the requested source, skill and scope from the conversation. Run
-   \`motif skills --help\` and \`motif skills list\` to see the current commands and
-   registrations. Use the user scope by default; use project scope when the
-   person asks for a repository-local installation. Do not install every skill
-   in a collection unless they requested that.
-2. Inspect before selecting:
-   - Local directory or GitHub repository:
-     \`motif skills inspect SOURCE --json\`.
-   - Existing Claude or Codex skills:
-     \`motif skills import claude --json\` or
-     \`motif skills import codex --json\`. With no selection these only list
-     candidates, including skills in installed plugin packages.
-   - A marketplace: \`motif skills marketplace SOURCE --json\`, then
-     \`motif skills inspect SOURCE --plugin ENTRY --json\`.
-   Use \`--path\` for a repository subdirectory and \`--ref\` for an explicit Git
-   branch, tag or commit. Read the returned diagnostics. Do not guess a missing
-   entry, silently choose a namesake, or scan unrelated private directories.
-3. Install the requested selection with
-   \`motif skills add SOURCE --skill NAME --scope SCOPE\`, adding the inspected
-   \`--plugin\`, \`--path\`, \`--ref\` or \`--namespace\` options when needed.
-   For existing client skills, use
-   \`motif skills import CLIENT --skill SELECTION_ID --scope SCOPE\` with the returned selectionId.
-   Replace SCOPE with the selected user or project scope. Multiple \`--skill\` options select several entries. \`--all\` is only for an
-   explicit bulk request. Use \`--namespace\` to preserve both conflicting
-   sources, rather than replacing an unrelated skill. Use \`--dry-run\` when the
-   person asks for a preview.
-4. Verify with \`motif skills installed --scope user --json\` (or project), and
-   \`motif skills list\`. Check the selected names, recorded source/ref and
-   compatibility diagnostics. A copied skill is not proof that all its tools
-   or scripts run. Report any separate executable, connector, MCP or account
-   dependency. Do not copy credentials, run plugin hooks, or claim a complete
-   Claude/Codex plugin runtime was installed.
-5. Tell the person how to use the installed name: restart the current Motif
-   session, then \`/<name> task\` or \`@skill:<name> task\`. When verification of
-   behavior is requested, use a harmless task that checks the skill body and
-   needed bundled resources, and report its actual result. Do not treat a
-   model's claim of success as evidence without checking the output.
-   Once the installation receipt, registration and requested resource checks
-   pass, report the result and stop. Do not launch another model session to
-   verify an installation unless the person explicitly requests one.
+1. \`bash\`로 \`pwd\`와 \`motif skills --help\`를 확인한다. project 범위는 이
+   작업 디렉터리를 유지한다. 상위 Git 루트나 Motif 소스 폴더로 이동하지 않는다.
+   사용자가 다른 대상 폴더를 지정했으면 그 경로를 \`--cwd\`로 전달한다. 이후 설치·관리는 이 CLI를
+   사용한다. Motif 소스를 탐색·수정하거나 수동으로 SKILL.md만 복사하지 않는다.
+   CLI가 없거나 해당 기능을 지원하지 않으면 그 한계를 보고한다.
+2. 주어진 출처를 한 번 조회한다.
+   - 저장소·스킬 폴더·SKILL.md 링크 또는 로컬 폴더:
+     \`motif skills inspect 'SOURCE' --json\`. GitHub tree/blob 및 raw SKILL.md
+     링크도 그대로 전달한다. 링크는 shell 인자로 인용한다.
+   - 기존 Claude/Codex 설치본: \`motif skills import claude --json\` 또는
+     \`motif skills import codex --json\`. 선택 옵션 없이는 목록만 반환한다.
+   - 마켓플레이스에서 특정 항목을 요청하면
+     \`motif skills inspect 'SOURCE' --plugin ENTRY --json\`.
+     항목 이름을 모르면 \`motif skills marketplace 'SOURCE' --json\`으로 조회한다.
+   설치기가 반환한 후보·selectionId·진단을 따른다. 컬렉션에서 사용자가 지정한
+   스킬을 선택하며, 여러 후보 중 선택 근거가 없으면 이름을 물어본다. 전체 설치를
+   요청하지 않았다면 \`--all\`을 쓰지 않는다. 미지원 링크·모호한 ref 오류는
+   설명하고 정확한 저장소/ref/path를 요청한다. 무관한 디렉터리를 찾지 않는다.
+3. \`motif skills add 'SOURCE' --skill 'SELECTION_ID' --scope SCOPE --json\`으로
+   설치한다. 클라이언트 가져오기는
+   \`motif skills import CLIENT --skill 'SELECTION_ID' --scope SCOPE --json\`.
+   inspect에 사용한 \`--plugin\`, \`--path\`, \`--ref\`도 동일하게 유지한다.
+   기본 SCOPE는 user다. 글로벌·전역·모든 프로젝트·globally 요청도 user로,
+   \`~/.motif/\`에 설치해 모든 프로젝트에서 쓰게 한다. 이 프로젝트/저장소만
+   요청하면 project다. 전역 스킬 설치에 npm 전역 패키지 설치는 필요 없다.
+   명시한 namespace가 있으면 조회·설치에 같은 \`--namespace\`를 적용한다.
+   이름 충돌은 원본을 지우지 말고 namespace로 해결한다. \`--dry-run\` 요청은
+   미리보기로만 마친다. 같은 출처·선택·범위가 이미 설치되어 있으면 확인만 한다.
+4. \`motif skills installed --scope SCOPE --json\`과 \`motif skills list --json\`을
+   함께 확인한다. 영수증의 source/ref, 실제 등록 이름·filePath와 진단을 대조한다.
+   파일/참고 자료 검증까지 요청했으면 영수증의 snapshot과 relativeFile을 사용해
+   해당 파일만 읽는다. snapshot은 user의 \`~/.motif/\` 또는 project의
+   \`<작업 디렉터리>/.motif/\` 기준이며, list의 filePath는 절대 경로다.
+   설치한 스킬은 현재 세션에 아직 없으므로 skill 도구로
+   즉시 호출해 검증하지 않는다.
+5. 설치 이름·범위·확인 결과와 진단을 짧게 보고한다. 현재 Motif를 종료·재실행한 뒤
+   \`/<등록 이름> 작업\` 또는 \`@skill:<등록 이름> 작업\`으로 사용하도록 안내한다.
+   파일 설치는 실제 업무 전체 성공의 증거가 아니다. 외부 실행 파일·MCP·커넥터·
+   인증 등 별도 의존성을 알리고, 자격 증명을 복사하거나 plugin hook을 실행하거나
+   완전한 Claude/Codex 플러그인 환경이 설치됐다고 말하지 않는다.
 
-For maintenance, inspect \`motif skills installed\` first, then use
-\`motif skills update NAME\` or \`motif skills remove NAME\` with the matching
-scope. These operate on Motif-managed copies. A refusal about local edits or
-an ambiguous source needs a concrete explanation; never delete the person's
-customizations or alter another client's installation to force success.`,
+갱신·삭제 요청은 먼저 \`motif skills installed --scope SCOPE --json\`으로 확인하고
+같은 범위의 \`motif skills update NAME\` 또는 \`motif skills remove NAME\`을 사용한다.
+로컬 수정본 보호 오류를 우회하거나 다른 클라이언트 설치를 변경하지 않는다.`,
 
 ];
 

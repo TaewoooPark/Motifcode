@@ -74,33 +74,89 @@ function git(args: string[], cwd: string): string {
     }).trim();
   } catch { return fail("git_failed", "Git could not acquire the skill source; check the URL, ref and repository access."); }
 }
-function gitUrl(input: string): string {
-  if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(input)) return `https://github.com/${input}.git`;
-  let url: URL; try { url = new URL(input); } catch { return fail("invalid_source", "Use a local directory, GitHub owner/repo, or HTTPS Git URL."); }
-  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) fail("invalid_source", "Git sources require HTTPS without embedded credentials, query or fragment.");
-  if (/\/tree\/|\/blob\//.test(url.pathname)) fail("invalid_source", "Use the repository URL with --ref and --path for GitHub tree/blob links.");
-  return url.toString();
+interface GitSource { remote: string; ref?: string; path?: string }
+function gitRefs(remote: string, cwd: string): string[] {
+  return [...new Set(git(["ls-remote", "--heads", "--tags", "--", remote], cwd).split("\n").map(line => line.split("\t")[1]).filter((value): value is string => !!value && /^refs\/(heads|tags)\//.test(value) && !value.endsWith("^{}")))];
 }
-function acquire(input: string, options: SkillInstallOptions): { root: string; origin: SkillOrigin; cleanup: () => void } {
+function linkPath(value: string): string {
+  if (value.includes("\\") || /[\u0000-\u001f\u007f]/.test(value) || value.startsWith("/") || /^[A-Za-z]:/.test(value) || value.split("/").includes("..")) fail("invalid_path", "GitHub link paths must remain inside the repository.");
+  return value.split("/").filter(part => part !== "" && part !== ".").join("/");
+}
+function gitSource(input: string, options: SkillInstallOptions, cwd: string): GitSource {
+  if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(input)) return { remote: `https://github.com/${input}.git`, ref: options.ref, path: options.path };
+  let url: URL; try { url = new URL(input); } catch { return fail("invalid_source", "Use a local directory, GitHub owner/repo, or HTTPS Git URL."); }
+  if (url.protocol !== "https:" || url.username || url.password) fail("invalid_source", "Git sources require HTTPS without embedded credentials.");
+  const github = url.hostname === "github.com"; const raw = url.hostname === "raw.githubusercontent.com";
+  if (!github && !raw) {
+    if (url.search || url.hash) fail("invalid_source", "Git repository URLs cannot contain a query or fragment.");
+    if (/\/tree\/|\/blob\//.test(url.pathname)) fail("invalid_source", "Page links are supported only for github.com repositories.");
+    return { remote: url.toString(), ref: options.ref, path: options.path };
+  }
+  if (url.port) fail("invalid_source", "GitHub sources must use the standard HTTPS port.");
+  // Only presentation and tracking parameters may be dropped; a revision-like query is never guessed.
+  for (const [key, value] of url.searchParams) if (!/^utm_[a-z_]+$/i.test(key) && !["gclid", "fbclid"].includes(key) && !(["plain", "raw"].includes(key) && ["0", "1", "true", "false"].includes(value))) fail("invalid_source", `Unsupported GitHub link query '${key}'. Use a clean repository or skill link.`);
+  // Read the original path: URL() would erase dot segments before we can reject them.
+  const encodedPath = input.match(/^https:\/\/[^/?#]+(\/[^?#]*)?/i)?.[1] ?? "";
+  if (encodedPath.split("/").slice(1, 3).some(part => /%2f|%5c/i.test(part))) fail("invalid_source", "GitHub owner and repository names cannot contain encoded separators.");
+  let decoded: string; try { decoded = decodeURIComponent(encodedPath); } catch { return fail("invalid_source", "The GitHub link contains invalid URL encoding."); }
+  if (decoded.split("/").includes("..") || decoded.split("/").includes(".")) fail("invalid_path", "GitHub link paths cannot contain dot segments.");
+  const parts = linkPath(decoded.replace(/^\//, "")).split("/");
+  const owner = parts.shift(); const repository = parts.shift()?.replace(/\.git$/, "");
+  if (!owner || !repository || !/^[A-Za-z0-9][A-Za-z0-9-]*$/.test(owner) || !/^[A-Za-z0-9_.-]+$/.test(repository) || repository === "." || repository === "..") fail("invalid_source", "A GitHub source needs an owner and repository.");
+  const remote = `https://github.com/${owner}/${repository}.git`;
+  if (github && !parts.length) return { remote, ref: options.ref, path: options.path };
+  const kind = raw ? "blob" : parts.shift();
+  if (kind !== "tree" && kind !== "blob") fail("invalid_source", "Use a GitHub repository, tree folder, or SKILL.md file link.");
+  const tail = parts.join("/");
+  if (!tail || (kind === "blob" && parts.at(-1) !== "SKILL.md")) fail("invalid_source", "GitHub file links must point to SKILL.md; its containing folder will be installed.");
+  let ref: string; let prefix: string;
+  if (options.ref) {
+    const short = options.ref.replace(/^refs\/(heads|tags)\//, "");
+    const choices = options.ref === short ? [short, `refs/heads/${short}`, `refs/tags/${short}`] : [options.ref, short];
+    prefix = choices.find(value => tail === value || tail.startsWith(`${value}/`)) ?? fail("conflicting_ref", "--ref conflicts with the revision in the GitHub link. Use a repository URL to select a different revision.");
+    ref = prefix.startsWith("refs/") ? prefix : options.ref;
+    if (!/^refs\/(heads|tags)\//.test(ref) && !/^[a-f0-9]{40}$/i.test(ref)) {
+      const matches = gitRefs(remote, cwd).filter(value => value.replace(/^refs\/(heads|tags)\//, "") === ref);
+      if (matches.length !== 1) fail(matches.length ? "ambiguous_link_ref" : "unresolved_link_ref", matches.length ? "--ref matches both a branch and tag. Use the full refs/heads/... or refs/tags/... name." : "The GitHub link revision could not be resolved. Use a full 40-character commit SHA or the repository URL with --ref and --path.");
+      ref = matches[0]!;
+    }
+  } else if (/^[a-f0-9]{40}(?:\/|$)/i.test(tail)) {
+    ref = prefix = parts[0]!;
+  } else {
+    const fullRefLink = /^refs\/(heads|tags)\//.test(tail);
+    const matches = gitRefs(remote, cwd).map(value => ({ ref: value, prefix: fullRefLink ? value : value.replace(/^refs\/(heads|tags)\//, "") })).filter(value => tail === value.prefix || tail.startsWith(`${value.prefix}/`));
+    if (matches.length !== 1) fail(matches.length ? "ambiguous_link_ref" : "unresolved_link_ref", matches.length ? "The GitHub link matches multiple branch/tag boundaries. Add --ref with the exact branch or full refs/heads/... or refs/tags/... name." : "The GitHub link revision could not be resolved. Add a matching --ref, or use the repository URL with --ref and --path (commit links need a full 40-character SHA).");
+    ({ ref, prefix } = matches[0]!);
+  }
+  let path = tail.slice(prefix.length).replace(/^\//, "");
+  if (kind === "blob") {
+    if (!path || path.split("/").at(-1) !== "SKILL.md") fail("invalid_source", "The GitHub link must identify SKILL.md below its revision.");
+    path = path.split("/").slice(0, -1).join("/");
+  }
+  path = linkPath(path);
+  if (options.path !== undefined && linkPath(options.path) !== path) fail("conflicting_path", "--path conflicts with the folder in the GitHub link. Use a repository URL to select a different folder.");
+  return { remote, ref, ...(path ? { path } : {}) };
+}
+function acquire(input: string, options: SkillInstallOptions): { root: string; boundary: string; origin: SkillOrigin; cleanup: () => void } {
   const cwd = settings(options).cwd; const local = resolve(cwd, input);
   if (existsSync(local) && !options.ref) {
     const root = realpathSync(local);
     if (!statSync(root).isDirectory()) fail("invalid_source", "The skill source must be a directory.");
     const selected = options.path ? packagePath(root, options.path) : root;
-    return { root: selected, origin: { kind: "local", source: root, ...(options.path ? { subpath: options.path } : {}) }, cleanup() {} };
+    return { root: selected, boundary: root, origin: { kind: "local", source: root, ...(options.path ? { subpath: options.path } : {}) }, cleanup() {} };
   }
-  const remote = existsSync(local) ? realpathSync(local) : gitUrl(input);
   if (options.ref?.startsWith("-") || options.ref?.includes("\0")) fail("invalid_ref", "Invalid Git reference.");
+  const { remote, ref, path } = existsSync(local) ? { remote: realpathSync(local), ref: options.ref, path: options.path } : gitSource(input, options, cwd);
   const temp = mkdtempSync(join(tmpdir(), "motif-skills-git-"));
   try {
     git(["init", "--quiet"], temp);
     // Local refs are explicit user-selected repositories, not package-defined transports.
     const localArgs = isAbsolute(remote) ? ["-c", "protocol.file.allow=always"] : [];
-    git([...localArgs, "fetch", "--quiet", "--depth=1", "--no-tags", "--", remote, options.ref ?? "HEAD"], temp);
+    git([...localArgs, "fetch", "--quiet", "--depth=1", "--no-tags", "--", remote, ref ?? "HEAD"], temp);
     const commit = git(["rev-parse", "FETCH_HEAD"], temp);
     git(["-c", "core.autocrlf=false", "checkout", "--quiet", "--detach", "--force", commit], temp);
-    const root = options.path ? packagePath(temp, options.path) : realpathSync(temp);
-    return { root, origin: { kind: "git", source: remote, ref: options.ref ?? "HEAD", commit, ...(options.path ? { subpath: options.path } : {}) }, cleanup() { rmSync(temp, { recursive: true, force: true }); } };
+    const root = path ? packagePath(temp, path) : realpathSync(temp);
+    return { root, boundary: realpathSync(temp), origin: { kind: "git", source: remote, ref: ref ?? "HEAD", commit, ...(path ? { subpath: path } : {}) }, cleanup() { rmSync(temp, { recursive: true, force: true }); } };
   } catch (err) { rmSync(temp, { recursive: true, force: true }); throw err; }
 }
 
@@ -130,7 +186,7 @@ function enumerate(root: string): string[] {
     const file = join(root, name, "SKILL.md"); return existsSync(file) ? [file] : [];
   });
 }
-function discover(root: string, origin: SkillOrigin, options: SkillInstallOptions, entry?: Record<string, unknown>, selectiveRoot = false): SkillInspection {
+function discover(root: string, origin: SkillOrigin, options: SkillInstallOptions, entry?: Record<string, unknown>, selectiveRoot = false, selectedFolder?: string): SkillInspection {
   const diagnostics: InstallDiagnostic[] = []; const candidates: SkillCandidate[] = [];
   const portable = readManifest(root, "plugin.json"); const claude = readManifest(root, ".claude-plugin/plugin.json"); const codex = readManifest(root, ".codex-plugin/plugin.json");
   let manifest: Record<string, unknown> | undefined; let flavor: "portable" | "claude" | "codex" | "motif" = "motif";
@@ -158,7 +214,7 @@ function discover(root: string, origin: SkillOrigin, options: SkillInstallOption
     const known = ["skills", ".agents/skills", ".claude/skills", ".codex/skills"].filter(path => existsSync(join(root, path)));
     roots = known.length ? known.map(path => packagePath(root, path)) : [root];
   }
-  const files = [...new Set(roots.flatMap(enumerate))];
+  const files = [...new Set(roots.flatMap(enumerate))].filter(file => !selectedFolder || inside(selectedFolder, file));
   for (const file of files) {
     try {
       // Direct skill folders may themselves be symlinks (Codex supports this).
@@ -206,7 +262,21 @@ function publicSource(source: unknown): unknown {
 export function inspectSkillSource(input: string, options: SkillInstallOptions = {}): SkillInspection {
   const source = acquire(input, options); let childCleanup = () => {};
   try {
-    if (!options.plugin) { const result = discover(source.root, source.origin, options); return { ...result, cleanup: source.cleanup }; }
+    if (!options.plugin) {
+      let packageRoot = source.root;
+      // A Git skill link may sit below a plugin manifest. Keep that bounded package's
+      // shared resources, while registering only skills under the requested folder.
+      // Local directories never cause an upward scan outside the user-selected source.
+      const hasManifest = (directory: string) => ["plugin.json", ".claude-plugin/plugin.json", ".codex-plugin/plugin.json"].some(path => existsSync(join(directory, path)));
+      if (source.origin.kind === "git" && source.root !== source.boundary && !hasManifest(source.root)) {
+        for (let parent = dirname(source.root); inside(source.boundary, parent); parent = dirname(parent)) {
+          if (hasManifest(parent)) { packageRoot = parent; break; }
+          if (parent === source.boundary) break;
+        }
+      }
+      const result = discover(packageRoot, source.origin, options, undefined, false, packageRoot !== source.root ? source.root : undefined);
+      return { ...result, cleanup: source.cleanup };
+    }
     const catalog = catalogEntries(source.root); const matches = catalog.entries.filter(entry => entry.name === options.plugin);
     if (matches.length !== 1) fail("unknown_plugin", "Marketplace plugin name is missing or ambiguous.");
     const entry = matches[0]!; if (obj(entry.policy).installation === "NOT_AVAILABLE") fail("unavailable_plugin", "The marketplace marks this plugin unavailable for installation.");

@@ -135,6 +135,56 @@ describe("interactive session", () => {
     expect(t.seen[0]!.tools).toEqual(toolPrefix(CORE_TOOLS.length - 1));
   });
 
+  it.each(["typed", "initial", "mention", "slash", "codex"] as const)("routes linked skill installation once through %s TUI input", async entry => {
+    const skills = new SkillRegistry(); skills.registerAll(BUILTIN_SKILLS);
+    skills.register(parseSkill("---\nname: skill-setup\ndescription: project setup policy\nbudget: 30\n---\nTUI-SKILL-INSTALL-POLICY", "project"));
+    const task = "https://github.com/anthropics/skills/tree/main/skills/mcp-builder 이 MCP 스킬을 이 프로젝트에 설치해줘. 결과를 알려줘.";
+    const t = new GateTransport(reply("Instructions received."));
+    const s = session(t, { skills, ...(entry === "initial" ? { initialTask: task } : {}) }); open.push(s);
+    if (entry !== "initial") s.type(`${entry === "mention" ? "@skill:skill-setup " : entry === "slash" ? "/skill-setup " : entry === "codex" ? "$skill-setup " : ""}${task}\r`);
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    const user = String(t.seen[0]!.messages[1]!.content);
+    expect(user).toContain(task);
+    expect(user.match(/<skill name="skill-setup">/g)).toHaveLength(1);
+    expect(user).toContain("TUI-SKILL-INSTALL-POLICY");
+    expect(user).not.toContain('<skill name="mcp-setup">');
+    expect(t.seen[0]!.messages[0]!.content).not.toContain("TUI-SKILL-INSTALL-POLICY");
+    expect(t.seen[0]!.tools).toEqual(toolPrefix(CORE_TOOLS.length - 1));
+  });
+
+  it.each([
+    "https://github.com/openai/skills/tree/main/skills/pdf 이 스킬 글로벌로 설치해줘",
+    "Please install this skill globally: https://example.test/skill",
+  ])("preserves global installation intent through ordinary TUI input: %s", async task => {
+    const t = new GateTransport(reply("Instructions received.")); const s = session(t); open.push(s);
+    s.type(task + "\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    const user = String(t.seen[0]!.messages[1]!.content);
+    expect(user).toContain(`${task}\n\n<skill name="skill-setup">`);
+    expect(user.match(/<skill name="skill-setup">/g)).toHaveLength(1);
+  });
+
+  it.each(["How do I install this skill from https://example.test/skill?", 'Translate "Install this skill from https://example.test/skill".'])("keeps informational TUI input free of automatic skill instructions: %s", async task => {
+    const t = new GateTransport(reply("Explanation."));
+    const s = session(t, { initialTask: task }); open.push(s);
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    expect(t.seen[0]!.messages[1]!.content).toBe(task);
+  });
+
+  it("does not infer skill installation from file content or without the skill tool", async () => {
+    const t = new GateTransport(reply("Read only.")); const s = session(t); open.push(s);
+    writeFileSync(join(s.cwd, "skill-request.txt"), "Install this skill from https://example.test/skill");
+    s.type("Read @skill-request.txt please\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    expect(t.seen[0]!.messages[1]!.content).toContain("Install this skill from https://example.test/skill");
+    expect(t.seen[0]!.messages[1]!.content).not.toContain('<skill name="skill-setup">');
+    const raw = "https://github.com/openai/skills/tree/main/skills/pdf 이거 설치해줘";
+    const noSkill = new GateTransport(reply("No skill tool."));
+    const other = session(noSkill, { tools: toolPrefix(2), initialTask: raw }); open.push(other);
+    await vi.waitFor(() => expect(other.chat.tasksCompleted).toBe(1));
+    expect(noSkill.seen[0]!.messages[1]!.content).toBe(raw);
+  });
+
   it.each(["slash", "mention", "codex", "initial"])("expands external skill arguments consistently through %s TUI input", async entry => {
     const skills=new SkillRegistry();skills.register(parseSkill("---\nname: argument-probe\ndescription: arguments\ndisable-model-invocation: true\n---\nBODY $0 / $ARGUMENTS[1] / $ARGUMENTS"));
     const text=`${entry === "mention" ? "@skill:argument-probe" : entry === "codex" ? "$argument-probe" : "/argument-probe"} "hello world" next`;

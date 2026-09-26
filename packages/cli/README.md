@@ -63,8 +63,12 @@ motif skills add anthropics/skills --path skills/webapp-testing
 motif skills --help
 ```
 
-Use `/skill-setup <source or request>` for guided inspection, selection and
-verification. Marketplace imports preserve skill resources without activating
+Paste a skill link with a clear installation request to automatically load
+`skill-setup`, or use `/skill-setup <source or request>` explicitly. The guide
+inspects, selects, installs and verifies the registration. “Install globally”
+uses the user library under `~/.motif/` for all projects; “for this project”
+uses the current project's library. Restart Motif after installation. GitHub folder,
+`SKILL.md` and raw-file links retain supporting files. Marketplace imports preserve skill resources without activating
 plugin hooks, MCP servers or connectors. See the
 [skills guide](https://github.com/TaewoooPark/Motifcode/blob/main/docs/skills.md)
 for selection, scope, updates and compatibility limits.
