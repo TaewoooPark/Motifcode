@@ -55,7 +55,7 @@ import {
   mentionAt,
   menuItemsFor,
   relativise,
-  wrapToWidth,
+  wrapWords,
   type ComposerView,
   type Key,
   type MenuItem,
@@ -1116,7 +1116,7 @@ export class Chat {
       draft: this.composer.snapshot(),
       placeholder: PLACEHOLDER,
       ...(this.pendingConfirm ? { confirm: this.confirmView(this.pendingConfirm.call, this.pendingConfirm.selected) } : {}),
-      ...(pendingChoice?.wrap ? { panel: (width: number) => ({ title: pendingChoice.title, lines: pendingChoice.lines.flatMap(line => wrapToWidth(line, Math.max(1, width - 8))), choices: pendingChoice.options.map((option, index) => `${index === pendingChoice.selected ? "❯" : " "} ${option}`) }) } : {}),
+      ...(pendingChoice?.wrap ? { panel: (width: number) => ({ title: pendingChoice.title, lines: pendingChoice.lines.flatMap(line => wrapWords(line, Math.max(1, width - 8))), choices: pendingChoice.options.map((option, index) => `${index === pendingChoice.selected ? "❯" : " "} ${option}`) }) } : {}),
       ...(this.pendingChoice && !this.pendingChoice.wrap
         ? { confirm: { title: this.pendingChoice.title, lines: this.pendingChoice.lines, choices: this.pendingChoice.options.map((o, i) => `${i === this.pendingChoice!.selected ? "❯" : " "} ${o}`) } }
         : {}),

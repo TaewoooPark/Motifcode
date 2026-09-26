@@ -1,5 +1,5 @@
 import type { McpPreset, McpStatus } from "@motifcode/mcp";
-import { truncateToWidth, wrapToWidth, type ComposerView } from "@motifcode/tui";
+import { truncateToWidth, wrapWords, type ComposerView } from "@motifcode/tui";
 
 export type McpAction = "connect" | "disconnect" | "reconnect" | "login" | "logout";
 export type McpRequest = { action: "panel" } | { action: "list" } | { action: McpAction | "install"; server: string };
@@ -75,7 +75,7 @@ export function mcpListLines(servers: readonly McpStatus[], presets: readonly Mc
 /** Reuse the existing themed composer box and selected-choice accent. */
 export function mcpPanelView(servers: readonly McpStatus[], selected: number, width: number, notice?: string, height = 24, presets: readonly McpPreset[] = []): NonNullable<ComposerView["confirm"]> {
   const inner = Math.max(1, width - 8);
-  const wrap = (line: string): string[] => wrapToWidth(line, inner);
+  const wrap = (line: string): string[] => wrapWords(line, inner);
   // Border, title, choice separator, hint and parked cursor occupy six rows.
   const budget = Math.max(2, height - 6);
   const entries = mcpCatalogEntries(servers, presets);
@@ -123,5 +123,5 @@ export function mcpPanelView(servers: readonly McpStatus[], selected: number, wi
 /** Provider device codes stay in a temporary human-only panel, with wrapping. */
 export function mcpLoginPanelView(message: string, width: number, height = 24): NonNullable<ComposerView["confirm"]> {
   const inner = Math.max(1, width - 8);
-  return { title: "MCP account authorization", lines: wrapToWidth(message, inner).slice(0, Math.max(1, height - 7)), choices: [truncateToWidth("Waiting for browser authorization…", inner)] };
+  return { title: "MCP account authorization", lines: wrapWords(message, inner).slice(0, Math.max(1, height - 7)), choices: [truncateToWidth("Waiting for browser authorization…", inner)] };
 }

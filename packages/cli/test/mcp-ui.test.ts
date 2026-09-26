@@ -179,7 +179,8 @@ describe("MCP manager presentation", () => {
       expect(view.choices.filter((row) => row.startsWith("❯"))).toHaveLength(1);
       for (const row of [...view.lines, ...view.choices]) expect(displayWidth(row)).toBeLessThanOrEqual(width - 4);
       expect(view.lines.join("")).toContain(id);
-      expect(view.lines.join("")).toContain("연결 상태를 확인했습니다.");
+      // Prose wraps at spaces; the unbroken identity above hard-wraps.
+      expect(view.lines.join(" ")).toContain("연결 상태를 확인했습니다.");
       expect(view.choices.join("\n")).toContain("connected");
     }
   });

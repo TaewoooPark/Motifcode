@@ -133,6 +133,31 @@ export function padToWidth(s: string, columns: number, fill = " "): string {
  * wrapped on its own is two rows the count does not know about — which is how
  * a long command left its first half behind on every repaint.
  */
+/**
+ * Prose wrapping for panels: break at spaces and keep the line's indentation on
+ * continuation rows; hard-wrap only a word wider than the row (a long URL).
+ * Flags such as --token-env therefore stay whole.
+ */
+export function wrapWords(s: string, columns: number): string[] {
+  const text = expandTabs(s);
+  const indent = /^ */.exec(text)![0];
+  const width = Math.max(1, columns - (displayWidth(indent) < columns ? displayWidth(indent) : 0));
+  const pad = width === columns ? "" : indent;
+  const rows: string[] = [];
+  let row = "";
+  for (const word of text.slice(indent.length).split(" ")) {
+    const candidate = row === "" ? word : `${row} ${word}`;
+    if (displayWidth(candidate) <= width) { row = candidate; continue; }
+    if (row !== "") rows.push(row);
+    if (displayWidth(word) <= width) { row = word; continue; }
+    const pieces = wrapToWidth(word, width);
+    rows.push(...pieces.slice(0, -1));
+    row = pieces[pieces.length - 1] ?? "";
+  }
+  rows.push(row);
+  return rows.map((line) => pad + line);
+}
+
 export function wrapToWidth(s: string, columns: number): string[] {
   const width = Math.max(1, columns);
   const rows: string[] = [];
