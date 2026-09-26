@@ -92,6 +92,7 @@ function loadPluginDirectory(dir: string, source: PluginInfo["source"]): LoadedP
         if (!existsSync(file)) continue;
         try {
           const skill = loadSkill(file, source, { packageRoot: path });
+          if (manifest.mcpPresets.length) skill.mcpPresets = [...manifest.mcpPresets];
           out.skills.push(skill);
           info.skills.push(skill.name);
         } catch (err) {

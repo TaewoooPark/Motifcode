@@ -574,6 +574,8 @@ async function main(): Promise<number> {
       const chan: ChannelId = flagEnum(args.flags, "channel", CHANNELS, "toolcall");
       const tools = mcpConnectedDefault ? [...CORE_TOOLS] : toolPrefix(CORE_TOOLS.length - 1);
       const skillsForSpec = loadSkills(cwd);
+      // The spec is the no-MCP prompt: bundled MCP workflow skills stay out.
+      skillsForSpec.setMcpServers(() => []);
       const agentsForSpec = new AgentRegistry();
       agentsForSpec.registerAll(BUILTIN_AGENTS);
       const system = buildSystemPrompt({
@@ -875,6 +877,9 @@ async function main(): Promise<number> {
     ...(typeof args.flags["trust-mcp"] === "string" ? { trustHash: args.flags["trust-mcp"] } : {}),
   });
   for (const diagnostic of mcpConfig.diagnostics) process.stderr.write(`MCP ${diagnostic.severity}: ${diagnostic.message}\n`);
+  // Bundled MCP workflow skills reach the model's index only with their server;
+  // /mcp setup mutates this same configuration, so a new preset joins next task.
+  skills.setMcpServers(() => mcpConfig.servers.filter((server) => server.enabled).map((server) => server.id));
   const mcpAuth = new McpAuthBroker({ openBrowser: openExternalUrl });
   let interactiveChat: Chat | undefined;
   const mcp = new McpSession(mcpConfig, { exposure: flagEnum(args.flags, "mcp-mode", ["prefetch", "search", "catalog"] as const, "prefetch"), manager: { auth: mcpAuth,

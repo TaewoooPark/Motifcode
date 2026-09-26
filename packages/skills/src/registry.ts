@@ -14,12 +14,20 @@ const xml = (text: string) => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").
 export class SkillRegistry {
   private readonly skills = new Map<string, Skill>();
   private readonly loadedRoots = new Set<string>();
+  private enabledMcp?: () => Iterable<string>;
   register(skill: Skill): void { this.skills.set(skill.name, skill); }
+  /** Live enabled MCP server IDs; skills tied to presets are indexed only when one is on. */
+  setMcpServers(enabled: () => Iterable<string>): void { this.enabledMcp = enabled; }
+  private mcpReady(skill: Skill): boolean {
+    if (!skill.mcpPresets?.length || !this.enabledMcp) return true;
+    const enabled = new Set(this.enabledMcp());
+    return skill.mcpPresets.some(id => enabled.has(id));
+  }
   registerAll(skills: readonly Skill[]): void { for (const s of skills) this.register(s); }
   get(name: string): Skill | undefined { return this.skills.get(name); }
   list(): Skill[] { return [...this.skills.values()].sort((a,b) => a.name.localeCompare(b.name)); }
   listFor(invocation: SkillLoadOptions["invocation"]): Skill[] {
-    return this.list().filter(s => invocation === "user" ? s.userInvocable : !s.disableModelInvocation && !s.diagnostics.some(d=>d.severity === "error"));
+    return this.list().filter(s => invocation === "user" ? s.userInvocable : !s.disableModelInvocation && !s.diagnostics.some(d=>d.severity === "error") && this.mcpReady(s));
   }
   index(): string {
     const rows = this.listFor("model").map(s => `  ${xml(s.name)} — ${xml(clean(s.description))}`);

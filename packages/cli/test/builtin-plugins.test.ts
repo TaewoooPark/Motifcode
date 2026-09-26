@@ -26,6 +26,20 @@ function writeConfig(home: string, servers: unknown[]) {
 }
 
 describe("bundled plugins", () => {
+  it("lists MCP workflow skills for the model only while their server is enabled", () => {
+    const skills = new SkillRegistry(); skills.registerAll(loadBuiltinPlugins().skills);
+    let enabled: string[] = [];
+    skills.setMcpServers(() => enabled);
+    const indexed = () => skills.listFor("model").map(skill => skill.name);
+    expect(indexed()).toEqual(["mcp-builder"]);
+    expect(skills.listFor("user").map(skill => skill.name)).toContain("library-docs");
+    enabled = ["context7"];
+    expect(indexed()).toEqual(["frontend-quality", "library-docs", "mcp-builder", "react-composition"]);
+    enabled = ["context7", "playwright", "github"];
+    expect(indexed()).toEqual(["browser-testing", "frontend-quality", "github-workflow", "library-docs", "mcp-builder", "react-composition"]);
+    expect(skills.index()).toContain("browser-testing");
+  });
+
   it("ships five offline plugins with readable skills and no startup side effects", async () => {
     const io = capture(); const fetch = vi.fn(() => { throw new Error("Unexpected network access"); }); vi.stubGlobal("fetch", fetch);
     const loaded = loadBuiltinPlugins();

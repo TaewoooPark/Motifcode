@@ -117,7 +117,10 @@ Motif ships five plugin bundles alongside its core skills: `library-docs`,
 They contain six skills and their focused reference files. They are available in
 user and project sessions without a marketplace download or account login.
 Only the skill index is included initially; bodies and references load on demand.
-Personal or project skills of the same name take precedence.
+A bundle that works through an MCP preset joins the model's skill index only while
+that server is enabled; enabling it in `/mcp` adds the skill from the next task.
+Its slash command works either way. Personal or project skills of the same name
+take precedence.
 
 Use `motif plugins list` or `motif plugins inspect NAME --json` to inspect the
 bundles offline. `motif plugins connect NAME --dry-run` previews service setup;

@@ -29,6 +29,8 @@ export interface Skill extends SkillMeta {
   allowedTools: string[];
   argumentNames: string[];
   argumentHint?: string;
+  /** MCP servers this bundled skill works through; indexed only while one is enabled. */
+  mcpPresets?: string[];
 }
 export interface ParseSkillOptions {
   filePath?: string;
