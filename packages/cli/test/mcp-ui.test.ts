@@ -53,7 +53,7 @@ function session(mcp?: McpSession, transport?: Transport, compactAt = 0.75, extr
   const output: string[] = [];
   const stdin = new FakeTTY();
   const cwd = mkdtempSync(join(tmpdir(), "motif-mcp-ui-"));
-  const complete = vi.fn(async () => ({ content: "", rawText: "", ms: 0 }));
+  const complete = vi.fn(async () => ({ content: "ok", rawText: "ok", ms: 0 }));
   const screen = new Screen({ write: (s) => output.push(s), columns: () => 80, interactive: true });
   const chat = new Chat({
     screen, stdin: stdin as unknown as NodeJS.ReadStream,

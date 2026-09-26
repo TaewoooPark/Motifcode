@@ -719,7 +719,10 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
         checkpoint();
         continue;
       }
-      if (replyEnds && !leaked && response.finishReason !== "length") {
+      // A turn in which the server sent no text at all is not an answer:
+      // nothing reached the person, and in practice it is the model stopping
+      // mid-thought. Hand it back.
+      if (replyEnds && !leaked && response.finishReason !== "length" && response.content.trim() !== "") {
         session.appendAll(codec.serializeAssistant(split.content, split.reasoning, parsed));
         checkpoint();
         const reply = split.content.trim();

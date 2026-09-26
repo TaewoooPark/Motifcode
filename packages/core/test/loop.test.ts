@@ -813,6 +813,21 @@ describe("the conversational ending", () => {
     expect(kinds(events, "repair").length).toBeGreaterThan(0);
   });
 
+  it("hands back a turn with nothing to show instead of ending on it", async () => {
+    // A model that stopped mid-thought leaves an empty reply. In a
+    // conversation that must not pass for the answer.
+    const { events, emit } = collect();
+    const transport = new ScriptedTransport([
+      { content: "", reasoningContent: "Let me apply the fix to make_scripts", rawText: "", finishReason: "stop", ms: 1 },
+      doneBody("d"),
+    ]);
+    const r = await runLoop({ ...base, transport, executor: okExecutor, emit, replyEnds: true, confirmDone: false });
+    expect(r.reason).toBe("done");
+    expect(r.summary).toBe("d");
+    expect(transport.seen).toHaveLength(2);
+    expect(kinds(events, "repair").length).toBeGreaterThan(0);
+  });
+
   it("takes the first done as final when confirmation is off", async () => {
     const { emit } = collect();
     const transport = new ScriptedTransport([doneBody("finished")]);
