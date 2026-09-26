@@ -131,6 +131,17 @@ describe("MCP authorization UI", () => {
     expect(verifyKey).not.toHaveBeenCalled();
     login.type(ESC);
   });
+  it("shows constrained form answers while typing but keeps free text hidden", async () => {
+    const s = session();
+    const result = s.chat.handleMcpElicitation({ server: "fixture", mode: "form", message: "Order", signal: new AbortController().signal,
+      requestedSchema: { type: "object", properties: { count: { type: "integer" }, note: { type: "string" } }, required: ["count"] } });
+    await vi.waitFor(() => expect(s.output()).toContain("Continue")); s.type("1");
+    await vi.waitFor(() => expect(s.output()).toContain("count")); s.type("7391");
+    await vi.waitFor(() => expect(s.output()).toContain("7391")); s.type("\r");
+    await vi.waitFor(() => expect(s.output()).toContain("note")); s.type("PRIVATE_NOTE_VALUE");
+    expect(s.output()).not.toContain("PRIVATE_NOTE_VALUE"); s.type("\r");
+    expect(await result).toEqual({ action: "accept", content: { count: 7391, note: "PRIVATE_NOTE_VALUE" } });
+  });
   it("clears hidden form input before stopping an active task can redraw it", async () => {
     const c = controls();
     const s = session(c.mcp);

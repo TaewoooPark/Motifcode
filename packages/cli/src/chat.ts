@@ -862,9 +862,9 @@ export class Chat {
     try {
       return await requestMcpInteraction(request, {
         choose: (title, lines, choices) => this.askMcpChoice(request.signal, title, lines, choices),
-        input: async (title, lines, prompt) => {
+        input: async (title, lines, prompt, masked = true) => {
           if (request.signal.aborted) return null;
-          const answer = this.askSecret(title, lines, prompt, "enter submit · esc cancel", true);
+          const answer = this.askSecret(title, lines, prompt, "enter submit · esc cancel", true, masked);
           const pending = this.pendingSecret;
           const cancel = () => { if (pending && this.pendingSecret === pending) { this.pendingSecret = null; this.composer.clear(); pending.resolve(null); this.refresh(); } };
           request.signal.addEventListener("abort", cancel, { once: true });

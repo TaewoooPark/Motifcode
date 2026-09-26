@@ -3,7 +3,8 @@ import { externalUrl, openExternalUrl } from "./browser-open.js";
 
 export interface McpHumanUi {
   choose(title: string, lines: string[], options: string[]): Promise<number | null>;
-  input(title: string, lines: string[], prompt: string): Promise<string | null>;
+  /** `masked` hides free-form text; constrained answers stay visible while typed. */
+  input(title: string, lines: string[], prompt: string, masked?: boolean): Promise<string | null>;
   openBrowser?: (url: URL) => Promise<void>;
 }
 const label = (value: string) => value.replace(/[\x00-\x1f\x7f-\x9f]/g, " ").slice(0, 240);
@@ -38,7 +39,9 @@ export async function requestMcpInteraction(request: McpElicitationRequest, ui: 
       if (answer === null || request.signal.aborted) return { action: "cancel" };
       if (answer < 2) content[name] = answer === 0;
     } else {
-      const raw = await ui.input(label(field.title ?? name), [...lines, ...("enum" in field && Array.isArray(field.enum) ? [`Choices: ${field.enum.map(String).map(label).join(", ")}`] : []), ...(field.type === "array" ? ['Enter a JSON array of choices, e.g. ["first"].'] : [])], "response › ");
+      const choices = "enum" in field && Array.isArray(field.enum);
+      const raw = await ui.input(label(field.title ?? name), [...lines, ...(choices ? [`Choices: ${field.enum.map(String).map(label).join(", ")}`] : []), ...(field.type === "array" ? ['Enter a JSON array of choices, e.g. ["first"].'] : [])], "response › ",
+        field.type === "string" && !choices);
       if (raw === null || request.signal.aborted) return { action: "cancel" };
       if (!raw && !schema.required?.includes(name)) continue;
       if (field.type === "number" || field.type === "integer") {
