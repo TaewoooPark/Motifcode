@@ -41,8 +41,6 @@ import { renderPanel, type PanelView } from "./panel.js";
 import {
   BULLET,
   renderCellStyled,
-  renderPendingStyled,
-  renderSettledStyled,
   renderTailStyled,
   settledCount,
   type RenderOptions,
@@ -50,7 +48,6 @@ import {
   type Tone,
 } from "./render.js";
 import { compactReadings, readings, statusLine } from "./statusline.js";
-import { CommitTracker } from "./stream.js";
 import { NO_COLOR, paint, severityColor, style, term } from "./theme.js";
 import { displayWidth, truncateToWidth, wrapToWidth } from "./width.js";
 import type { LoopEvent } from "@motifcode/core";
@@ -122,7 +119,7 @@ const SPINNER = ["✻", "✼", "✽", "✾"];
 /** The keys, for the panel `?` opens. */
 const SHORTCUTS = [
   "enter send · \\ + enter newline · esc interrupt or clear · ctrl-c twice quit · ctrl-d quit",
-  "↑ ↓ history · tab show or hide reasoning · ctrl-o full tool output · ctrl-l redraw · shift-tab permissions",
+  "↑ ↓ history · tab show or hide reasoning · ctrl-o output viewer · ctrl-l redraw · shift-tab permissions",
   "@ attach a file · ! run a shell line · # add a project note · / commands · ? hide this",
 ];
 
@@ -143,9 +140,8 @@ function inlineMarkup(text: string): string {
 
 export class Screen {
   private state: ViewState = initialState();
-  private readonly commits = new CommitTracker();
-  /** The settled lines for the cells and options they were rendered from; a keystroke changes neither. */
-  private settledMemo: { cells: readonly unknown[]; key: string; lines: StyledLine[] } | null = null;
+  /** Cells, not rendered rows: wrapping changes on resize without new output. */
+  private committedCells = 0;
   /** The rows of the last painted footer, top to bottom. */
   private footer: Row[] = [];
   /** Where the cursor was left: the footer row index and column, or null when below the footer. */
@@ -169,6 +165,7 @@ export class Screen {
   private streamTimer: NodeJS.Timeout | null = null;
   private showThinking: boolean;
   private verbose = false;
+  private outputView: { top: number; follow: boolean; painted: string; cache?: { state: ViewState; key: string; lines: StyledLine[] } } | null = null;
   private cwd: string | undefined;
   private readonly shadedHero: boolean;
   private readonly interactive: boolean;
@@ -207,7 +204,7 @@ export class Screen {
     return {
       width: this.columns(),
       showThinking: this.showThinking,
-      ...(this.verbose ? { outputLines: 1000 } : {}),
+      ...(this.verbose ? { outputLines: Infinity } : {}),
       ...(this.cwd !== undefined ? { cwd: this.cwd } : {}),
       // Only advertise the key when something is listening for it.
       showShortcuts: this.detachInput !== null,
@@ -259,6 +256,7 @@ export class Screen {
   /** Show, replace or remove the prompt at the bottom of the footer. */
   setComposer(view: ComposerView | null): void {
     this.composer = view;
+    if (this.outputView && (view?.confirm || view?.secret)) this.closeOutputView();
     this.paint();
   }
 
@@ -326,9 +324,8 @@ export class Screen {
    * Listen for keys.
    *
    * With a handler, every decoded key goes to it and nothing is interpreted
-   * here. Without one — the one-shot run — the two keys the status line
-   * advertises are handled: Tab folds reasoning, and Ctrl-C, which raw mode
-   * would otherwise swallow, is forwarded as the interrupt it means.
+   * here. Without one — the one-shot run — Tab folds reasoning, Ctrl-O opens
+   * the output viewer, and Ctrl-C is forwarded as the interrupt it means.
    *
    * Raw mode is entered here and left in `finish()` and on every fatal signal.
    * A terminal left in raw mode after a crash needs `reset` to type in again,
@@ -341,6 +338,8 @@ export class Screen {
     const onData = (chunk: Buffer): void => {
       for (const key of decoder.feed(chunk)) {
         if (handler) handler(key);
+        else if (this.handleOutputViewKey(key)) continue;
+        else if (key.type === "ctrl" && key.key === "o") this.toggleOutputView();
         else if (key.type === "tab") this.toggleThinking();
         else if (key.type === "ctrl" && key.key === "c") process.kill(process.pid, "SIGINT");
       }
@@ -403,7 +402,7 @@ export class Screen {
     this.showThinking = !this.showThinking;
     // Showing rewrites lines already committed to scrollback, so the stable
     // region has to be rebuilt rather than appended to.
-    this.commits.reset();
+    this.committedCells = 0;
     this.paint();
   }
 
@@ -448,19 +447,88 @@ export class Screen {
   /** Paths under this directory are shown relative to it from now on. */
   setCwd(cwd: string): void {
     this.cwd = cwd;
-    this.commits.reset();
+    this.committedCells = 0;
     this.paint();
   }
 
   /** Show tool output whole, or clipped to a few lines. Ctrl-O in the session. */
   toggleVerbose(): void {
     this.verbose = !this.verbose;
-    this.commits.reset();
+    this.committedCells = 0;
     this.paint();
   }
 
   get verboseOutput(): boolean {
     return this.verbose;
+  }
+
+  get outputViewOpen(): boolean { return this.outputView !== null; }
+
+  /** Read-only details live in a separate buffer; normal scrollback stays intact. */
+  toggleOutputView(): void {
+    if (!this.interactive) return;
+    if (this.outputView) { this.closeOutputView(); return; }
+    this.outputView = { top: 0, follow: true, painted: "" };
+    this.write(term.enterAlternate);
+    this.paintOutputView();
+  }
+
+  private closeOutputView(): void {
+    if (!this.outputView) return;
+    this.outputView = null;
+    this.write(term.leaveAlternate + (this.cursorAt || !this.composer ? term.showCursor : term.hideCursor));
+    this.paint();
+  }
+
+  /** Consume navigation/pastes without editing the draft or submitting a task. */
+  handleOutputViewKey(key: Key): boolean {
+    const view = this.outputView;
+    if (!view) return false;
+    if (key.type === "ctrl" && (key.key === "c" || key.key === "d")) {
+      this.closeOutputView();
+      return false; // The controller still owns interrupt and quit.
+    }
+    if (key.type === "escape" || (key.type === "ctrl" && key.key === "o") || (key.type === "text" && key.text === "q")) {
+      this.closeOutputView();
+      return true;
+    }
+    const page = Math.max(1, this.rowCount() - 2);
+    if (key.type === "home") { view.top = 0; view.follow = false; }
+    else if (key.type === "end") view.follow = true;
+    else if (["up", "down", "page-up", "page-down"].includes(key.type)) {
+      view.top += key.type === "up" ? -1 : key.type === "down" ? 1 : key.type === "page-up" ? -page : page;
+      view.follow = false;
+    }
+    this.paintOutputView();
+    return true;
+  }
+
+  private paintOutputView(): void {
+    const view = this.outputView;
+    if (!view) return;
+    const width = Math.max(1, this.columns());
+    const height = Math.max(1, this.rowCount());
+    const page = Math.max(0, height - 2);
+    const opts = { ...this.renderOptions, width, outputLines: Infinity, showShortcuts: false };
+    const key = `${width}|${opts.showThinking}|${opts.cwd}`;
+    if (!view.cache || view.cache.state !== this.state || view.cache.key !== key) {
+      const lines = this.state.cells.flatMap((cell) => renderCellStyled(cell, opts)).concat(renderTailStyled(this.state, opts));
+      view.cache = { state: this.state, key, lines: lines.flatMap((line) => wrapToWidth(line.text, width).map((text) => ({ ...line, text }))) };
+    }
+    const lines = view.cache.lines;
+    const last = Math.max(0, lines.length - page);
+    view.top = view.follow ? last : Math.min(last, Math.max(0, view.top));
+    const range = `${Math.min(lines.length, view.top + 1)}–${Math.min(lines.length, view.top + page)}/${lines.length}`;
+    const rows = [paint(truncateToWidth(`Transcript · full output · ${range}${this.working ? " · working" : ""}`, width), style.accent)];
+    for (let i = 0; i < page; i++) rows.push(lines[view.top + i] ? this.colour(lines[view.top + i]!) : "");
+    if (height > 1) rows.push(paint(truncateToWidth("↑↓ scroll · PgUp/PgDn · Home/End · Esc/Ctrl-O close", width), style.faint));
+    const frame = `${width}|${height}|${rows.join("\n")}`;
+    if (view.painted === frame) return;
+    view.painted = frame;
+    this.withSync(() => {
+      this.write(term.hideCursor + term.home + term.clearScreen);
+      rows.forEach((row, i) => this.write(term.home + term.down(i) + row));
+    });
   }
 
   /** Erase and rebuild the visible screen. Ctrl-L in the session. */
@@ -469,6 +537,7 @@ export class Screen {
   }
 
   private paint(tickOnly = false): void {
+    if (this.outputView) { this.paintOutputView(); return; }
     if (
       this.interactive && this.footer.length > 0 &&
       (this.columns() < this.paintedWidth || this.rowCount() !== this.paintedHeight)
@@ -480,8 +549,8 @@ export class Screen {
     }
     const width = this.columns();
     const next = this.interactive ? this.buildFooter(width) : null;
-    const settled = this.settledLines();
-    const pending = Math.max(0, settled.length - this.commits.count);
+    const settledEnd = settledCount(this.state);
+    const pending = Math.max(0, settledEnd - this.committedCells);
     // Compare before clearing. A hidden reasoning token changes no row, and
     // erasing the footer to draw it back is the flash.
     if (pending === 0 && this.sameFooter(next, width)) return;
@@ -491,8 +560,10 @@ export class Screen {
       // Only settled cells go to scrollback. A tool cell between `tool_start` and
       // `tool_end` is still growing, and committing it there would print a tool
       // that appears to have produced nothing.
-      const fresh = this.commits.take(settled.map((l) => l.text));
-      for (const line of settled.slice(settled.length - fresh.length)) this.write(this.colour(line) + "\n");
+      for (const cell of this.state.cells.slice(this.committedCells, settledEnd)) {
+        for (const line of renderCellStyled(cell, this.renderOptions)) this.write(this.colour(line) + "\n");
+      }
+      this.committedCells = settledEnd;
       if (next) this.writeFooter(next, width);
       else this.paintFooter();
     });
@@ -546,22 +617,6 @@ export class Screen {
   }
 
   /**
-   * The settled transcript, rendered once per change.
-   *
-   * Every keystroke repaints the footer, and the footer's arithmetic starts
-   * from the settled lines; re-rendering a long transcript for each
-   * character typed is work whose result is already known.
-   */
-  private settledLines(): StyledLine[] {
-    const opts = this.renderOptions;
-    const key = `${opts.width}|${opts.showThinking ? 1 : 0}|${opts.outputLines ?? ""}|${opts.showShortcuts ? 1 : 0}|${opts.cwd ?? ""}`;
-    if (this.settledMemo && this.settledMemo.cells === this.state.cells && this.settledMemo.key === key) return this.settledMemo.lines;
-    const lines = renderSettledStyled(this.state, opts);
-    this.settledMemo = { cells: this.state.cells, key, lines };
-    return lines;
-  }
-
-  /**
    * Rebuild the visible screen after a resize.
    *
    * Nothing on screen can be trusted to be where it was: the terminal has
@@ -572,10 +627,12 @@ export class Screen {
    */
   private repaintAll(): void {
     if (!this.interactive) return;
+    if (this.outputView) { this.outputView.painted = ""; this.paintOutputView(); return; }
     const width = this.columns();
-    const settled = this.settledLines();
-    const fresh = this.commits.take(settled.map((l) => l.text));
-    const previous = settled.slice(0, settled.length - fresh.length);
+    const settledEnd = settledCount(this.state);
+    const previous = this.state.cells.slice(0, this.committedCells).flatMap((cell) => renderCellStyled(cell, this.renderOptions));
+    const fresh = this.state.cells.slice(this.committedCells, settledEnd).flatMap((cell) => renderCellStyled(cell, this.renderOptions));
+    this.committedCells = settledEnd;
     const footer = this.buildFooter(width);
     const physical: string[] = [];
     for (const l of previous) for (const t of wrapToWidth(l.text, width)) physical.push(this.colour({ ...l, text: t }));
@@ -586,7 +643,7 @@ export class Screen {
       this.write(term.clearScreen + term.home);
       for (const line of physical.slice(Math.max(0, physical.length - keep))) this.write(line + "\n");
       // Commit newly settled text even when completion raced the resize.
-      for (const line of settled.slice(previous.length)) this.write(this.colour(line) + "\n");
+      for (const line of fresh) this.write(this.colour(line) + "\n");
       this.writeFooter(footer, width);
     });
   }
@@ -862,6 +919,7 @@ export class Screen {
 
   /** Release the footer so the shell prompt lands cleanly. */
   finish(): void {
+    this.closeOutputView();
     this.detachInput?.();
     this.detachInput = null;
     this.working = false;
@@ -876,10 +934,10 @@ export class Screen {
     this.clearFooter();
     // Flush anything still pending — a session that ended mid-tool should still
     // show what that tool did.
-    const rest = renderPendingStyled(this.state, this.renderOptions);
-    const all = renderSettledStyled(this.state, this.renderOptions).concat(rest);
-    const fresh = this.commits.take(all.map((l) => l.text));
-    for (const line of all.slice(all.length - fresh.length)) this.write(this.colour(line) + "\n");
+    for (const cell of this.state.cells.slice(this.committedCells)) {
+      for (const line of renderCellStyled(cell, this.renderOptions)) this.write(this.colour(line) + "\n");
+    }
+    this.committedCells = this.state.cells.length;
     if (this.interactive) this.write(term.showCursor);
   }
 }

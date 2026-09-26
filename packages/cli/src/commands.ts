@@ -114,7 +114,7 @@ const KEYS: readonly [string, string][] = [
   ["?", "on an empty prompt, show or hide the key list"],
   ["shift-tab", "toggle permissions: ask before tools run, or run everything"],
   ["1 / 2 / 3", "when asked about a tool call: run it once, stop asking for that tool this session, decline (↑↓ enter and esc work too)"],
-  ["ctrl-o", "show tool output in full, or clipped again"],
+  ["ctrl-o", "open full output viewer; ↑↓ / PgUp / PgDn / Home / End browse, esc closes"],
   ["ctrl-l", "redraw the screen"],
   ["@path", "attach a file or directory to the message; @skill:name attaches a skill's instructions"],
   ["!command", "run a shell command here and put its output in the conversation"],

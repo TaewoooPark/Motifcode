@@ -334,6 +334,7 @@ export class Chat {
   /* ---------------------------------------------------------------- */
 
   private onKey(key: Key): void {
+    if (this.screen.handleOutputViewKey(key)) return;
     if (this.pendingSecret) {
       this.answerSecret(key);
       return;
@@ -478,8 +479,7 @@ export class Chat {
         this.composer.killToEnd();
         break;
       case "o":
-        this.screen.toggleVerbose();
-        this.changedSettings.set("verbose", "session only");
+        this.screen.toggleOutputView();
         break;
       case "l":
         this.screen.redraw();

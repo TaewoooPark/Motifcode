@@ -18,6 +18,10 @@ import {
   pushUser,
   reduce,
   renderTail,
+  renderCell,
+  renderCellStyled,
+  sanitize,
+  wrapToWidth,
   renderTranscript,
   statusLine,
   readings,
@@ -133,7 +137,7 @@ describe("transcript", () => {
       { type: "tool_start", call: { id: "p", name: "apply_patch", arguments: { patch }, repaired: false, validated: true } },
       { type: "tool_end", id: "p", ok: true, output: "applied", ms: 3 },
     ]);
-    const out = renderTranscript(state, OPTS);
+    const out = renderTranscript(state, { ...OPTS, outputLines: Infinity });
     expect(out[0]).toBe("⏺ Patch(--- a/x.py…)");
     expect(out).toContain("     -old");
     expect(out).toContain("     +new");
@@ -211,6 +215,102 @@ describe("transcript", () => {
     const out = renderTranscript(state, OPTS).join("\n");
     expect(out).toMatch(/\+\d+ lines/);
     expect(out.split("\n").length).toBeLessThan(20);
+  });
+});
+
+describe("tool output previews", () => {
+  function tool(output: string, name = "mcp", ok = true, args: Record<string, unknown> = { server: "fixture" }): Extract<Cell, { kind: "tool" }> {
+    return fold([
+      { type: "tool_start", call: { id: "t", name, arguments: args, repaired: false, validated: true } },
+      { type: "tool_end", id: "t", ok, output, ms: 1 },
+    ]).cells[0] as Extract<Cell, { kind: "tool" }>;
+  }
+
+  it("bounds one huge JSON line to three decorated physical rows without changing the original", () => {
+    const output = JSON.stringify({ content: "한글🙂".repeat(1200), tail: "ORIGINAL_END" });
+    const cell = deepFreeze(tool(output)) as Extract<Cell, { kind: "tool" }>;
+    const rows = wrapToWidth(`  ⎿  ${output}`, 40);
+    const collapsed = renderCell(cell, { width: 40, showShortcuts: true });
+    expect(collapsed).toHaveLength(6); // head, 3 preview rows, notice, blank
+    expect(collapsed.slice(1, 4)).toEqual(rows.slice(0, 3));
+    expect(collapsed[4]).toContain(`+${rows.length - 3} lines`);
+    expect(collapsed[4]).toContain("ctrl-o");
+    expect(collapsed.every((row) => displayWidth(row) <= 40)).toBe(true);
+    const expanded = renderCell(cell, { width: 40, outputLines: Infinity });
+    expect(expanded.slice(1, -1)).toEqual(rows);
+    expect(expanded.join("")).toContain("ORIGINAL_END");
+    expect(cell.output).toBe(output);
+  });
+
+  it("counts error decoration and multiline wrapping before clipping, and preserves error tones", () => {
+    const output = "12345678901234567890\nsecond line\nthird line\nlast";
+    const cell = tool(output, "bash", false);
+    const expected = ["  ⎿  Error: 12345678901234567890", "     second line", "     third line", "     last"]
+      .flatMap((row) => wrapToWidth(row, 24));
+    const shown = renderCellStyled(cell, { width: 24, showShortcuts: true });
+    expect(shown.slice(1, 4)).toEqual(expected.slice(0, 3).map((text) => ({ text, tone: "bad" })));
+    expect(shown[4]?.text).toContain(`+${expected.length - 3} lines`);
+    expect(shown[4]?.text).toContain("ctrl-o");
+    expect(renderCell(cell, { width: 24, outputLines: Infinity }).slice(1, -1)).toEqual(expected);
+  });
+
+  it("budgets visible control escapes, tabs and wide glyphs even at one column", () => {
+    const output = "\x1b[31m\t한글🙂\rTAIL\n".repeat(8) + "END\r";
+    const cell = tool(output, "한글도구", false, { command: "\x1b[2J\t한글" });
+    for (const width of [1, 2, 5, 12, 40]) {
+      const preview = renderCell(cell, { width, showShortcuts: true });
+      expect(preview).toHaveLength(6);
+      expect(preview.every((row) => displayWidth(row) <= width), String(width)).toBe(true);
+      const full = renderCell(cell, { width, outputLines: Infinity });
+      expect(full.every((row) => displayWidth(row) <= width), String(width)).toBe(true);
+      expect(full.join("")).not.toMatch(/[\x1b\r\t]/);
+      expect(full.join("")).toContain("^[[31m");
+      expect(full.join("")).toContain("END^M");
+    }
+    expect(cell.output).toBe(output);
+    expect(sanitize(output)).toContain("^MTAIL");
+  });
+
+  it.each(["read", "mcp"])("expands every %s output line beyond the former 1000-line cap", (name) => {
+    const output = Array.from({ length: 1205 }, (_, i) => `ROW_${i}`).join("\n");
+    const cell = tool(output, name);
+    const compact = renderCell(cell, { width: 72, showShortcuts: true });
+    expect(compact.join("\n")).not.toContain("ROW_1204");
+    expect(compact.join("\n")).toContain("ctrl-o");
+    if (name === "read") expect(compact.join("\n")).toContain("Read 1205 lines");
+    const full = renderCell(cell, { width: 72, outputLines: Infinity, showShortcuts: true });
+    expect(full).toHaveLength(1207);
+    expect(full[1]).toBe("  ⎿  ROW_0");
+    expect(full.at(-2)).toBe("     ROW_1204");
+    expect(full.join("\n")).not.toContain("ctrl-o");
+    expect(cell.output).toBe(output);
+  });
+
+  it("bounds a wrapped diff separately from its failure, and expands all colored diff rows", () => {
+    const patch = "+" + "가".repeat(100) + "\n-removed\n+FINAL_PATCH_LINE";
+    const cell = deepFreeze(tool("patch failed", "apply_patch", false, { patch })) as Extract<Cell, { kind: "tool" }>;
+    const preview = renderCell(cell, { width: 40, showShortcuts: true });
+    expect(preview).toHaveLength(7); // head, 3 diff rows, notice, error, blank
+    expect(preview[4]).toContain("ctrl-o");
+    expect(preview).toContain("  ⎿  Error: patch failed");
+    expect(preview.join("\n")).not.toContain("FINAL_PATCH_LINE");
+    const full = renderCellStyled(cell, { width: 40, outputLines: Infinity });
+    expect(full.find((row) => row.text.includes("-removed"))?.tone).toBe("bad");
+    expect(full.find((row) => row.text.includes("+FINAL_PATCH_LINE"))?.tone).toBe("ok");
+    expect(full.slice(1, 4).every((row) => row.tone === "ok")).toBe(true);
+    expect(cell.args["patch"]).toBe(patch);
+  });
+
+  it("honors a finite preview override and never advertises inactive keyboard shortcuts", () => {
+    const cell = tool(Array.from({ length: 10 }, (_, i) => `line ${i}`).join("\n"));
+    const preview = renderCell(cell, { width: 72, outputLines: 6 });
+    expect(preview).toHaveLength(9);
+    expect(preview[7]).toContain("+4 lines");
+    expect(preview.join("\n")).not.toContain("ctrl-o");
+    expect(renderCell(tool("one\ntwo", "read"), { width: 72 }).join("\n")).not.toContain("ctrl-o");
+    expect(renderCell(tool("one\ntwo"), { width: 72, showShortcuts: true })).toEqual([
+      "⏺ MCP(fixture)", "  ⎿  one", "     two", "",
+    ]);
   });
 });
 

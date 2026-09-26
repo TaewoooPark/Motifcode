@@ -603,17 +603,65 @@ describe("interactive session", () => {
     expect(t.seen).toHaveLength(1);
   });
 
-  it("shows tool output in full on ctrl-o and clips it again", async () => {
+  it("opens and closes full tool output with Ctrl-O without changing the draft, model history or journal", async () => {
     const long = Array.from({ length: 30 }, (_, i) => `line ${i}`).join("\\n");
     const t = new GateTransport([toolCallBody("bash", { command: `printf '${long}'` }), ...reply("ok")]);
     const s = session(t);
     open.push(s);
     s.type("go\r");
     await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
-    expect(s.screen()).toContain("… +24 lines");
-    expect(s.chat.transcript.length).toBeGreaterThan(0);
+    expect(s.screen()).toMatch(/… \+27 (?:lines|rows)/);
+    const transcript = structuredClone(s.chat.transcript);
+    const cells = structuredClone(s.terminal.view.cells);
+    const requestCount = t.seen.length;
+    const journalDir = join(s.cwd, ".motif", "sessions");
+    const journalPath = join(journalDir, readdirSync(journalDir)[0]!);
+    const journal = readFileSync(journalPath, "utf8");
+    const compose = vi.spyOn(s.terminal, "setComposer");
+    s.type("next task 한글🙂\x1b[D\x1b[D");
+    const draft = compose.mock.calls.at(-1)![0]!.draft;
+    expect(draft).toEqual({ text: "next task 한글🙂", cursor: [..."next task 한"].length });
     s.type("\x0f");
     await vi.waitFor(() => expect(s.screen()).toContain("line 29"));
+    expect(s.terminal.outputViewOpen).toBe(true);
+    expect(s.terminal.verboseOutput).toBe(false);
+    expect(compose.mock.calls.at(-1)![0]!.draft).toEqual(draft);
+    s.type("\x0f");
+    expect(s.terminal.outputViewOpen).toBe(false);
+    expect(compose.mock.calls.at(-1)![0]!.draft).toEqual(draft);
+    expect(s.chat.transcript).toEqual(transcript);
+    expect(s.terminal.view.cells).toEqual(cells);
+    expect(t.seen).toHaveLength(requestCount);
+    expect(readFileSync(journalPath, "utf8")).toBe(journal);
+    s.type("\x0f");
+    s.type("ignored text\r\x1b[A\x1b[B");
+    expect(s.terminal.outputViewOpen).toBe(true);
+    s.type("q");
+    expect(s.terminal.outputViewOpen).toBe(false);
+    expect(compose.mock.calls.at(-1)![0]!.draft).toEqual(draft);
+    expect(t.seen).toHaveLength(requestCount);
+    expect(readFileSync(journalPath, "utf8")).toBe(journal);
+  });
+
+  it("keeps Ctrl-C interrupt and Ctrl-D quit available while full output is open", async () => {
+    const t = new GateTransport([...reply("should be interrupted")]);
+    t.gated = true;
+    const s = session(t);
+    open.push(s);
+    s.type("go\r");
+    await vi.waitFor(() => expect(t.seen).toHaveLength(1));
+    s.type("\x0f");
+    expect(s.terminal.outputViewOpen).toBe(true);
+    s.type("\x03");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    expect(s.terminal.outputViewOpen).toBe(false);
+    expect(t.seen[0]!.signal?.aborted).toBe(true);
+    s.type("\x0f");
+    expect(s.terminal.outputViewOpen).toBe(true);
+    s.type("\x04");
+    expect(await s.finished).toBe(0);
+    expect(s.terminal.outputViewOpen).toBe(false);
+    expect(t.seen).toHaveLength(1);
   });
 
   it("asks before a command runs, and a yes runs it", async () => {

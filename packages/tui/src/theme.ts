@@ -97,6 +97,8 @@ export function severityColor(sev: "ok" | "warn" | "bad"): string {
 
 /** Cursor and line control, kept in one place so the writer stays readable. */
 export const term = {
+  enterAlternate: `${ESC}?1049h`,
+  leaveAlternate: `${ESC}?1049l`,
   hideCursor: `${ESC}?25l`,
   showCursor: `${ESC}?25h`,
   clearLine: `${ESC}2K`,

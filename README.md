@@ -200,7 +200,9 @@ spawned — the agent's `bash` cannot see it, and neither can a project hook.
 |---|---|
 | `/help` | commands and keys |
 | `/status` (`/cost`) | connection, settings and session totals |
-| `/config` | effective settings, where each came from, and the files |
+| `/config` | edit settings in the dashboard; `/config show` lists values and sources |
+| `/stats` | task and tool statistics from local session journals |
+| `/usage` | Infron balance, recorded token usage and reported request costs |
 | `/doctor` | probe the endpoint: auth, parsers, cache, channels |
 | `/login`, `/logout` | paste an Infron API key, checked and saved to `~/.motif/.env`; remove the saved key |
 | `/model [id]`, `/endpoint [url]` | show or set the model id or endpoint for the next task |
@@ -220,9 +222,19 @@ spawned — the agent's `bash` cannot see it, and neither can a project hook.
 
 ```
 enter send · \ + enter newline · esc interrupt or clear · ctrl-c twice quit · ctrl-d quit
-↑ ↓ history · tab show or hide reasoning · ctrl-o full tool output · ctrl-l redraw · shift-tab permissions
+↑ ↓ history · tab show or hide reasoning · ctrl-o output viewer · ctrl-l redraw · shift-tab permissions
 @ attach a file · ! run a shell line · # add a project note · / commands · ? hide this
 ```
+
+Tool results show a three-row preview by default, including long single-line
+JSON and errors. `Ctrl+O` opens the full output in a read-only transcript viewer.
+Use ↑/↓, PageUp/PageDown or Home/End to browse, then Esc, `q` or `Ctrl+O` to return
+to the same draft and scrollback. This does not truncate the model's tool data.
+`--verbose` or `/config verbose true` explicitly keeps full inline output.
+
+The Infron balance connects automatically using the key entered at first login.
+Press `r` in Usage to refresh. The account balance and costs recorded in local
+journals are separate: unreported or unrecorded charges are not estimated.
 
 ---
 
