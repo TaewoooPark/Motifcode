@@ -5,10 +5,10 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Server, createMcpHandler } from '@modelcontextprotocol/server';
+import { ProtocolError, Server, createMcpHandler } from '@modelcontextprotocol/server';
 import { Server as LegacyServer } from '@modelcontextprotocol/sdk/server/index.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
-import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { ListToolsRequestSchema, CallToolRequestSchema, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { McpManager } from '../src/manager.js';
 import { McpAuthError } from '../src/auth.js';
 import type { McpAuthorization } from '../src/client.js';
@@ -25,11 +25,15 @@ afterEach(async () => {
 });
 
 async function fixture(wire: Wire, auth?: McpAuthorization, beforeResult?: () => Promise<void>) {
-  const state = { invalidSchema: false, invalidResult: false, calls: 0 };
+  const state = { invalidSchema: false, invalidResult: false, reject: false, calls: 0 };
   const tools = () => ({ tools: [{ name: 'write_once', inputSchema, outputSchema: state.invalidSchema
     ? { type: 'object' as const, properties: { answer: { $ref: 'https://example.invalid/unavailable-schema' } } }
     : { type: 'object' as const, properties: { answer: { type: 'integer' } }, required: ['answer'] } }], ttlMs: 60_000 });
-  const call = async () => { state.calls++; await beforeResult?.(); return { content: [{ type: 'text' as const, text: 'completed' }], structuredContent: { answer: state.invalidResult ? 'wrong type' : 42 } }; };
+  const call = async () => {
+    state.calls++; await beforeResult?.();
+    if (state.reject) throw wire === 'sse' ? new McpError(-32602, 'No record with that id') : new ProtocolError(-32602, 'No record with that id');
+    return { content: [{ type: 'text' as const, text: 'completed' }], structuredContent: { answer: state.invalidResult ? 'wrong type' : 42 } };
+  };
   let origin: string;
   let route: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
   if (wire === 'sse') {
@@ -117,6 +121,18 @@ describe('actual MCP tool dispatch boundary', () => {
     await manager.reconnect('lab');
     expect(await manager.invoke('lab', 'write_once', {}, { scopeId: 'another-scope' })).toMatchObject({ error: { code: 'previous_execution_unknown' } });
     expect(state.calls).toBe(1);
+  });
+
+  it.each(['legacy', 'modern', 'sse'] as const)('reports a %s JSON-RPC rejection as a completed error without blocking a retry', async wire => {
+    const { manager, state } = await fixture(wire);
+    state.reject = true;
+    const rejected = await manager.invoke('lab', 'write_once', {}, scope);
+    expect(rejected).toMatchObject({ ok: true, execution: 'completed', isError: true });
+    expect(JSON.stringify(rejected)).toContain('No record with that id');
+    expect(manager.statuses()[0]).toMatchObject({ state: 'ready' });
+    state.reject = false;
+    expect(await manager.invoke('lab', 'write_once', {}, scope)).toMatchObject({ ok: true, execution: 'completed', isError: false });
+    expect(state.calls).toBe(2);
   });
 
   it.each(['legacy', 'modern'] as const)('distinguishes %s stdio schema preparation from a written request', async protocol => {

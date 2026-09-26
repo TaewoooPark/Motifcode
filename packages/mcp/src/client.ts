@@ -4,7 +4,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { GITHUB_MCP_ENDPOINT, type McpServerConfig, type ResolvedMcpServerConfig } from './config.js';
 import { McpAuthError } from './auth.js';
-import { compileArguments } from './schema.js';
+import { boundedDiagnosticText, compileArguments } from './schema.js';
 
 /** Host-only authentication boundary. This never opens a browser or retries a request. */
 export interface McpAuthorization {
@@ -24,6 +24,12 @@ export interface McpConnectionOptions { auth?: McpAuthorization; onElicitation?:
 
 export class McpClientError extends Error {
   constructor(readonly code: string, message: string) { super(message); this.name = 'McpClientError'; }
+}
+/** The server answered a sent tools/call with a JSON-RPC error: a known outcome. */
+export class McpToolRejectedError extends McpClientError {
+  constructor(readonly rpcCode: number, detail: string) {
+    super('tool_rejected', `The server rejected the call (JSON-RPC ${rpcCode}): ${boundedDiagnosticText(detail.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g, ''), 1024)}`);
+  }
 }
 
 /** An actual whole-operation timer, independent of fetch wrappers or progress. */
@@ -127,7 +133,9 @@ export class McpOperationBudget {
 export class McpConnection {
   private readonly client: Client;
   private readonly transport: Transport;
-  private readonly dispatchContext = new AsyncLocalStorage<{ onDispatch: () => void; toolRequest?: boolean }>();
+  private readonly dispatchContext = new AsyncLocalStorage<{ onDispatch: () => void; toolRequest?: boolean; requestIds?: (string | number)[] }>();
+  /** In-flight tools/call ids, and the JSON-RPC error the server answered with. */
+  private readonly toolReplies = new Map<string | number, { code: number; message: string } | null>();
   private readonly lifetime = new AbortController();
   private closePromise?: Promise<void>;
   private opening = false;
@@ -194,14 +202,25 @@ export class McpConnection {
     this.transport.send = (message, options) => {
       const dispatch = this.dispatchContext.getStore();
       if (!dispatch) return send(message, options);
-      const toolRequest = (Array.isArray(message) ? message : [message]).some(part =>
-        'method' in part && part.method === 'tools/call' && 'id' in part);
+      const calls = (Array.isArray(message) ? message : [message]).filter(part =>
+        'method' in part && part.method === 'tools/call' && 'id' in part) as { id: string | number }[];
+      const toolRequest = calls.length > 0;
+      for (const { id } of calls) { dispatch.requestIds?.push(id); this.toolReplies.set(id, null); }
       // Per-operation async context keeps concurrent calls separate, including
       // auth awaits. Notifications and elicitation replies are not tool sends.
       return this.dispatchContext.run({ ...dispatch, toolRequest }, () => {
         if (toolRequest && config.transport === 'stdio') dispatch.onDispatch();
         return send(message, options);
       });
+    };
+    // Installed before connect: the SDK chains a pre-set handler ahead of its
+    // own. A JSON-RPC error answering one of our tool calls proves the server
+    // received and rejected it, unlike local timeouts or result validation.
+    this.transport.onmessage = message => {
+      const reply = message as { id?: string | number; error?: { code?: unknown; message?: unknown } };
+      if (reply.id === undefined || !reply.error || !this.toolReplies.has(reply.id)) return;
+      this.toolReplies.set(reply.id, { code: typeof reply.error.code === 'number' ? reply.error.code : 0,
+        message: typeof reply.error.message === 'string' ? reply.error.message : '' });
     };
   }
 
@@ -294,6 +313,7 @@ export class McpConnection {
   async call(tool: Tool, args: Record<string, unknown>, signal?: AbortSignal, sharedBudget?: McpOperationBudget, onDispatch?: () => void): Promise<CallToolResult> {
     const ms = this.config.toolTimeoutMs ?? 30_000;
     const budget = sharedBudget ?? new McpOperationBudget(ms);
+    const requestIds: (string | number)[] = [];
     const operation = async (abortSignal: AbortSignal) => {
       this.activeBudgets.add(budget);
       try {
@@ -305,9 +325,13 @@ export class McpConnection {
           // Explicit definition disables the SDK's HEADER_MISMATCH refetch/retry.
           toolDefinition: tool, allowInputRequired: true,
         });
-        return await (onDispatch ? this.dispatchContext.run({ onDispatch }, call) : call());
+        return await this.dispatchContext.run({ onDispatch: onDispatch ?? (() => {}), requestIds }, call);
       } catch (error) {
-        if (!(error instanceof UrlElicitationRequiredError)) throw error;
+        if (!(error instanceof UrlElicitationRequiredError)) {
+          const rejected = requestIds.map(id => this.toolReplies.get(id)).find(reply => reply);
+          if (rejected) throw new McpToolRejectedError(rejected.code, rejected.message);
+          throw error;
+        }
         // -32042 ended the original request. A human browser handoff does not
         // establish whether a write already happened, so never replay the call.
         const requests = error.elicitations;
@@ -316,7 +340,10 @@ export class McpConnection {
         throw new McpClientError('interaction_required', action === 'accept'
           ? 'Browser interaction was completed, but the original MCP operation was not replayed. Reconcile its outcome before explicitly issuing a new operation.'
           : 'The MCP browser interaction was declined, cancelled, or unavailable. The original operation was not replayed.');
-      } finally { this.activeBudgets.delete(budget); }
+      } finally {
+        this.activeBudgets.delete(budget);
+        for (const id of requestIds) this.toolReplies.delete(id);
+      }
     };
     const result = sharedBudget ? await operation(signal ?? this.lifetime.signal)
       : await budget.run(signal, operation, () => { void this.close(); });

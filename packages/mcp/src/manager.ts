@@ -2,7 +2,7 @@ import type { CallToolResult, Tool } from '@modelcontextprotocol/client';
 import { isDeepStrictEqual } from 'node:util';
 import { resolveServerConfig } from './config.js';
 import type { McpConfig, McpServerConfig } from './config.js';
-import { deadline, McpClientError, McpConnection, McpOperationBudget, type McpAuthorization, type McpElicitationHandler } from './client.js';
+import { deadline, McpClientError, McpConnection, McpOperationBudget, McpToolRejectedError, type McpAuthorization, type McpElicitationHandler } from './client.js';
 import { McpAuthBroker } from './auth.js';
 import { compileArguments, jsonDigest } from './schema.js';
 import type { ArgumentIssue, ArgumentValidator } from './schema.js';
@@ -332,6 +332,11 @@ export class McpManager {
         return { ok: true as const, execution: 'completed' as const, isError: result.isError === true, result };
       }, () => { void connection?.close(); });
     } catch (error) {
+      // The server answered with a JSON-RPC error: the outcome is known and the
+      // connection is healthy. Report it like an isError result.
+      if (error instanceof McpToolRejectedError) {
+        return { ok: true, execution: 'completed', isError: true, result: { isError: true, content: [{ type: 'text', text: error.message }] } };
+      }
       if (dispatched) this.unknownCalls.add(digest);
       const diagnostic = safeError(error);
       if (connection && this.isCurrent(server, generation, connection)) this.setState(server, 'error', 0, diagnostic);
