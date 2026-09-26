@@ -122,6 +122,119 @@ describe('host OAuth broker', () => {
     expect(await Promise.all([broker.token(f.target), broker.token(f.target)])).toEqual(['refreshed-private-token', 'refreshed-private-token']);
     expect(opened).toBe(1); expect(f.counts().refreshCount).toBe(1); expect(broker.status(f.target).state).toBe('authenticated');
   });
+  it.each(['first', 'second'] as const)('cancels only the %s waiter of a shared refresh', async cancelled => {
+    const f = await fixture(); const directory = home(); let release!: () => void; let started!: () => void;
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const broker = new McpAuthBroker({ home: directory, openBrowser: async url => { await f.authorize(url); }, fetch: async (input, init) => {
+      if (String(init?.body).includes('grant_type=refresh_token')) { started(); await gate; }
+      return fetch(input, init);
+    } });
+    await broker.login(f.target); expire(directory, f.target);
+    const first = new AbortController(); const second = new AbortController();
+    const settle = (promise: Promise<unknown>) => promise.then(() => 'success', error => error.code as string);
+    const a = settle(broker.token(f.target, { signal: first.signal })); await ready;
+    const b = settle(broker.token(f.target, { signal: second.signal }));
+    try {
+      (cancelled === 'first' ? first : second).abort();
+      expect(await Promise.race([cancelled === 'first' ? a : b, new Promise(resolve => setTimeout(() => resolve('still_waiting'), 100))])).toBe('cancelled');
+      release();
+      expect(await (cancelled === 'first' ? b : a)).toBe('success');
+      expect(f.counts().refreshCount).toBe(1);
+    } finally { release(); await Promise.all([a, b]); }
+  });
+  it.each(['a', 'b'] as const)('disconnects connection %s without cancelling another connection using the same OAuth identity', async disconnected => {
+    const f = await createOAuthFixture(); cleanups.push(f.close); const directory = home();
+    let release!: () => void; let started!: () => void; let joined!: () => void;
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const secondJoined = new Promise<void>(resolve => { joined = resolve; });
+    const a = { id: 'a', enabled: true, transport: 'http' as const, url: f.mcpUrl };
+    const b = { ...a, id: 'b' };
+    const broker = new McpAuthBroker({ home: directory, openBrowser: async url => { await f.approve(url); }, fetch: async (input, init) => {
+      if (String(init?.body).includes('grant_type=refresh_token')) { started(); await gate; }
+      return fetch(input, init);
+    } });
+    await broker.login(a); expire(directory, a);
+    const manager = new McpManager({ servers: [a, b] }, { home: directory, auth: { token: (server, options) => {
+      const pending = broker.token(server, options); if (server.id === 'b') joined(); return pending;
+    } } });
+    const connectionA = manager.connect('a').catch(error => ({ state: 'error', error: { code: error.code } }));
+    await ready;
+    const connectionB = manager.connect('b').catch(error => ({ state: 'error', error: { code: error.code } }));
+    try {
+      await secondJoined; await manager.disconnect(disconnected); release();
+      expect(await (disconnected === 'a' ? connectionA : connectionB)).toMatchObject({ error: { code: 'cancelled' } });
+      expect(await (disconnected === 'a' ? connectionB : connectionA)).toMatchObject({ state: 'ready' });
+      expect(manager.statuses().find(status => status.server === disconnected)?.state).toBe('paused');
+      expect(f.counts.refresh).toBe(1);
+    } finally { release(); await manager.close(); await Promise.all([connectionA, connectionB]); }
+  });
+  it('retains a rotated credential when the last refresh waiter cancels', async () => {
+    const f = await createOAuthFixture(); cleanups.push(f.close); const directory = home();
+    let release!: () => void; let started!: () => void;
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const target = { id: 'rotation', transport: 'http' as const, url: f.mcpUrl };
+    const broker = new McpAuthBroker({ home: directory, openBrowser: async url => { await f.approve(url); }, fetch: async (input, init) => {
+      const response = await fetch(input, init);
+      // The provider has already consumed the refresh request and rotated its token.
+      if (String(init?.body).includes('grant_type=refresh_token')) { started(); await gate; }
+      return response;
+    } });
+    await broker.login(target); const { store, key } = expire(directory, target);
+    const originalRefresh = store.read(key)!.tokens!.refresh_token;
+    const controller = new AbortController();
+    const pending = broker.token(target, { signal: controller.signal });
+    await ready;
+    try {
+      controller.abort(); await expect(pending).rejects.toMatchObject({ code: 'cancelled' }); release();
+      await vi.waitFor(() => expect(broker.status(target).state).toBe('authenticated'));
+      expect(store.read(key)!.tokens!.refresh_token === originalRefresh).toBe(false);
+      expect(f.counts.refresh).toBe(1);
+    } finally { release(); }
+  });
+  it('bounds an abandoned refresh and clears it for the next explicit request', async () => {
+    const f = await fixture(); const directory = home(); let attempts = 0; let started!: () => void;
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    const broker = new McpAuthBroker({ home: directory, fetchTimeoutMs: 500, openBrowser: async url => { await f.authorize(url); }, fetch: async (input, init) => {
+      if (String(init?.body).includes('grant_type=refresh_token')) {
+        if (++attempts === 1) { started(); return new Promise<Response>(() => {}); }
+        return new Response(JSON.stringify({ access_token: 'bounded-refresh-fixture', token_type: 'Bearer', expires_in: 3600 }), { headers: { 'content-type': 'application/json' } });
+      }
+      return fetch(input, init);
+    } });
+    await broker.login(f.target); expire(directory, f.target);
+    const controller = new AbortController(); const pending = broker.token(f.target, { signal: controller.signal });
+    await ready; controller.abort(); await expect(pending).rejects.toMatchObject({ code: 'cancelled' });
+    expect(await broker.token(f.target).then(() => 'success', error => error.code)).toBe('timeout');
+    expect(await broker.token(f.target).then(() => 'success', error => error.code)).toBe('success'); expect(attempts).toBe(2);
+  });
+  it('does not share a stale refresh after logout and a new login', async () => {
+    const f = await fixture(); const directory = home(); let attempts = 0;
+    let firstStarted!: () => void; let secondStarted!: () => void; let releaseFirst!: () => void; let releaseSecond!: () => void;
+    const firstReady = new Promise<void>(resolve => { firstStarted = resolve; });
+    const secondReady = new Promise<void>(resolve => { secondStarted = resolve; });
+    const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
+    const secondGate = new Promise<void>(resolve => { releaseSecond = resolve; });
+    const broker = new McpAuthBroker({ home: directory, openBrowser: async url => { await f.authorize(url); }, fetch: async (input, init) => {
+      if (String(init?.body).includes('grant_type=refresh_token')) {
+        if (++attempts === 1) { firstStarted(); await firstGate; } else { secondStarted(); await secondGate; }
+      }
+      return fetch(input, init);
+    } });
+    await broker.login(f.target); expire(directory, f.target);
+    const stale = broker.token(f.target).then(() => 'success', error => error.code as string); await firstReady;
+    broker.logout(f.target); await broker.login(f.target); expire(directory, f.target);
+    const fresh = broker.token(f.target).then(() => 'success', error => error.code as string);
+    try {
+      expect(await Promise.race([secondReady.then(() => true), new Promise(resolve => setTimeout(() => resolve(false), 100))])).toBe(true);
+      releaseFirst(); expect(await stale).toBe('auth_changed');
+      // Completion of the old transaction must not evict the new shared refresh.
+      const joined = broker.token(f.target).then(() => 'success', error => error.code as string);
+      releaseSecond(); expect(await fresh).toBe('success'); expect(await joined).toBe('success'); expect(attempts).toBe(2);
+    } finally { releaseFirst(); releaseSecond(); await Promise.all([stale, fresh]); }
+  });
   it('isolates endpoint, configured client and scope identity', async () => {
     const f = await fixture(); const broker = new McpAuthBroker({ home: home(), openBrowser: async url => { await f.authorize(url); } });
     await broker.login(f.target);

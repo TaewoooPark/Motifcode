@@ -94,7 +94,7 @@ async function defaultBrowser(url: URL): Promise<void> {
  * transport automatic 401 retry could repeat a dispatched write operation. */
 export class McpAuthBroker {
   private readonly store: McpAuthStore;
-  private readonly refreshing = new Map<string, Promise<string>>();
+  private readonly refreshing = new Map<string, { revision: string; promise: Promise<string> }>();
   private readonly activeLogins = new Map<string, AbortController>();
   constructor(private readonly options: McpAuthBrokerOptions = {}) { this.store = new McpAuthStore(options.home); }
   status(server: McpAuthTarget): McpAuthStatus {
@@ -187,22 +187,28 @@ export class McpAuthBroker {
     if (saved.expiresAt === undefined || saved.expiresAt > Date.now() + 30_000 || !saved.tokens.refresh_token && saved.expiresAt > Date.now()) return saved.tokens.access_token;
     if (!saved.tokens.refresh_token || !saved.discovery || !saved.clientInformation) throw required();
     let pending = this.refreshing.get(key);
-    if (!pending) {
-      pending = this.refresh(saved, options.signal).finally(() => { this.refreshing.delete(key); });
+    if (!pending || pending.revision !== saved.revision) {
+      // A caller owns only its wait, not a shared credential transaction. Finish
+      // an already-dispatched refresh within the fetch deadline even if nobody
+      // is waiting: the provider may have rotated the refresh token. Durable
+      // revision checks still prevent logout or a new login being overwritten.
+      const promise = this.refresh(saved).finally(() => {
+        if (this.refreshing.get(key)?.promise === promise) this.refreshing.delete(key);
+      });
+      pending = { revision: saved.revision, promise };
       this.refreshing.set(key, pending);
     }
-    return pending;
+    return options.signal ? abortable(pending.promise, options.signal) : pending.promise;
   }
-  private async refresh(record: McpAuthRecord, signal?: AbortSignal): Promise<string> {
+  private async refresh(record: McpAuthRecord): Promise<string> {
     try {
       checkDiscovery(record.discovery!, record.endpoint);
       const issuer = record.discovery!.authorizationServerMetadata!.issuer;
       if (record.tokens!.issuer !== issuer || record.clientInformation!.issuer !== issuer) throw required();
       const tokens = await refreshAuthorization(record.discovery!.authorizationServerUrl, {
         metadata: record.discovery!.authorizationServerMetadata, clientInformation: record.clientInformation!,
-        refreshToken: record.tokens!.refresh_token!, resource: new URL(record.endpoint), fetchFn: this.fetch(signal),
+        refreshToken: record.tokens!.refresh_token!, resource: new URL(record.endpoint), fetchFn: this.fetch(),
       });
-      if (signal?.aborted) throw new McpAuthError('cancelled', 'MCP authorization was cancelled.');
       const revision = record.revision;
       applyTokens(record, { ...tokens, refresh_token: tokens.refresh_token ?? record.tokens!.refresh_token, issuer });
       record.revision = randomBytes(16).toString('hex'); this.store.write(record, revision);
