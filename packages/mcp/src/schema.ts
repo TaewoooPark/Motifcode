@@ -51,20 +51,34 @@ export interface ArgumentIssue {
 export interface ArgumentCheck { valid: boolean; issues: ArgumentIssue[] }
 export interface ArgumentValidator { check(value: unknown): ArgumentCheck }
 
+/**
+ * Common spellings of a dialect URI (http or https, with or without "#") map to
+ * the validator implementing it and the id Ajv registered for its meta-schema.
+ * Drafts 04 and 06 validate under draft-07 rules, which extend them; a draft-04
+ * form that draft-07 rejects (boolean exclusiveMaximum) still fails closed.
+ */
+function dialect(uri: unknown): { validator: '07' | '2019-09' | '2020-12'; id?: string } | undefined {
+  if (uri === undefined) return { validator: '2020-12' };
+  const draft = typeof uri === 'string' ? /^https?:\/\/json-schema\.org\/(draft-0[467]|draft\/2019-09|draft\/2020-12)\/schema#?$/.exec(uri)?.[1] : undefined;
+  if (draft === 'draft-04' || draft === 'draft-06') return { validator: '07' };
+  if (draft === 'draft-07') return { validator: '07', id: 'http://json-schema.org/draft-07/schema#' };
+  if (draft === 'draft/2019-09') return { validator: '2019-09', id: 'https://json-schema.org/draft/2019-09/schema' };
+  if (draft === 'draft/2020-12') return { validator: '2020-12', id: 'https://json-schema.org/draft/2020-12/schema' };
+  return undefined;
+}
+
 /** Never fetch $refs, coerce values, insert defaults, or remove additional keys. */
 export function compileArguments(schema: Record<string, unknown>): ArgumentValidator {
-  const dialect = schema.$schema;
+  const found = dialect(schema.$schema);
   const options = { strict: false, allErrors: false, coerceTypes: false, useDefaults: false,
     removeAdditional: false, ownProperties: true, validateFormats: true, addUsedSchema: false, logger: false } as const;
-  const ajv = dialect === 'http://json-schema.org/draft-07/schema#' || dialect === 'https://json-schema.org/draft-07/schema'
-    ? new Ajv(options)
-    : dialect === 'https://json-schema.org/draft/2019-09/schema' ? new Ajv2019(options)
-    : dialect === undefined || dialect === 'https://json-schema.org/draft/2020-12/schema' ? new Ajv2020(options)
-    : undefined;
-  if (!ajv) throw new Error('Unsupported JSON Schema dialect.');
+  if (!found) throw new Error('Unsupported JSON Schema dialect.');
+  const ajv = found.validator === '07' ? new Ajv(options) : found.validator === '2019-09' ? new Ajv2019(options) : new Ajv2020(options);
   addFormats(ajv);
+  const source = { ...schema };
+  if ('$schema' in source) { if (found.id) source.$schema = found.id; else delete source.$schema; }
   // Compiling synchronously deliberately rejects unresolved remote references.
-  const validate: ValidateFunction = ajv.compile(schema);
+  const validate: ValidateFunction = ajv.compile(source);
   if ('$async' in validate && validate.$async) throw new Error('Asynchronous JSON Schema validation is unsupported.');
   return {
     check(value) {

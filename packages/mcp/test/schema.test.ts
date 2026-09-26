@@ -41,3 +41,20 @@ describe('original MCP schema validation', () => {
     expect(extra).toMatchObject({ keyword: 'additionalProperties', additionalProperty: 'unexpected' });
   });
 });
+
+describe('JSON Schema dialect spellings', () => {
+  const object = (dialect?: string, extra: Record<string, unknown> = {}) => ({ ...(dialect ? { $schema: dialect } : {}), type: 'object', properties: { q: { type: 'string', ...extra } }, required: ['q'] });
+  it.each([
+    'http://json-schema.org/draft-07/schema', 'https://json-schema.org/draft-07/schema', 'https://json-schema.org/draft-07/schema#',
+    'http://json-schema.org/draft-06/schema#', 'http://json-schema.org/draft-04/schema#',
+    'https://json-schema.org/draft/2020-12/schema#', 'http://json-schema.org/draft/2019-09/schema',
+  ])('validates tools declaring %s', dialect => {
+    const validator = compileArguments(object(dialect));
+    expect(validator.check({ q: 'x' }).valid).toBe(true);
+    expect(validator.check({ q: 1 }).valid).toBe(false);
+  });
+  it('still refuses unknown dialects and draft-04 forms draft-07 cannot express', () => {
+    expect(() => compileArguments(object('http://json-schema.org/schema#'))).toThrow(/Unsupported/);
+    expect(() => compileArguments({ $schema: 'http://json-schema.org/draft-04/schema#', type: 'object', properties: { n: { type: 'number', maximum: 3, exclusiveMaximum: true } } })).toThrow();
+  });
+});
