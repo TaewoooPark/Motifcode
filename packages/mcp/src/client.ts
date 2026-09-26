@@ -1,6 +1,7 @@
 import { Client, SSEClientTransport, StreamableHTTPClientTransport, UrlElicitationRequiredError, isInputRequiredResult } from '@modelcontextprotocol/client';
 import type { CallToolResult, ElicitRequestFormParams, ElicitRequestParams, ElicitResult, Tool, Transport } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type { McpServerConfig, ResolvedMcpServerConfig } from './config.js';
 import { McpAuthError } from './auth.js';
 import { compileArguments } from './schema.js';
@@ -126,6 +127,7 @@ export class McpOperationBudget {
 export class McpConnection {
   private readonly client: Client;
   private readonly transport: Transport;
+  private readonly dispatchContext = new AsyncLocalStorage<{ onDispatch: () => void; toolRequest?: boolean }>();
   private readonly lifetime = new AbortController();
   private closePromise?: Promise<void>;
   private opening = false;
@@ -161,6 +163,10 @@ export class McpConnection {
         const token = await this.prepareAuthorization(signal);
         if (token !== undefined) headers.set('Authorization', `Bearer ${token}`);
         signal.throwIfAborted();
+        // Authentication and SDK schema preparation can still fail locally.
+        // Only crossing this fetch boundary makes a tool's outcome uncertain.
+        const dispatch = this.dispatchContext.getStore();
+        if (dispatch?.toolRequest) dispatch.onDispatch();
         const response = await fetchImpl(input, { ...init, headers, redirect: 'error', signal });
         if (response.status === 401 || response.status === 403) {
           // Only HTTP status is trusted here; never surface response bodies,
@@ -183,6 +189,19 @@ export class McpConnection {
           maxRetries: 0, initialReconnectionDelay: 1_000, maxReconnectionDelay: 1_000, reconnectionDelayGrowFactor: 1,
         } });
     }
+    const send = this.transport.send.bind(this.transport);
+    this.transport.send = (message, options) => {
+      const dispatch = this.dispatchContext.getStore();
+      if (!dispatch) return send(message, options);
+      const toolRequest = (Array.isArray(message) ? message : [message]).some(part =>
+        'method' in part && part.method === 'tools/call' && 'id' in part);
+      // Per-operation async context keeps concurrent calls separate, including
+      // auth awaits. Notifications and elicitation replies are not tool sends.
+      return this.dispatchContext.run({ ...dispatch, toolRequest }, () => {
+        if (toolRequest && config.transport === 'stdio') dispatch.onDispatch();
+        return send(message, options);
+      });
+    };
   }
 
   /** Refresh expired credentials before dispatch only; errors contain no provider text. */
@@ -271,20 +290,21 @@ export class McpConnection {
     return structuredClone(result.tools);
   }
 
-  async call(tool: Tool, args: Record<string, unknown>, signal?: AbortSignal, sharedBudget?: McpOperationBudget): Promise<CallToolResult> {
+  async call(tool: Tool, args: Record<string, unknown>, signal?: AbortSignal, sharedBudget?: McpOperationBudget, onDispatch?: () => void): Promise<CallToolResult> {
     const ms = this.config.toolTimeoutMs ?? 30_000;
     const budget = sharedBudget ?? new McpOperationBudget(ms);
     const operation = async (abortSignal: AbortSignal) => {
       this.activeBudgets.add(budget);
       try {
         const ceiling = ms + (this.options.onElicitation ? budget.humanAllowanceMs : 0);
-        return await this.client.callTool({ name: tool.name, arguments: args }, {
+        const call = () => this.client.callTool({ name: tool.name, arguments: args }, {
           // The SDK ceiling includes human time; the shared host clock still
           // enforces the original active-work limit before and after the UI.
           signal: abortSignal, timeout: ceiling, maxTotalTimeout: ceiling, resetTimeoutOnProgress: false,
           // Explicit definition disables the SDK's HEADER_MISMATCH refetch/retry.
           toolDefinition: tool, allowInputRequired: true,
         });
+        return await (onDispatch ? this.dispatchContext.run({ onDispatch }, call) : call());
       } catch (error) {
         if (!(error instanceof UrlElicitationRequiredError)) throw error;
         // -32042 ended the original request. A human browser handoff does not

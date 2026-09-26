@@ -291,12 +291,10 @@ export class McpManager {
         }
         const check = validator.check(snapshot);
         if (!check.valid) return { ...failure('invalid_arguments', 'Arguments do not satisfy the original MCP schema; no tool was executed.'), issues: check.issues };
-        // A refresh failure here proves the actual tool dispatch has not begun.
-        // HTTP 401 after dispatch is never a reason to refresh and replay it.
-        await connection.prepareAuthorization(signal);
         if (signal.aborted || !this.isCurrent(server, generation, connection)) return failure('cancelled', 'MCP invocation was cancelled before execution.');
-        dispatched = true;
-        const result = await connection.call(tool, snapshot, signal, budget);
+        // The connection records the actual send, after SDK schema preparation
+        // and one fresh authorization check at the HTTP boundary.
+        const result = await connection.call(tool, snapshot, signal, budget, () => { dispatched = true; });
         return { ok: true as const, execution: 'completed' as const, isError: result.isError === true, result };
       }, () => { void connection?.close(); });
     } catch (error) {
