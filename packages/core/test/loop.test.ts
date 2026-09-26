@@ -950,3 +950,42 @@ describe("server-extracted tool calls", () => {
     await expect(t.complete({ messages: [], tools: [] })).rejects.toThrow(/cannot unmarshal/);
   });
 });
+
+describe("a generation the server stops", () => {
+  const cut = () =>
+    new TransportError("the server stopped the generation: repetition_detected", { kind: "generation", code: "repetition_detected" });
+
+  it("samples the same request again, with a repetition penalty on the retry only", async () => {
+    const { events, emit } = collect();
+    const transport = new ScriptedTransport([
+      cut(),
+      toolCallBody("bash", { command: "ls" }),
+      doneBody("d"),
+      doneBody("d", { confirm: true }),
+    ]);
+    const r = await runLoop({ ...base, transport, executor: okExecutor, emit });
+    expect(r.reason).toBe("done");
+    expect(transport.seen[0]!.repetitionPenalty).toBeUndefined();
+    expect(transport.seen[1]!.repetitionPenalty).toBe(1.05);
+    expect(transport.seen[1]!.messages).toEqual(transport.seen[0]!.messages);
+    expect(transport.seen[2]!.repetitionPenalty).toBeUndefined();
+    const warns = kinds(events, "notice") as Extract<LoopEvent, { type: "notice" }>[];
+    expect(warns.some((w) => /repetition_detected; retry 1\/2 with repetition_penalty 1\.05/.test(w.text))).toBe(true);
+  });
+
+  it("hands the turn back rather than ending the session when the retries are cut off too", async () => {
+    const { events, emit } = collect();
+    const transport = new ScriptedTransport([
+      cut(),
+      cut(),
+      cut(),
+      toolCallBody("bash", { command: "ls" }),
+      doneBody("d"),
+      doneBody("d", { confirm: true }),
+    ]);
+    const r = await runLoop({ ...base, transport, executor: okExecutor, emit });
+    expect(r.reason).toBe("done");
+    expect(transport.seen).toHaveLength(6);
+    expect(kinds(events, "repair").length).toBeGreaterThan(0);
+  });
+});

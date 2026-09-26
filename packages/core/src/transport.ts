@@ -78,6 +78,13 @@ export type TransportErrorKind =
   | "http"
   /** A 2xx whose body was not a completion. Not retryable without a change. */
   | "protocol"
+  /**
+   * A 2xx stream the server cut off with an error of its own. Infron stops a
+   * Motif-3 sample that keeps repeating itself (`repetition_detected`) this
+   * way, mid-stream, then closes with an ordinary `stop`. Retryable: a new
+   * sample of the same request usually gets through.
+   */
+  | "generation"
   /** The caller's signal fired. Never retried. */
   | "aborted";
 
@@ -112,6 +119,8 @@ export class TransportError extends Error {
    * limit hit three more times. The loop waits at least this long.
    */
   readonly retryAfterMs?: number;
+  /** The server's own error code, for a `generation` error. */
+  readonly code?: string;
 
   constructor(
     message: string,
@@ -121,6 +130,7 @@ export class TransportError extends Error {
       body?: string;
       retryable?: boolean;
       retryAfterMs?: number;
+      code?: string;
       cause?: unknown;
     },
   ) {
@@ -130,6 +140,7 @@ export class TransportError extends Error {
     if (opts.status !== undefined) this.status = opts.status;
     if (opts.body !== undefined) this.body = opts.body;
     if (opts.retryAfterMs !== undefined) this.retryAfterMs = opts.retryAfterMs;
+    if (opts.code !== undefined) this.code = opts.code;
     this.retryable = opts.retryable ?? defaultRetryable(opts.kind, opts.status);
   }
 }
@@ -138,6 +149,7 @@ function defaultRetryable(kind: TransportErrorKind, status?: number): boolean {
   switch (kind) {
     case "network":
     case "timeout":
+    case "generation":
       return true;
     case "http":
       // 5xx is the engine or the gateway falling over. 429 is the endpoint
@@ -284,6 +296,7 @@ export function requestBody(req: CompletionRequest, model: string): Record<strin
   if (req.maxTokens !== undefined) body["max_tokens"] = req.maxTokens;
   if (req.seed !== undefined) body["seed"] = req.seed;
   if (req.stop) body["stop"] = req.stop;
+  if (req.repetitionPenalty !== undefined) body["repetition_penalty"] = req.repetitionPenalty;
 
   if (req.raw) {
     if (req.prompt === undefined) throw new Error("raw completion requires a prompt");
@@ -493,6 +506,8 @@ function parseCost(raw: { cost?: unknown; cost_details?: unknown }): Pick<Report
 }
 
 interface StreamChunk {
+  /** Set when the server stops the generation itself, e.g. `{"code": "repetition_detected"}`. */
+  error?: { code?: unknown; message?: unknown } | null;
   cost?: unknown;
   cost_details?: unknown;
   choices?: {
@@ -532,6 +547,7 @@ async function readStream(
   let finish: string | undefined;
   let usage: Record<string, unknown> | undefined;
   let cost: Pick<ReportedCost, "amount" | "details"> | undefined;
+  let stopped: { code: string; message: string } | undefined;
   const calls = new Map<number, { id?: string; name: string; arguments: string }>();
 
   const handle = (line: string): boolean => {
@@ -551,6 +567,15 @@ async function readStream(
     // Accounting may arrive after finish_reason, in a chunk with no choices.
     // Each value is a request total: keep the last valid report, never sum it.
     cost = parseCost(chunk) ?? cost;
+    // An error chunk has no choices and is followed by a normal-looking `stop`,
+    // so ignoring it turns a cut-off sample into an empty but finished reply.
+    if (chunk.error && typeof chunk.error === "object") {
+      stopped = {
+        code: typeof chunk.error.code === "string" ? chunk.error.code : "generation_error",
+        message: typeof chunk.error.message === "string" ? chunk.error.message : "",
+      };
+      return true;
+    }
     const choice = chunk.choices?.[0];
     if (!choice) return false;
     if (choice.finish_reason) finish = choice.finish_reason;
@@ -601,6 +626,13 @@ async function readStream(
     if (finished) break;
   }
   if (!finished && buffer.trim() !== "") handle(buffer.trim());
+  if (stopped) {
+    await reader.cancel().catch(() => undefined);
+    throw new TransportError(`the server stopped the generation: ${stopped.code}${stopped.message ? ` (${stopped.message})` : ""}`, {
+      kind: "generation",
+      code: stopped.code,
+    });
+  }
 
   const toolCalls = [...calls.entries()]
     .sort((a, b) => a[0] - b[0])

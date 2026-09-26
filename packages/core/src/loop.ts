@@ -321,6 +321,15 @@ export function resetIds(): void {
   // is no global state left to reset.
 }
 
+/**
+ * Retries for a generation the server stopped itself (`repetition_detected`).
+ * Replaying two requests Infron had cut off in a long session, a plain retry
+ * reached a tool call in 3 samples of 4, `repetition_penalty` 1.05 in 4 of 4
+ * and 1.1 in 3 of 4. Two retries at 1.05 leave a small chance of a third cut.
+ */
+const MAX_REGENERATIONS = 2;
+const RETRY_REPETITION_PENALTY = 1.05;
+
 export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
   const {
     transport,
@@ -549,9 +558,11 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
 
     let response;
     let attempt = 0;
+    let regenerations = 0;
+    let current = request;
     for (;;) {
       try {
-        response = await transport.complete(request);
+        response = await transport.complete(current);
         break;
       } catch (err) {
         // Only transport failures are handled here. An arbitrary exception out
@@ -561,6 +572,28 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
         const te = err;
         transportErrors++;
         if (te.kind === "aborted") return finish("aborted");
+        if (te.kind === "generation") {
+          // The server cut the sample off; on Infron that is Motif-3 caught in
+          // a reasoning loop past ten thousand tokens. A fresh sample of the
+          // same request usually gets through, so try again at once, with the
+          // repetition penalty the router asks for on the retry only. The cut
+          // attempt is dropped: feeding the loop back would only feed it.
+          if (regenerations < MAX_REGENERATIONS) {
+            regenerations++;
+            current = { ...request, repetitionPenalty: RETRY_REPETITION_PENALTY };
+            emit({
+              type: "notice",
+              level: "warn",
+              text: `${te.message}; retry ${regenerations}/${MAX_REGENERATIONS} with repetition_penalty ${RETRY_REPETITION_PENALTY}`,
+            });
+            continue;
+          }
+          // Still cut off. End the turn with nothing in it rather than the
+          // session: the no-action path below hands the turn back.
+          emit({ type: "notice", level: "warn", text: `${te.message}; no reply after ${MAX_REGENERATIONS} retries` });
+          response = { content: "", rawText: "", finishReason: "stop", ms: 0 };
+          break;
+        }
         if (!te.retryable || attempt >= maxServerRetries) {
           emit({ type: "notice", level: "error", text: `${te.kind}: ${te.message}` });
           return finish("transport_error");
