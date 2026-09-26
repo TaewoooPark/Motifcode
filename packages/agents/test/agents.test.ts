@@ -57,6 +57,12 @@ describe("built-in agents", () => {
   it("bounds every agent's turns", () => {
     for (const def of reg.list()) expect(def.maxTurns, def.name).toBeGreaterThan(0);
   });
+
+  it("gives the explorer room to map a repository", () => {
+    // At 20, three of eleven live runs ran out before calling `done` and the
+    // parent got nothing back; the ones that finished used up to 19.
+    expect(reg.get("explorer")!.maxTurns).toBeGreaterThanOrEqual(40);
+  });
 });
 
 describe("scheduling", () => {
