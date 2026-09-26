@@ -85,7 +85,8 @@ export type LoopEvent =
     }
   | { type: "parse_failure"; kind: ParseFailureKind; sample: string }
   | { type: "channel_downgrade"; from: ChannelId; to: ChannelId; reason: string }
-  | { type: "queue"; agent: string; state: "queued" | "running" | "done" }
+  /** `failed` covers a child that ended without calling `done`, not only one that threw. */
+  | { type: "queue"; agent: string; state: "queued" | "running" | "done" | "failed" }
   | { type: "prefix"; sharedChars: number; totalChars: number; invalidatedBy?: string }
   | {
       type: "usage";

@@ -252,7 +252,7 @@ export class Chat {
     });
     this.billing.configure(this.settings.endpoint, this.apiKey);
     this.scheduler = new AgentScheduler(concurrencyFor(this.settings.endpoint), (entry) =>
-      this.screen.apply({ type: "queue", agent: entry.agent, state: entry.state === "failed" ? "done" : entry.state }),
+      this.screen.apply({ type: "queue", agent: entry.agent, state: entry.state }),
     );
     this.executor = this.makeExecutor(this.settings.cwd);
     if (opts.historyPath) this.composer.seedHistory(readHistory(opts.historyPath));
@@ -1417,7 +1417,7 @@ export class Chat {
           } finally {
             childExecutor.close();
           }
-        });
+        }, (out) => !out.ok);
       },
     });
   }

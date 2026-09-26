@@ -158,6 +158,36 @@ describe("interactive session", () => {
     expect(s.chat.transcript[1]!.content).toBe("안녕하세요! 무엇을 도와드릴까요?");
   });
 
+  it("shows a subagent that finished as done, and one that ran out of turns as failed", async () => {
+    const agents = new AgentRegistry();
+    agents.registerAll(BUILTIN_AGENTS);
+    // One turn, and a first `done` is only a proposal: it ends at its turn limit.
+    agents.register({ name: "hasty", description: "d", toolCount: 3, maxTurns: 1, instructions: "Map it.", source: "project" });
+    // Parent and child share this transport, so the bodies are in request
+    // order: the parent delegates, the child answers, the parent replies.
+    const t = new GateTransport([
+      toolCallBody("task", { agent: "explorer", prompt: "map the repo" }),
+      doneBody("mapped"),
+      doneBody("mapped", { confirm: true }),
+      ...reply("the explorer mapped it"),
+      toolCallBody("task", { agent: "hasty", prompt: "map the repo" }),
+      doneBody("partial"),
+      ...reply("the hasty subagent did not finish"),
+    ]);
+    const s = session(t, { agents });
+    open.push(s);
+
+    s.type("map it\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    expect(s.screen()).toContain("Task(explorer) · done");
+
+    s.type("again, faster\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(2));
+    expect(s.screen()).toContain("subagent did not finish (turn_limit)");
+    expect(s.screen()).toContain("Task(hasty) · failed");
+    expect(s.screen()).not.toContain("Task(hasty) · done");
+  });
+
   it("runs the command the menu has selected", async () => {
     const t = new GateTransport([]);
     const s = session(t);

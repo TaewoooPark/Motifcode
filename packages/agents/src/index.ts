@@ -131,10 +131,16 @@ export class AgentScheduler {
     return this.queue;
   }
 
+  /**
+   * `failed` classifies a result that came back rather than being thrown. A
+   * child that hits its turn limit returns normally, with `ok: false`, and
+   * without it the queue showed that child as done.
+   */
   async submit<T>(
     agent: string,
     prompt: string,
     run: (agent: string, prompt: string) => Promise<T>,
+    failed?: (result: T) => boolean,
   ): Promise<T> {
     const entry: QueueEntry = { agent, prompt, state: "queued" };
     this.queue.push(entry);
@@ -149,7 +155,7 @@ export class AgentScheduler {
     this.onChange?.(entry);
     try {
       const result = await run(agent, prompt);
-      entry.state = "done";
+      entry.state = failed?.(result) ? "failed" : "done";
       entry.result = describe(result);
       this.onChange?.(entry);
       return result;

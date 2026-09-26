@@ -308,7 +308,7 @@ function renderCellRaw(cell: Cell, opts: RenderOptions): StyledLine[] {
       return [line(`⇄ channel ${cell.from} → ${cell.to} · ${cell.reason}`, "warn"), blank];
 
     case "queue":
-      return [line(`${BULLET} Task(${cell.agent}) · ${cell.state}`, "dim"), blank];
+      return [line(`${BULLET} Task(${cell.agent}) · ${cell.state}`, cell.state === "failed" ? "bad" : "dim"), blank];
 
     case "notice": {
       const mark = cell.level === "error" ? "✗" : cell.level === "warn" ? "!" : "·";

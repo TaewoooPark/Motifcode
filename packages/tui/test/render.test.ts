@@ -206,6 +206,16 @@ describe("transcript", () => {
     expect(out).toContain("2 consecutive parse failures");
   });
 
+  it("shows a subagent that ended without done as failed, in the error tone", () => {
+    // It used to read "done" whatever happened, with the failure only in the
+    // tool output underneath.
+    const out = renderTranscript(fold([{ type: "queue", agent: "explorer", state: "failed" }]), OPTS);
+    expect(out[0]).toBe("⏺ Task(explorer) · failed");
+    const tone = (state: "done" | "failed") => renderCellStyled({ kind: "queue", agent: "explorer", state }, OPTS)[0]?.tone;
+    expect(tone("failed")).toBe("bad");
+    expect(tone("done")).toBe("dim");
+  });
+
   it("clips long tool output rather than flooding the screen", () => {
     const long = Array.from({ length: 200 }, (_, i) => `line ${i}`).join("\n");
     const state = fold([

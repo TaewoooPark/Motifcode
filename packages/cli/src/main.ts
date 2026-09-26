@@ -1051,7 +1051,7 @@ async function main(): Promise<number> {
   };
 
   const scheduler = new AgentScheduler(concurrencyFor(endpoint), (entry) =>
-    emit({ type: "queue", agent: entry.agent, state: entry.state === "failed" ? "done" : entry.state }),
+    emit({ type: "queue", agent: entry.agent, state: entry.state }),
   );
 
   const executor = new ToolExecutor({
@@ -1147,7 +1147,7 @@ async function main(): Promise<number> {
         } finally {
           childExecutor.close();
         }
-      });
+      }, (out) => !out.ok);
     },
   });
 

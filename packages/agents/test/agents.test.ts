@@ -118,6 +118,17 @@ describe("scheduling", () => {
     expect(states).toEqual(["queued", "running", "done"]);
   });
 
+  it("marks a result the caller calls a failure as failed, and still returns it", async () => {
+    // A child that hits its turn limit comes back with `ok: false` instead of
+    // throwing, and the queue used to show it as done.
+    const states: string[] = [];
+    const s = new AgentScheduler(1, (e) => states.push(e.state));
+    const out = await s.submit("explorer", "x", async () => ({ ok: false }), (r) => !r.ok);
+    expect(out).toEqual({ ok: false });
+    expect(states).toEqual(["queued", "running", "failed"]);
+    expect(s.pending).toHaveLength(0);
+  });
+
   it("marks a failure and rethrows", async () => {
     const states: string[] = [];
     const s = new AgentScheduler(1, (e) => states.push(e.state));
