@@ -31,7 +31,12 @@ interface ServerRuntime {
   paused: boolean;
   pending?: Promise<McpConnection>;
   current?: McpConnection;
+  /** Consecutive startup failures and when automatic use may try again. */
+  failures?: number;
+  retryAt?: number;
 }
+/** 30 s, doubling to at most 5 minutes; a person's connect skips the wait. */
+const startupBackoffMs = (failures: number): number => Math.min(300_000, 30_000 * 2 ** Math.max(0, failures - 1));
 
 export type McpOutcome =
   | { ok: true; execution: 'completed'; isError: boolean; result: CallToolResult }
@@ -146,6 +151,11 @@ export class McpManager {
     const config = this.servers.get(server)!;
     if (runtime.current?.closed) { runtime.current = undefined; runtime.pending = undefined; }
     const generation = runtime.generation;
+    // A failed server is not restarted by every task or tool call during its
+    // backoff; each attempt could otherwise cost the whole startup timeout.
+    if (!runtime.pending && runtime.retryAt !== undefined && Date.now() < runtime.retryAt) {
+      throw new McpClientError('server_unavailable', `MCP server ${server} failed to start recently. Motif tries again in ${Math.ceil((runtime.retryAt - Date.now()) / 1000)} s; a person can reconnect it now with /mcp.`);
+    }
     if (!runtime.pending) {
       this.setState(server, 'connecting');
       const pending = Promise.resolve().then(async () => {
@@ -156,6 +166,7 @@ export class McpManager {
           runtime.current = connection;
           await connection.open(AbortSignal.any([this.lifetime.signal, runtime.controller.signal]));
           if (!this.isCurrent(server, generation, connection)) throw new McpClientError('cancelled', 'MCP connection was cancelled.');
+          runtime.failures = 0; runtime.retryAt = undefined;
           this.setState(server, 'ready');
           return connection;
         } catch (error) {
@@ -164,6 +175,10 @@ export class McpManager {
           if (this.isCurrent(server, generation) && runtime.pending === pending) {
             runtime.pending = undefined;
             runtime.current = undefined;
+            if (diagnostic.code !== 'cancelled') {
+              runtime.failures = (runtime.failures ?? 0) + 1;
+              runtime.retryAt = Date.now() + startupBackoffMs(runtime.failures);
+            }
             this.setState(server, 'error', 0, diagnostic);
           }
           throw new McpClientError(diagnostic.code, diagnostic.message);
@@ -189,6 +204,8 @@ export class McpManager {
       runtime.controller = new AbortController();
       this.setState(server, 'idle');
     }
+    // An explicit human connection attempt does not wait for automatic backoff.
+    runtime.retryAt = undefined;
     const generation = runtime.generation;
     let connection: McpConnection | undefined;
     try {

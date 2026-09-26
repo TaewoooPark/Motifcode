@@ -21,6 +21,24 @@ function manager(servers: McpServerConfig[]) { const m = new McpManager({ server
 afterEach(async () => { await Promise.all(managers.splice(0).map(m => m.close())); for (const dir of directories.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
 describe('McpManager real SDK connections', () => {
+  it('backs off a server that fails to start instead of restarting it for every catalog read', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'motif-mcp-')); directories.push(dir);
+    const spawns = join(dir, 'spawns');
+    const failing: McpServerConfig = { id: 'broken', enabled: true, transport: 'stdio', protocol: 'legacy', command: process.execPath,
+      args: ['-e', `require('node:fs').appendFileSync(${JSON.stringify(spawns)}, 'x'); process.exit(1)`], startupTimeoutMs: 3_000 };
+    const m = manager([failing]);
+    const started = () => readFileSync(spawns, 'utf8').length;
+    expect(await m.catalog()).toEqual([]);
+    expect(m.statuses()[0]).toMatchObject({ state: 'error' });
+    expect(await m.catalog()).toEqual([]);
+    expect(started()).toBe(1);
+    expect(await m.invoke('broken', 'anything', {}, scope)).toMatchObject({ execution: 'not_started', error: { code: 'server_unavailable' } });
+    await expect(m.getTool('broken', 'anything')).rejects.toMatchObject({ code: 'server_unavailable' });
+    expect(started()).toBe(1);
+    await expect(m.connect('broken')).rejects.toBeDefined();
+    expect(started()).toBe(2);
+  });
+
   it('lists every legacy page, filters deny over allow, validates without execution and preserves business errors', async () => {
     const f = fixture('legacy', { allowedTools: ['echo', 'business', 'gated'], deniedTools: ['gated'] });
     const m = manager([f.server]);

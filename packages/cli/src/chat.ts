@@ -895,7 +895,12 @@ export class Chat {
   private async prepareMcp(task: string, signal: AbortSignal): Promise<string | undefined> {
     const session = this.opts.mcp;
     if (!session) return undefined;
-    let context = await session.prepare(task, signal);
+    // Starting a server can take seconds (npx downloads, slow endpoints); say so.
+    const connecting = session.statuses().some((s) => s.enabled && !["ready", "paused", "disabled"].includes(s.state));
+    if (connecting) this.screen.setActivity("Connecting to MCP…");
+    let context: string;
+    try { context = await session.prepare(task, signal); }
+    finally { if (connecting) this.screen.setActivity(null); }
     if (!this.opts.mcpLogin || signal.aborted) return context;
     let changed = false;
     for (const status of session.statuses()) {
