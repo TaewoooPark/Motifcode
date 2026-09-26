@@ -513,9 +513,10 @@ async function main(): Promise<number> {
   if (args.command === "skills" || (args.command === "plugins" && (args.rest.length > 0 || args.flags.help))) {
     withholdSecrets(process.env);
     const abort = new AbortController(); const cancel = () => abort.abort();
-    process.on("SIGINT", cancel); process.on("SIGTERM", cancel);
+    const signals = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
+    for (const signal of signals) process.on(signal, cancel);
     try { return await (args.command === "skills" ? runSkillsArgv : runPluginsArgv)(args.rest, args.flags, { getSkills: cwd => loadSkills(cwd).list(), connectionOptions: pluginConnectionUi(abort.signal) }); }
-    finally { process.removeListener("SIGINT", cancel); process.removeListener("SIGTERM", cancel); }
+    finally { for (const signal of signals) process.removeListener(signal, cancel); }
   }
   const cwd = flagStr(args.flags, "cwd", process.cwd());
   const envFile = flagStr(args.flags, "env-file", "");

@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawn } from "node:child_process";
 import { inspectSkillSource, installSkillCandidates, type SkillScope } from "../src/skill-installer.js";
 import { connectInstalledSkill, inspectInstalledSkillConnections, type PluginActivationContext } from "../src/plugin-connections.js";
 import { runSkillsArgv } from "../src/skills-command.js";
@@ -177,6 +179,38 @@ describe("approval and activation boundary", () => {
 });
 
 describe("skills/plugins connection commands", () => {
+  it.each(["SIGINT", "SIGTERM", "SIGHUP"] as const)("cleans up a starting stdio package when plugins connect receives %s", async signal => {
+    const f = fixture({ process: { command: process.execPath, args: ["${PLUGIN_ROOT}/server.mjs"] } }, { serverCode: `
+      import { writeFileSync } from 'node:fs';
+      writeFileSync('boot.json', JSON.stringify({ pid: process.pid }));
+      setInterval(() => {}, 1000);
+    ` });
+    const plan = inspectInstalledSkillConnections(f.name, f);
+    const boot = join(plan.runtimeRoot, "boot.json");
+    const child = spawn(process.execPath, ["--import", fileURLToPath(new URL("../../../node_modules/tsx/dist/loader.mjs", import.meta.url)),
+      fileURLToPath(new URL("../src/main.ts", import.meta.url)), "plugins", "connect", f.name, "--yes", "--json"], {
+      cwd: f.cwd, env: { PATH: process.env.PATH, HOME: f.home, NO_COLOR: "1" }, stdio: ["ignore", "ignore", "ignore"],
+    });
+    const closed = new Promise<void>(resolve => child.once("close", () => resolve()));
+    let pid: number | undefined;
+    try {
+      await vi.waitFor(() => {
+        pid = (JSON.parse(readFileSync(boot, "utf8")) as { pid: number }).pid;
+        expect(pid).toBeGreaterThan(0);
+      }, { timeout: 4_000 });
+      child.kill(signal);
+      await vi.waitFor(() => expect(child.exitCode ?? child.signalCode).not.toBeNull(), { timeout: 4_000 });
+      await closed;
+      expect(child.signalCode).toBeNull();
+      expect(child.exitCode).toBe(1);
+      await vi.waitFor(() => expect(() => process.kill(pid!, 0)).toThrow(), { timeout: 1_000 });
+    } finally {
+      child.kill("SIGKILL");
+      if (pid) try { process.kill(pid, "SIGKILL"); } catch { /* reaped by the connection owner */ }
+      await closed;
+    }
+  }, 10_000);
+
   it("runs deterministic inspect/add aliases and propagates a non-ready check as failure", async () => {
     const f = fixture({ local }); let out = ""; let err = "";
     const io = { ...f, stdout: (text: string) => { out += text; }, stderr: (text: string) => { err += text; } };
