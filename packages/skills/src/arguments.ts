@@ -6,6 +6,8 @@ export function splitSkillArguments(input: string): string[] {
     const ch = input[i]!;
     if (ch === "\\" && quote !== "'" && i + 1 < input.length) { word += input[++i]; started = true; }
     else if (quote) { if (ch === quote) quote = ""; else word += ch; started = true; }
+    // An apostrophe inside a word ("don't", "O'Neil") is prose, not a quote.
+    else if (ch === "'" && /[\p{L}\p{N}]/u.test(input[i - 1] ?? "") && /[\p{L}\p{N}]/u.test(input[i + 1] ?? "")) { word += ch; started = true; }
     else if (ch === '"' || ch === "'") { quote = ch; started = true; }
     else if (/\s/.test(ch)) { if (started) { out.push(word); word = ""; started = false; } }
     else { word += ch; started = true; }
@@ -17,8 +19,11 @@ export function splitSkillArguments(input: string): string[] {
 
 /** One replacement pass: user input containing placeholders stays literal. */
 export function substituteSkillArguments(body: string, input: string, names: readonly string[] = []): string {
-  const args = splitSkillArguments(input);
-  const named = new Map(names.map((name, index) => [name, args[index] ?? ""]));
+  // Tokenize only for positional or named placeholders; whole-input skills
+  // accept any prose, including unmatched quotes.
+  let args: string[] | undefined;
+  const positional = (at: number): string | undefined => (args ??= splitSkillArguments(input))[at];
+  const named = new Map(names.map((name, index) => [name, index]));
   let received = false;
   const expanded = body.replace(/(\\*)\$(ARGUMENTS(?:\[(\d+)\])?|\d+|[A-Za-z_][\w-]*)(?![\w-])/g, (match, slashes: string, token: string, index: string | undefined) => {
     const supported = token === "ARGUMENTS" || index !== undefined || /^\d+$/.test(token) || named.has(token);
@@ -26,8 +31,8 @@ export function substituteSkillArguments(body: string, input: string, names: rea
     if (slashes.length % 2 === 1) return `${slashes.slice(1)}$${token}`;
     let replacement: string | undefined;
     if (token === "ARGUMENTS") replacement = input;
-    else if (named.has(token)) replacement = named.get(token);
-    else replacement = args[Number(index ?? token)];
+    else if (named.has(token)) replacement = positional(named.get(token)!) ?? "";
+    else replacement = positional(Number(index ?? token));
     if (replacement === undefined) return match;
     received = true;
     return `${slashes}${replacement}`;

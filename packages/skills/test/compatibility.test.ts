@@ -93,6 +93,12 @@ describe("upstream skill compatibility", () => {
     expect(()=>substituteSkillArguments("$0", '\"unfinished')).toThrow(/unterminated/);
   });
 
+  it("keeps apostrophes and unmatched quotes in ordinary prose input", () => {
+    expect(substituteSkillArguments("Debug it.", "it doesn't start")).toBe("Debug it.\n\nInput from the person:\nit doesn't start");
+    expect(substituteSkillArguments("task: $ARGUMENTS", 'explain the "parser')).toBe('task: explain the "parser');
+    expect(substituteSkillArguments("first=$0 second=$1", "don't stop")).toBe("first=don't second=stop");
+  });
+
   it("includes source and bundle roots, resolves host variables, and preserves literal input", () => {
     const dir = bundle(); const child = join(dir,"skills/probe"); mkdirSync(child,{recursive:true});
     writeFileSync(join(child,"SKILL.md"), '---\nname: probe\ndescription: d\n---\n${CLAUDE_SKILL_DIR}/scripts/check.py\n${CLAUDE_PLUGIN_ROOT}/references/manual.md\n${CLAUDE_PROJECT_DIR}\n$ARGUMENTS');

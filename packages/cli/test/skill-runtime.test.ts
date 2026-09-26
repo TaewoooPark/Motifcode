@@ -21,6 +21,11 @@ describe("skill runtime boundaries", () => {
     expect(expanded.task.match(/<skill name="probe">/g)).toHaveLength(1);
   });
 
+  it.each(["/probe it doesn't start", "@skill:probe it doesn't start", "$probe it doesn't start"])("accepts apostrophes in %s", input => {
+    const expanded=expandSkillInput(input,{cwd:"/",skills:registry("probe","","Debug this.")});
+    expect(expanded.errors).toEqual([]);expect(expanded.task).toContain("it doesn't start");
+  });
+
   it("does not remove an invoked name's prefix from other argument tokens", () => {
     const expanded=expandSkillInput('$probe $probelong @skill:probelong',{cwd:"/",skills:registry()});
     expect(expanded.errors).toContainEqual(expect.stringContaining('No skill named "probelong"'));
