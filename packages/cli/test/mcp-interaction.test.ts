@@ -34,6 +34,15 @@ describe("MCP human interaction", () => {
     const form: McpElicitationRequest = { server: "demo", mode: "form", message: "Settings", signal: new AbortController().signal, requestedSchema: { type: "object", required: ["name", "count", "enabled"], properties: { name: { type: "string" }, count: { type: "integer" }, enabled: { type: "boolean" }, tags: { type: "array", items: { type: "string", enum: ["a", "b"] } } } } };
     expect(await requestMcpInteraction(form, prompts)).toEqual({ action: "accept", content: { name: "Ada", count: 2, enabled: true, tags: ["a"] } });
   });
+  it("masks only free text whose name, title or description looks like a credential", async () => {
+    const prompts = ui([0], ["", "", "", "", ""]);
+    const form: McpElicitationRequest = { server: "demo", mode: "form", message: "Shipment", signal: new AbortController().signal, requestedSchema: { type: "object", properties: {
+      shipping_note: { type: "string" }, pinCode: { type: "string" }, label: { type: "string", title: "Personal token" },
+      code: { type: "string", description: "One-time passcode" }, spinner_style: { type: "string", enum: ["dots", "line"] } } } };
+    await requestMcpInteraction(form, prompts);
+    const calls = prompts.input.mock.calls as unknown as Parameters<McpHumanUi["input"]>[];
+    expect(calls.map(call => [call[0], call[3]])).toEqual([["shipping_note", false], ["pinCode", true], ["Personal token", true], ["code", true], ["spinner_style", false]]);
+  });
   it("declines credential forms and already cancelled requests", async () => {
     const form: McpElicitationRequest = { server: "demo", mode: "form", message: "Secret", signal: new AbortController().signal, requestedSchema: { type: "object", properties: { password: { type: "string" } } } };
     expect(await requestMcpInteraction(form, ui([0]))).toEqual({ action: "decline" });

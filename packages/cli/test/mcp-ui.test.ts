@@ -132,23 +132,31 @@ describe("MCP authorization UI", () => {
     expect(verifyKey).not.toHaveBeenCalled();
     login.type(ESC);
   });
-  it("shows constrained form answers while typing but keeps free text hidden", async () => {
+  it("shows form answers while typing but masks credential-like free text", async () => {
     const s = session();
     const result = s.chat.handleMcpElicitation({ server: "fixture", mode: "form", message: "Order", signal: new AbortController().signal,
-      requestedSchema: { type: "object", properties: { count: { type: "integer" }, note: { type: "string" } }, required: ["count"] } });
+      requestedSchema: { type: "object", properties: { count: { type: "integer" }, note: { type: "string" }, github_token: { type: "string" },
+        code: { type: "string", description: "One-time passcode from your authenticator" } }, required: ["count"] } });
+    const masked = async (value: string) => {
+      const mark = s.output().length; s.type(value);
+      await vi.waitFor(() => expect(s.output().slice(mark)).toContain("•".repeat(value.length)));
+      expect(s.output()).not.toContain(value); s.type("\r");
+    };
     await vi.waitFor(() => expect(s.output()).toContain("Continue")); s.type("1");
     await vi.waitFor(() => expect(s.output()).toContain("count")); s.type("7391");
     await vi.waitFor(() => expect(s.output()).toContain("7391")); s.type("\r");
-    await vi.waitFor(() => expect(s.output()).toContain("note")); s.type("PRIVATE_NOTE_VALUE");
-    expect(s.output()).not.toContain("PRIVATE_NOTE_VALUE"); s.type("\r");
-    expect(await result).toEqual({ action: "accept", content: { count: 7391, note: "PRIVATE_NOTE_VALUE" } });
+    await vi.waitFor(() => expect(s.output()).toContain("note")); s.type("VISIBLE_NOTE_VALUE");
+    await vi.waitFor(() => expect(s.output()).toContain("VISIBLE_NOTE_VALUE")); s.type("\r");
+    await vi.waitFor(() => expect(s.output()).toContain("github_token")); await masked("MASKED_TOKEN_VALUE");
+    await vi.waitFor(() => expect(s.output()).toContain("One-time passcode")); await masked("MASKED_CODE_VALUE");
+    expect(await result).toEqual({ action: "accept", content: { count: 7391, note: "VISIBLE_NOTE_VALUE", github_token: "MASKED_TOKEN_VALUE", code: "MASKED_CODE_VALUE" } });
   });
   it("clears hidden form input before stopping an active task can redraw it", async () => {
     const c = controls();
     const s = session(c.mcp);
     c.mcp.prepare = async (_task, signal) => {
       await s.chat.handleMcpElicitation({ server: "fixture", mode: "form", message: "Private response", signal: signal!,
-        requestedSchema: { type: "object", properties: { note: { type: "string" } } } });
+        requestedSchema: { type: "object", properties: { pin: { type: "string" } } } });
       return "";
     };
     s.type("Run fixture task\r");

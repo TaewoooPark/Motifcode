@@ -3,11 +3,15 @@ import { externalUrl, openExternalUrl } from "./browser-open.js";
 
 export interface McpHumanUi {
   choose(title: string, lines: string[], options: string[]): Promise<number | null>;
-  /** `masked` hides free-form text; constrained answers stay visible while typed. */
+  /** `masked` hides credential-like free text; other answers stay visible while typed. */
   input(title: string, lines: string[], prompt: string, masked?: boolean): Promise<string | null>;
   openBrowser?: (url: URL) => Promise<void>;
 }
 const label = (value: string) => value.replace(/[\x00-\x1f\x7f-\x9f]/g, " ").slice(0, 240);
+/** Words that mark a field as a credential even when its name slipped past the decline check. */
+const SENSITIVE = /\b(?:tokens?|otp|pin|passcodes?|passphrases?|passwords?|passwd|secrets?|credentials?|cvv|cvc|ssn|apikey|(?:api|access|private|secret|ssh|signing) keys?)\b/;
+const sensitive = (...texts: Array<string | undefined>) => texts.some((text) =>
+  text !== undefined && SENSITIVE.test(text.replace(/([a-z\d])([A-Z])/g, "$1 $2").toLowerCase().replace(/[^a-z\d]+/g, " ")));
 
 /** Values go directly from the human to the server, never through a model prompt. */
 export async function requestMcpInteraction(request: McpElicitationRequest, ui: McpHumanUi): Promise<McpElicitationResponse> {
@@ -41,7 +45,7 @@ export async function requestMcpInteraction(request: McpElicitationRequest, ui: 
     } else {
       const choices = "enum" in field && Array.isArray(field.enum);
       const raw = await ui.input(label(field.title ?? name), [...lines, ...(choices ? [`Choices: ${field.enum.map(String).map(label).join(", ")}`] : []), ...(field.type === "array" ? ['Enter a JSON array of choices, e.g. ["first"].'] : [])], "response › ",
-        field.type === "string" && !choices);
+        field.type === "string" && !choices && sensitive(name, field.title, field.description));
       if (raw === null || request.signal.aborted) return { action: "cancel" };
       if (!raw && !schema.required?.includes(name)) continue;
       if (field.type === "number" || field.type === "integer") {
