@@ -1,10 +1,7 @@
 import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { loadMcpConfig, resolveServerConfig, type ConfigDiagnostic, type EnvValue, type McpServerConfig } from "../../mcp/src/config.js";
-import { importMcpConfig, type ImportClient } from "../../mcp/src/importers.js";
-import { createMcpPresetConfig, getMcpPreset, listMcpPresets, McpPresetError } from "../../mcp/src/presets.js";
+import { loadMcpConfig, resolveServerConfig, type ConfigDiagnostic, type EnvValue, type McpServerConfig, importMcpConfig, type ImportClient, createMcpPresetConfig, getMcpPreset, listMcpPresets, McpPresetError, McpAuthBroker, McpManager } from "@motifcode/mcp";
 import { editMcpConfig, updateMcpConfig, McpConfigEditError, summarizeMcpServer } from "./mcp-config-edit.js";
-import { McpAuthBroker } from "../../mcp/src/auth.js";
 import { connectMcpServers, localMcpAuthTarget } from "./mcp-connect.js";
 import { openExternalUrl } from "./browser-open.js";
 
@@ -290,7 +287,6 @@ export async function runMcpCommand(
     if (flags.connect && !diagnostics.some((diagnostic) => diagnostic.severity === "error")) {
       if (config.sources.some((source) => !source.trusted)) diagnostics.push({ severity: "error", code: "untrusted_config", message: "Review and authorize the exact configuration hash before connecting." });
       else {
-        const { McpManager } = await import("../../mcp/src/manager.js");
         const manager = new McpManager(config, { env: options.env ?? process.env, auth: new McpAuthBroker({ home: options.home, fetch: options.fetch }), fetch: options.fetch });
         const controller = new AbortController();
         const handlers = ([ ["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129] ] as const).map(([signal, code]) => {

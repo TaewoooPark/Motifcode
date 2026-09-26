@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, type Stats } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { configHash, defaultMcpConfigPath, parseMcpConfig, type McpConfig, type McpServerConfig } from "../../mcp/src/config.js";
+import { configHash, defaultMcpConfigPath, parseMcpConfig, type McpConfig, type McpServerConfig } from "@motifcode/mcp";
 
 export interface McpConfigEditOptions { cwd?: string; home?: string; path?: string; trustHash?: string }
 export interface McpConfigEditResult { path: string; sha256: string; config: McpConfig }

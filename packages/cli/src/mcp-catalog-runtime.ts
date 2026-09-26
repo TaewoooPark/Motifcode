@@ -1,7 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import { resolve } from "node:path";
-import { createMcpPresetConfig, defaultMcpConfigPath, getMcpPreset, resolveServerConfig, type McpConfig, type McpSession, type McpStatus } from "@motifcode/mcp";
-import { McpClientError } from "@motifcode/mcp";
+import { createMcpPresetConfig, defaultMcpConfigPath, getMcpPreset, McpClientError, resolveServerConfig, type McpConfig, type McpSession, type McpStatus } from "@motifcode/mcp";
 import { McpConfigEditError, updateMcpConfig, type McpConfigEditOptions } from "./mcp-config-edit.js";
 
 export interface McpCatalogInstallOptions { root?: string; tokenEnv?: string }

@@ -71,10 +71,8 @@ import { doctor, formatChecks } from "./doctor.js";
 import { ToolExecutor, type ExecutorOptions } from "./executor.js";
 import { policyForAgent } from "./policy.js";
 import { buildAgentPrompt, buildSystemPrompt } from "./prompt.js";
-import { compactMcpContext, MCP_CONTEXT_PREFIX, type McpSession, type McpPreset, type McpStatus, type McpElicitationRequest, type McpElicitationResponse } from "@motifcode/mcp";
+import { compactMcpContext, MCP_CONTEXT_PREFIX, type McpSession, type McpPreset, type McpStatus, type McpElicitationRequest, type McpElicitationResponse, McpAuthError, McpPresetError } from "@motifcode/mcp";
 import { requestMcpInteraction } from "./mcp-interaction.js";
-import { McpAuthError } from "../../mcp/src/auth.js";
-import { McpPresetError } from "../../mcp/src/presets.js";
 import { McpConfigEditError } from "./mcp-config-edit.js";
 
 export interface ChatOptions {

@@ -2,8 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { configHash, isRecord, parseMcpConfig, type ConfigDiagnostic, type McpConfig, type McpServerConfig } from "../../mcp/src/config.js";
-import { importMcpConfig, importedServerId } from "../../mcp/src/importers.js";
+import { configHash, isRecord, parseMcpConfig, type ConfigDiagnostic, type McpConfig, type McpServerConfig, importMcpConfig, importedServerId } from "@motifcode/mcp";
 import { updateMcpConfig } from "./mcp-config-edit.js";
 import { listInstalledSkills, SkillInstallError, type SkillReceipt, type SkillScope } from "./skill-installer.js";
 

@@ -1,6 +1,5 @@
 import { spawn } from "node:child_process";
-import { McpAuthError } from "../../mcp/src/auth.js";
-import { githubCredentialEnvironment } from "../../mcp/src/github-auth.js";
+import { McpAuthError, githubCredentialEnvironment } from "@motifcode/mcp";
 import { openExternalUrl } from "./browser-open.js";
 
 export interface GitHubBrowserLoginOptions {

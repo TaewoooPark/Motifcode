@@ -1,8 +1,7 @@
 import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { configHash, parseMcpConfig, type McpServerConfig } from "../../mcp/src/config.js";
-import { createMcpPresetConfig, getMcpPreset } from "../../mcp/src/presets.js";
+import { configHash, parseMcpConfig, type McpServerConfig, createMcpPresetConfig, getMcpPreset } from "@motifcode/mcp";
 import { updateMcpConfig } from "./mcp-config-edit.js";
 import { loadBuiltinPlugins, type PluginInfo } from "./plugins.js";
 import { SkillInstallError } from "./skill-installer.js";
