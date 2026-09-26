@@ -65,6 +65,21 @@ describe("built-in agents", () => {
   });
 });
 
+describe("the index the parent sees", () => {
+  it("lists each agent and says what to do with what comes back", () => {
+    const index = reg.index();
+    for (const def of reg.list()) expect(index).toContain(`  ${def.name} — ${def.description}`);
+    // The parent went back over a finished child's ground after every
+    // delegation, and once reported an unfinished child as done.
+    expect(index).toContain("summary is its result: build on it rather than redoing");
+    expect(index).toContain("did not finish has not done the work");
+  });
+
+  it("is empty when there is no one to delegate to", () => {
+    expect(new AgentRegistry().index()).toBe("");
+  });
+});
+
 describe("scheduling", () => {
   it("serialises on a local endpoint and fans out on a hosted one", () => {
     // One GPU means the requests queue in the server anyway; queueing here just
