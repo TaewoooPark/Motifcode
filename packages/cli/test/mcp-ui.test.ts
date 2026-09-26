@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -73,6 +73,7 @@ function session(mcp?: McpSession, transport?: Transport, compactAt = 0.75, extr
 afterEach(async () => {
   for (const s of opened) { s.chat.stop(); await s.finished; }
   opened.length = 0;
+  vi.unstubAllEnvs();
 });
 
 describe("MCP authorization UI", () => {
@@ -422,14 +423,36 @@ describe("Built-in MCP catalog setup", () => {
   it("requires an explicitly reviewed filesystem root and supports visible path input", async () => {
     const c = controls([]); const install = vi.fn(async () => status("filesystem", "ready"));
     const s = session(c.mcp, undefined, 0.75, { mcpPresets: listMcpPresets, mcpInstall: install });
+    // A short path keeps the typed value and the review line on one row.
+    const project = mkdtempSync("/tmp/mfs-"); mkdirSync(join(project, "data"));
+    const alias = join(project, "a"); symlinkSync(join(project, "data"), alias);
+    const canonical = realpathSync(join(project, "data"));
     s.type("/mcp install filesystem\r");
     await vi.waitFor(() => expect(s.output()).toContain("Choose filesystem access")); s.type("2");
     await vi.waitFor(() => expect(s.output()).toContain("Filesystem directory"));
-    s.type("/tmp/example-project");
-    expect(s.output()).toContain("/tmp/example-project"); expect(install).not.toHaveBeenCalled(); s.type("\r");
-    await vi.waitFor(() => expect(s.output()).toContain("Read/write root: /tmp/example-project"));
+    s.type(alias);
+    expect(s.output()).toContain(alias); expect(install).not.toHaveBeenCalled(); s.type("\r");
+    // The review names the directory that will be granted, not the typed alias.
+    await vi.waitFor(() => expect(s.output()).toContain(`Read/write root: ${canonical}`));
     expect(install).not.toHaveBeenCalled(); s.type("1");
-    await vi.waitFor(() => expect(install).toHaveBeenCalledWith("filesystem", { root: "/tmp/example-project" }, expect.any(AbortSignal)));
+    await vi.waitFor(() => expect(install).toHaveBeenCalledWith("filesystem", { root: canonical }, expect.any(AbortSignal)));
+  });
+
+  it("expands ~ and refuses a missing filesystem root before review", async () => {
+    // A short home keeps the review line on one row wherever the suite runs.
+    const home = mkdtempSync("/tmp/mfh-"); vi.stubEnv("HOME", home);
+    const c = controls([]); const install = vi.fn(async () => status("filesystem", "ready"));
+    const s = session(c.mcp, undefined, 0.75, { mcpPresets: listMcpPresets, mcpInstall: install });
+    s.type("/mcp install filesystem\r");
+    await vi.waitFor(() => expect(s.output()).toContain("Choose filesystem access")); s.type("2");
+    await vi.waitFor(() => expect(s.output()).toContain("Filesystem directory")); s.type("~\r");
+    await vi.waitFor(() => expect(s.output()).toContain(`Read/write root: ${realpathSync(home)}`)); s.type("2");
+    await vi.waitFor(() => expect(s.output()).toContain("MCP setup cancelled"));
+    const mark = s.output().length; s.type("/mcp install filesystem\r");
+    await vi.waitFor(() => expect(s.output().slice(mark)).toContain("Choose filesystem access")); s.type("2");
+    await vi.waitFor(() => expect(s.output().slice(mark)).toContain("Filesystem directory")); s.type("/definitely/missing/root\r");
+    await vi.waitFor(() => expect(s.output()).toContain("is not an existing directory"));
+    expect(install).not.toHaveBeenCalled();
   });
 
   it("keeps Gmail preview prerequisites actionable without soliciting a token", async () => {

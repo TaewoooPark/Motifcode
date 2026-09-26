@@ -22,7 +22,8 @@
  * controller runs against a fake stream in a test.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { AgentRegistry, AgentScheduler, concurrencyFor } from "@motifcode/agents";
 import {
@@ -974,8 +975,8 @@ export class Chat {
       if (!before && preset.options.includes("root")) {
         const choice = await this.askMcpChoice(abort.signal, "Choose filesystem access", ["This server can read and write inside the selected directory.", `Current project: ${this.settings.cwd}`], ["1. Use current project directory", "2. Enter another directory", "3. Cancel"]);
         if (choice === null || choice === 2) return output("MCP setup cancelled; no configuration changed.");
-        if (choice === 0) options.root = this.settings.cwd;
-        else {
+        let typed = this.settings.cwd;
+        if (choice !== 0) {
           const answer = this.askSecret("Filesystem directory", ["Enter an existing directory. You will review it before connecting."], "path › ", "enter review · esc cancel", false, false);
           const pending = this.pendingSecret;
           const cancel = () => { if (pending && this.pendingSecret === pending) { this.pendingSecret = null; this.composer.clear(); pending.resolve(null); this.refresh(); } };
@@ -983,8 +984,15 @@ export class Chat {
           let root: string | null;
           try { root = await answer; } finally { abort.signal.removeEventListener("abort", cancel); }
           if (root === null || abort.signal.aborted) return output("MCP setup cancelled; no configuration changed.");
-          options.root = root.trim();
+          typed = root.trim();
         }
+        // Review the directory that will actually be granted: ~ expanded,
+        // relative to the project, symlinks resolved.
+        const expanded = typed === "~" ? homedir() : typed.startsWith("~/") ? join(homedir(), typed.slice(2)) : typed;
+        try {
+          options.root = realpathSync(resolve(this.settings.cwd, expanded));
+          if (!statSync(options.root).isDirectory()) throw new Error("not a directory");
+        } catch { return output(`${typed} is not an existing directory; no configuration changed.`, true); }
       }
       const choice = await this.askMcpChoice(abort.signal, before ? `Enable ${preset.title}?` : `Set up ${preset.title}?`, [
         ...(before ? ["Enable the existing server configuration and connect now."] : [preset.description, ...preset.prerequisites, preset.authentication]),
