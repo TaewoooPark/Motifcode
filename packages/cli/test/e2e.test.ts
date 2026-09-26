@@ -11,7 +11,7 @@
  * about request bodies, not about anything the harness reports of itself.
  */
 
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -38,8 +38,14 @@ class MockServer {
   readonly urls: string[] = [];
   readonly headers: Record<string, string | string[] | undefined>[] = [];
   port = 0;
+  /** Called when a held turn arrives; that request stays unanswered, like a model still thinking. */
+  onHold?: () => void;
+  private readonly held: ServerResponse[] = [];
 
-  constructor(private readonly script: (turn: number, body: ChatBody) => string) {}
+  constructor(
+    private readonly script: (turn: number, body: ChatBody) => string,
+    private readonly hold: (turn: number) => boolean = () => false,
+  ) {}
 
   async start(): Promise<void> {
     this.server = createServer((req: IncomingMessage, res: ServerResponse) => {
@@ -56,6 +62,7 @@ class MockServer {
           /* recorded as empty; the assertions will say so */
         }
         this.bodies.push(body);
+        if (this.hold(this.bodies.length)) { this.held.push(res); this.onHold?.(); return; }
         const content = this.script(this.bodies.length, body);
         res.writeHead(200, { "content-type": "application/json" });
         res.end(
@@ -72,6 +79,7 @@ class MockServer {
   }
 
   async stop(): Promise<void> {
+    for (const res of this.held) res.destroy();
     await new Promise<void>((r) => this.server.close(() => r()));
   }
 
@@ -90,7 +98,7 @@ interface RunResult {
   stderr: string;
 }
 
-function runCli(argv: string[], cwd: string, env: Record<string, string> = {}): Promise<RunResult> {
+function runCli(argv: string[], cwd: string, env: Record<string, string> = {}, onSpawn?: (child: ChildProcess) => void): Promise<RunResult> {
   // The key is stripped from the inherited environment, and HOME points at an
   // empty directory, so neither a developer's own MOTIF_API_KEY nor their
   // ~/.motif/.env can make the unauthenticated cases pass by accident.
@@ -103,6 +111,7 @@ function runCli(argv: string[], cwd: string, env: Record<string, string> = {}): 
       [join(REPO, "node_modules/tsx/dist/cli.mjs"), MAIN, ...argv],
       { cwd, env: { ...inherited, HOME: home, NO_COLOR: "1", ...env }, stdio: ["ignore", "pipe", "pipe"] },
     );
+    onSpawn?.(child);
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (c: Buffer) => (stdout += c.toString()));
@@ -277,6 +286,49 @@ describe("cli process end to end", () => {
     expect(messages.filter((m) => m.role === "user" && m.content === "continue the task")).toHaveLength(1);
     expect(messages[2]!.tool_calls).toMatchObject([{ function: { name: "read" } }]);
     expect(messages[3]!.content).toContain("RESUME_MARKER");
+  }, 30_000);
+
+  it("keeps a run stopped by a signal resumable, as a killed process was", async () => {
+    if (process.platform === "win32") return;
+    writeFileSync(join(dir, "resume-marker.txt"), "RESUME_MARKER");
+    server = new MockServer(
+      (turn) => (turn === 1 ? toolCall("read", { path: "resume-marker.txt" }) : "</think>Resumed after the signal."),
+      (turn) => turn === 2,
+    );
+    await server.start();
+    let child: ChildProcess | undefined;
+    server.onHold = () => child?.kill("SIGINT");
+    const stopped = await runCli(["continue the task", "--endpoint", server.endpoint, "--no-hero"], dir, {}, (c) => (child = c));
+    expect(stopped.code, `${stopped.stdout}\n${stopped.stderr}`).toBe(130);
+
+    const sessions = join(dir, ".motif", "sessions");
+    const journal = join(sessions, readdirSync(sessions)[0]!);
+    const resumed = await runCli(["resume", journal, "--print", "--endpoint", server.endpoint], dir);
+    expect(resumed.code, `${resumed.stdout}\n${resumed.stderr}`).toBe(0);
+    expect(resumed.stdout).toBe("Resumed after the signal.\n");
+    const messages = server.bodies[2]!.messages;
+    expect(messages.map((m) => m.role)).toEqual(["system", "user", "assistant", "tool"]);
+    expect(messages[3]!.content).toContain("RESUME_MARKER");
+  }, 30_000);
+
+  it("still refuses to resume a run whose command a signal cut off", async () => {
+    if (process.platform === "win32") return;
+    let child: ChildProcess | undefined;
+    server = new MockServer(() => {
+      // Signal while the command runs, after its in-flight checkpoint is written.
+      setTimeout(() => child?.kill("SIGINT"), 2_000);
+      return toolCall("bash", { command: "sleep 20" });
+    });
+    await server.start();
+    const stopped = await runCli(["run the command", "--endpoint", server.endpoint, "--no-hero"], dir, {}, (c) => (child = c));
+    expect(stopped.code, `${stopped.stdout}\n${stopped.stderr}`).toBe(130);
+
+    const sessions = join(dir, ".motif", "sessions");
+    const journal = join(sessions, readdirSync(sessions)[0]!);
+    const resumed = await runCli(["resume", journal, "--print", "--endpoint", server.endpoint], dir);
+    expect(resumed.code, `${resumed.stdout}\n${resumed.stderr}`).toBe(2);
+    expect(resumed.stderr).toContain("the run stopped while `bash`");
+    expect(server.bodies).toHaveLength(1);
   }, 30_000);
 
   it.each([true, false])("attaches the current MCP setup skill in the actual CLI before its first request (print=%s)", async print => {

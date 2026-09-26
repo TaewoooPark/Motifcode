@@ -1245,6 +1245,10 @@ async function main(): Promise<number> {
     },
   });
 
+  // A signal leaves the root journal as the process exit it replaced did: no
+  // later checkpoint clears a tool that was cut off, and no scope_end marks the
+  // run finished, so `motif resume` still decides from the last safe point.
+  const rootCheckpoint = journal.checkpointFor(rootScope);
   try {
     const result = await runLoop({
       transport,
@@ -1256,7 +1260,7 @@ async function main(): Promise<number> {
       signal: abort.signal,
       executor,
       emit,
-      onCheckpoint: journal.checkpointFor(rootScope),
+      onCheckpoint: (state) => { if (!abort.signal.aborted) rootCheckpoint(state); },
       lifecycle: async (event, context) => {
         const outcomes = await runHooks(hooks, {
           event,
@@ -1277,7 +1281,7 @@ async function main(): Promise<number> {
       // and the screen ignores them there.
       stream: Boolean(process.stdout.isTTY),
     });
-    journal.record(rootScope, {
+    if (!(result.reason === "aborted" && abort.signal.aborted)) journal.record(rootScope, {
       t: "scope_end",
       result: {
         endReason: result.reason,
