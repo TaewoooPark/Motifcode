@@ -90,6 +90,7 @@ function session(transport: Transport, extra: Partial<ConstructorParameters<type
     journalDir: join(cwd, ".motif", "sessions"),
     version: "test",
     makeTransport: () => transport,
+    balanceFetch: async () => new Response(JSON.stringify({ credit_balance: 0 })),
     hero: false,
     now: () => now,
     ...extra,
@@ -166,8 +167,9 @@ describe("interactive session", () => {
     await vi.waitFor(() => expect(s.screen()).toContain("❯ /status"));
     expect(s.screen()).toContain("> /sta");
     s.type("\r");
-    await vi.waitFor(() => expect(s.screen()).toContain("──  /status"));
-    expect(s.screen()).toContain("model       motif/motif-3");
+    await vi.waitFor(() => expect(s.screen()).toContain("Current session"));
+    expect(s.screen()).toContain("motif/motif-3");
+    expect(s.screen()).toMatch(/Config\W+Status\W+Stats\W+Usage/);
     expect(t.seen).toHaveLength(0);
   });
 
@@ -746,11 +748,14 @@ describe("interactive session", () => {
     it("asks for the key before the first prompt, masks it, checks it and saves it", async () => {
       const t = new GateTransport([...done("ok")]);
       const envPath = freshEnvPath();
+      const balanceFetch = vi.fn<typeof fetch>().mockImplementation(async () => new Response(JSON.stringify({ credit_balance: 0 })));
+      const checkKey = vi.fn(verifyKey);
       let seenKey: string | undefined;
       const s = session(t, {
         requireKey: true,
         envPath,
-        verifyKey,
+        verifyKey: checkKey,
+        balanceFetch,
         makeTransport: (_settings, apiKey) => {
           seenKey = apiKey;
           return t;
@@ -764,8 +769,15 @@ describe("interactive session", () => {
       s.type("\r");
       await vi.waitFor(() => expect(s.screen()).toContain("rejected this key"));
       expect(existsSync(envPath)).toBe(false);
-      s.type("sk-good\r");
+      expect(balanceFetch).not.toHaveBeenCalled();
+      s.type("\x1b[200~export MOTIF_API_KEY=\"sk-good\"\n\x1b[201~\r");
       await vi.waitFor(() => expect(s.screen()).toContain("signed in"));
+      await vi.waitFor(() => expect(balanceFetch).toHaveBeenCalledTimes(1));
+      expect(checkKey).toHaveBeenLastCalledWith("sk-good");
+      expect(balanceFetch.mock.calls[0]).toEqual(["https://api.onerouter.pro/v1/balance", {
+        method: "GET", headers: { Authorization: "Bearer sk-good", Accept: "application/json" },
+        redirect: "error", signal: expect.any(AbortSignal),
+      }]);
       expect(readFileSync(envPath, "utf8")).toBe("MOTIF_API_KEY=sk-good\n");
       expect(statSync(envPath).mode & 0o777).toBe(0o600);
       expect(s.screen()).not.toContain("sk-good");

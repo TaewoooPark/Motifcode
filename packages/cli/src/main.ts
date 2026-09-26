@@ -63,6 +63,8 @@ import { BUILTIN_SKILLS, SkillRegistry, parseSkill } from "@motifcode/skills";
 import { CORE_TOOLS, CORE_TOOL_NAMES, lintTools, formatFindings, toolPrefix } from "@motifcode/tools";
 import { Screen, applyTheme, themeNames } from "@motifcode/tui";
 import { Chat } from "./chat.js";
+import { InfronBilling } from "./billing.js";
+import { balanceRows } from "./billing-view.js";
 import { describePlugins, loadPlugins, type LoadedPlugins } from "./plugins.js";
 import { loadSettings, saveUserSetting } from "./settings.js";
 import { commandOnPath, ranFromNpx } from "./install.js";
@@ -462,6 +464,15 @@ async function loginAtTerminal(endpoint: string, model: string): Promise<string 
   }
   saveApiKey(key, path);
   process.stdout.write(`signed in · the key is saved to ${path}\n`);
+  const billing = new InfronBilling();
+  try {
+    billing.configure(endpoint, key);
+    await billing.refresh();
+    if (billing.state.kind !== "unsupported") {
+      for (const row of balanceRows(billing.state)) process.stdout.write(`${row.label} · ${row.value}\n`);
+      if (billing.state.kind === "error") process.stdout.write("Balance lookup can be retried with /usage; sign-in succeeded.\n");
+    }
+  } finally { billing.close(); }
   return key;
 }
 
@@ -677,6 +688,7 @@ async function main(): Promise<number> {
         ["seed", stored.values.seed === undefined ? "off" : String(stored.values.seed), stored.sources.seed ?? "default"],
         ["theme", themeName, typeof args.flags["theme"] === "string" ? "flag" : (stored.sources.theme ?? "default")],
         ["thinking", showThinking ? "shown" : "hidden", args.flags["thinking"] === true ? "flag" : (stored.sources.thinking ?? "default")],
+        ["verbose", String(args.flags["verbose"] === true || stored.values.verbose === true), args.flags["verbose"] === true ? "flag" : (stored.sources.verbose ?? "default")],
         ["compactAt", String(compactAt), stored.sources.compactAt ?? "default"],
         ["permissions", permissions, typeof args.flags["permissions"] === "string" ? "flag" : (stored.sources.permissions ?? "default")],
       ];
@@ -869,7 +881,7 @@ async function main(): Promise<number> {
   }
   if ((wantsChat || !task) && tty && !resumeFrom) {
     const chat = new Chat({
-      screen: new Screen({ showThinking, verbose: args.flags["verbose"] === true, cwd }),
+      screen: new Screen({ showThinking, verbose: args.flags["verbose"] === true || stored.values.verbose === true, cwd }),
       stdin: process.stdin,
       settings: {
         model,
@@ -884,6 +896,16 @@ async function main(): Promise<number> {
         permissions,
       },
       settingsInfo: stored,
+      settingSources: {
+        ...stored.sources,
+        model: connection.sources.model,
+        endpoint: connection.sources.endpoint,
+        ...Object.fromEntries([
+          ["channel", "channel"], ["maxTurns", "max-turns"], ["maxOutputTokens", "max-output-tokens"],
+          ["seed", "seed"], ["theme", "theme"], ["thinking", "thinking"],
+          ["verbose", "verbose"], ["permissions", "permissions"],
+        ].filter(([, flag]) => args.flags[flag!] !== undefined).map(([key]) => [key, "flag"])),
+      },
       persist: (key, value) => saveUserSetting(key, value as never),
       historyPath: join(cwd, CONFIG_DIR, "history.jsonl"),
       pluginLines: describePlugins(plugins(cwd)),
@@ -970,7 +992,7 @@ async function main(): Promise<number> {
   }
 
   const transport = new HttpTransport({ endpoint, model, ...(sessionKey !== undefined ? { apiKey: sessionKey } : {}) });
-  const screen = new Screen({ showThinking, verbose: args.flags["verbose"] === true, cwd });
+  const screen = new Screen({ showThinking, verbose: args.flags["verbose"] === true || stored.values.verbose === true, cwd });
   const runId = new Date().toISOString().replace(/[:.]/g, "-");
   // `--journal` so a benchmark runner knows where the record went without
   // scraping a directory for the newest file. Two rows finishing in the same

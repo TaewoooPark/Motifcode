@@ -37,6 +37,7 @@ import { renderComposer, type ComposerSnapshot } from "./composer.js";
 import { heroLines, pickHero, welcomeLines, type HeroContext, type WelcomeContext } from "./hero.js";
 import { BRACKETED_PASTE, KeyDecoder, type Key } from "./keys.js";
 import { renderMenu, type MenuItem } from "./menu.js";
+import { renderPanel, type PanelView } from "./panel.js";
 import {
   BULLET,
   renderCellStyled,
@@ -102,6 +103,8 @@ export interface ComposerView {
   secret?: { title: string; lines: string[]; prompt: string };
   /** The menu under the input: the matching items, which is selected, and their prefix (`/` or `@`). */
   menu?: { items: MenuItem[]; selected: number; prefix?: string };
+  /** Settings and session readings, temporarily replacing the draft. */
+  panel?: PanelView;
 }
 
 export type KeyHandler = (key: Key) => void;
@@ -511,7 +514,7 @@ export class Screen {
         this.write(term.up(at - i) + term.down(i - at) + term.lineStart + term.clearLine + next.rows[i]!.text);
         at = i;
       }
-      this.write(term.up(at - anchor) + term.down(anchor - at) + term.column(this.cursorAt?.col ?? 0) + term.showCursor);
+      this.write(term.up(at - anchor) + term.down(anchor - at) + term.column(this.cursorAt?.col ?? 0) + (this.cursorAt || !this.composer ? term.showCursor : term.hideCursor));
     });
     this.footer = next.rows;
     return true;
@@ -624,7 +627,11 @@ export class Screen {
 
     const beforeComposer = rows.length;
     let cursor: { row: number; col: number } | null = null;
-    if (this.composer) {
+    if (this.composer?.panel && !this.composer.confirm && !this.composer.secret) {
+      const block = renderPanel(this.composer.panel, { width, height: Math.max(0, this.rowCount() - 1 - Number(this.working)) });
+      if (block.cursor) cursor = { row: rows.length + block.cursor.row, col: block.cursor.col };
+      rows.push(...block.rows);
+    } else if (this.composer) {
       const block = this.composerRows(this.composer, width);
       cursor = { row: rows.length + block.cursorRow, col: block.cursorCol };
       rows.push(...block.rows);
