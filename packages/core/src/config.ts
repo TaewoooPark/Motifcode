@@ -102,6 +102,13 @@ export function normalizeEndpoint(raw: string): string {
   return raw.trim().replace(/\/+$/, "").replace(/\/v1$/, "");
 }
 
+/** Only the official Infron base URL supports its credits/accounting API. */
+export function isInfronEndpoint(endpoint: string): boolean {
+  const value = endpoint.trim();
+  const origin = /^https:\/\/llm\.onerouter\.pro(?=\/|$)/i.exec(value)?.[0];
+  return origin !== undefined && ["", "/", "/v1", "/v1/"].includes(value.slice(origin.length));
+}
+
 export function defaultDotenvPaths(cwd = process.cwd()): string[] {
   return [join(cwd, ".env"), join(homedir(), ".motif", ".env")];
 }

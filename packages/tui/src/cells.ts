@@ -35,7 +35,7 @@ export type Cell =
   | { kind: "repair"; reason: string; attempt: number; max: number }
   | { kind: "breakage"; kindOf: ParseFailureKind; sample: string }
   | { kind: "downgrade"; from: string; to: string; reason: string }
-  | { kind: "queue"; agent: string; state: "queued" | "running" | "done" }
+  | { kind: "queue"; agent: string; state: "queued" | "running" | "done" | "failed" }
   | { kind: "notice"; level: "info" | "warn" | "error"; text: string }
   | { kind: "loop"; signature: string; repeats: number }
   | { kind: "end"; reason: string; summary?: string }

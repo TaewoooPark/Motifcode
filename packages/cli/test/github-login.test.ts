@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 const { spawn } = vi.hoisted(() => ({ spawn: vi.fn() }));
 vi.mock("node:child_process", async importOriginal => ({ ...await importOriginal<object>(), spawn }));
 import { runGithubBrowserLogin } from "../src/github-login.js";
+import { connectMcpServers } from "../src/mcp-connect.js";
+import { McpAuthBroker, McpAuthError, type McpLoginOptions } from "@motifcode/mcp";
 
 afterEach(() => vi.restoreAllMocks());
 function fixture() {
@@ -12,7 +14,7 @@ function fixture() {
   spawn.mockReturnValue(child);
   const controller = new AbortController();
   const progress = vi.fn(); const browser = vi.fn(async (_url: URL) => {});
-  const run = () => runGithubBrowserLogin({ signal: controller.signal, onProgress: progress, openBrowser: browser, humanInteractive: true, env: { PATH: "/usr/bin", HOME: "/tmp/home", GH_TOKEN: "private-token", GITHUB_TOKEN: "also-private", GH_HOST: "evil.example", GH_CONFIG_DIR: "/tmp/home/.gh" } });
+  const run = (noBrowser = false) => runGithubBrowserLogin({ signal: controller.signal, onProgress: progress, openBrowser: browser, noBrowser, humanInteractive: true, env: { PATH: "/usr/bin", HOME: "/tmp/home", GH_TOKEN: "private-token", GITHUB_TOKEN: "also-private", GH_HOST: "evil.example", GH_CONFIG_DIR: "/tmp/home/.gh" } });
   return { child, controller, progress, browser, run };
 }
 describe("GitHub browser login host UI", () => {
@@ -41,6 +43,36 @@ describe("GitHub browser login host UI", () => {
     child.stderr.write("First copy your one-time code: ABCD-1234\nOpen this URL to continue in your web browser: https://evil.example/private\n");
     await expect(pending).rejects.toMatchObject({ code: "github_login_failed" });
     expect(browser).not.toHaveBeenCalled(); expect(progress).not.toHaveBeenCalled(); child.emit("close", null);
+  });
+  it("waits for manual device approval without opening a browser", async () => {
+    const { child, progress, browser, run } = fixture(); const pending = run(true);
+    child.stderr.write("First copy your one-time code: ABCD-1234\nOpen this URL to continue in your web browser: https://github.com/login/device\n");
+    await Promise.resolve();
+    expect(progress).toHaveBeenCalledOnce();
+    expect(progress).toHaveBeenCalledWith("GitHub code: ABCD-1234 · https://github.com/login/device");
+    expect(browser).not.toHaveBeenCalled();
+    // Extra output must not repeat the prompt while gh waits for approval.
+    child.stderr.write("waiting\n");
+    expect(progress).toHaveBeenCalledOnce();
+    child.emit("close", 0); await pending;
+    expect(browser).not.toHaveBeenCalled();
+  });
+  it("forwards no-browser from the connection command into GitHub's device flow", async () => {
+    const { child, controller, progress, browser } = fixture();
+    const auth = new McpAuthBroker();
+    // Stop after the real device-flow helper completes, before remote discovery.
+    vi.spyOn(auth, "login").mockImplementation(async (_server, options: McpLoginOptions = {}) => {
+      await options.onGitHubLogin!({ signal: controller.signal });
+      throw new McpAuthError("cancelled", "Test stopped after authorization.");
+    });
+    const pending = connectMcpServers({ servers: [{ id: "github", transport: "http", url: "https://api.githubcopilot.com/mcp/", credentialProvider: "github-cli", enabled: true }] }, {
+      auth, forceLogin: true, noBrowser: true, humanInteractive: true, onProgress: progress, openBrowser: browser,
+    });
+    child.stderr.write("First copy your one-time code: ABCD-1234\nOpen this URL to continue in your web browser: https://github.com/login/device\n");
+    await Promise.resolve(); child.emit("close", 0);
+    expect((await pending).connections[0]?.error?.code).toBe("cancelled");
+    expect(progress).toHaveBeenCalledWith("GitHub code: ABCD-1234 · https://github.com/login/device");
+    expect(browser).not.toHaveBeenCalled();
   });
   it("cancels the child and does not forward process output", async () => {
     const { child, controller, progress, run } = fixture(); const pending = run();

@@ -37,17 +37,17 @@ import { renderComposer, type ComposerSnapshot } from "./composer.js";
 import { heroLines, pickHero, welcomeLines, type HeroContext, type WelcomeContext } from "./hero.js";
 import { BRACKETED_PASTE, KeyDecoder, type Key } from "./keys.js";
 import { renderMenu, type MenuItem } from "./menu.js";
+import { renderPanel, type PanelView } from "./panel.js";
 import {
   BULLET,
-  renderPendingStyled,
-  renderSettledStyled,
+  renderCellStyled,
   renderTailStyled,
+  settledCount,
   type RenderOptions,
   type StyledLine,
   type Tone,
 } from "./render.js";
 import { compactReadings, readings, statusLine } from "./statusline.js";
-import { CommitTracker } from "./stream.js";
 import { NO_COLOR, paint, severityColor, style, term } from "./theme.js";
 import { displayWidth, truncateToWidth, wrapToWidth } from "./width.js";
 import type { LoopEvent } from "@motifcode/core";
@@ -84,6 +84,8 @@ export interface ScreenOptions {
  */
 export interface ComposerView {
   draft: ComposerSnapshot;
+  /** Recognized slash-command token, in code points of the draft. */
+  commandRange?: { start: number; end: number };
   placeholder?: string;
   /**
    * A question in place of the input: what is about to run, and the
@@ -92,7 +94,7 @@ export interface ComposerView {
    */
   confirm?: { title: string; lines: string[]; choices: string[] };
   /** Width-aware management panel using the same box and selection styling. */
-  panel?: (width: number, height: number) => { title: string; lines: string[]; choices: string[]; hint?: string };
+  panel?: PanelView | ((width: number, height: number) => { title: string; lines: string[]; choices: string[]; hint?: string });
   /**
    * A secret being typed — an API key. The title and lines sit above the
    * input, the draft is painted as one `•` per character, and no menu opens.
@@ -108,6 +110,8 @@ export type KeyHandler = (key: Key) => void;
 interface Row {
   text: string;
   width: number;
+  /** A mutable leading bullet can pulse without recolouring its body. */
+  bulletTail?: string;
 }
 
 const SPINNER = ["✻", "✼", "✽", "✾"];
@@ -115,7 +119,7 @@ const SPINNER = ["✻", "✼", "✽", "✾"];
 /** The keys, for the panel `?` opens. */
 const SHORTCUTS = [
   "enter send · \\ + enter newline · esc interrupt or clear · ctrl-c twice quit · ctrl-d quit",
-  "↑ ↓ history · tab show or hide reasoning · ctrl-o full tool output · ctrl-l redraw · shift-tab permissions",
+  "↑ ↓ history · tab show or hide reasoning · ctrl-o output viewer · ctrl-l redraw · shift-tab permissions",
   "@ attach a file · ! run a shell line · # add a project note · / commands · ? hide this",
 ];
 
@@ -136,9 +140,8 @@ function inlineMarkup(text: string): string {
 
 export class Screen {
   private state: ViewState = initialState();
-  private readonly commits = new CommitTracker();
-  /** The settled lines for the cells and options they were rendered from; a keystroke changes neither. */
-  private settledMemo: { cells: readonly unknown[]; key: string; lines: StyledLine[] } | null = null;
+  /** Cells, not rendered rows: wrapping changes on resize without new output. */
+  private committedCells = 0;
   /** The rows of the last painted footer, top to bottom. */
   private footer: Row[] = [];
   /** Where the cursor was left: the footer row index and column, or null when below the footer. */
@@ -151,6 +154,7 @@ export class Screen {
   private hint = "";
   private label = "";
   private activity: { text: string; since: number } | null = null;
+  private working = false;
   private ticker: NodeJS.Timeout | null = null;
   private tick = 0;
   private shortcutsOpen = false;
@@ -161,6 +165,7 @@ export class Screen {
   private streamTimer: NodeJS.Timeout | null = null;
   private showThinking: boolean;
   private verbose = false;
+  private outputView: { top: number; follow: boolean; painted: string; cache?: { state: ViewState; key: string; lines: StyledLine[] } } | null = null;
   private cwd: string | undefined;
   private readonly shadedHero: boolean;
   private readonly interactive: boolean;
@@ -199,7 +204,7 @@ export class Screen {
     return {
       width: this.columns(),
       showThinking: this.showThinking,
-      ...(this.verbose ? { outputLines: 1000 } : {}),
+      ...(this.verbose ? { outputLines: Infinity } : {}),
       ...(this.cwd !== undefined ? { cwd: this.cwd } : {}),
       // Only advertise the key when something is listening for it.
       showShortcuts: this.detachInput !== null,
@@ -251,6 +256,7 @@ export class Screen {
   /** Show, replace or remove the prompt at the bottom of the footer. */
   setComposer(view: ComposerView | null): void {
     this.composer = view;
+    if (this.outputView && (view?.confirm || view?.secret)) this.closeOutputView();
     this.paint();
   }
 
@@ -279,29 +285,34 @@ export class Screen {
    * and the seconds elapsed. Null when it is waiting for the person.
    */
   setActivity(text: string | null): void {
-    if (text === null) {
-      if (this.activity === null && this.ticker === null) return;
-      this.activity = null;
-      if (this.ticker) {
-        clearInterval(this.ticker);
-        this.ticker = null;
-      }
-    } else {
-      const same = this.activity?.text === text;
-      if (!same) this.activity = { text, since: this.now() };
-      if (!this.ticker && this.interactive) {
-        this.ticker = setInterval(() => {
-          this.tick += 1;
-          this.paint();
-        }, 1000);
-        // A ticker must not hold the process open once the loop is done.
-        this.ticker.unref?.();
-      }
-      // The spinner and the elapsed second are the ticker's to paint. Reporting
-      // the same activity again is not a visible change.
-      if (same) return;
-    }
+    if (this.activity?.text === text || (text === null && this.activity === null)) return;
+    this.activity = text === null ? null : { text, since: this.now() };
+    this.updateTicker();
     this.paint();
+  }
+
+  /** Work can continue after the activity label is replaced by streamed prose. */
+  setWorking(working: boolean): void {
+    if (this.working === working) return;
+    this.working = working;
+    this.tick = 0;
+    this.updateTicker();
+    this.paint();
+  }
+
+  private updateTicker(): void {
+    const needed = this.interactive && (this.activity !== null || (this.working && !NO_COLOR));
+    if (!needed && this.ticker) {
+      clearInterval(this.ticker);
+      this.ticker = null;
+    } else if (needed && !this.ticker) {
+      this.ticker = setInterval(() => {
+        this.tick += 1;
+        this.paint(this.working);
+      }, 1000);
+      // A ticker must not hold the process open once the loop is done.
+      this.ticker.unref?.();
+    }
   }
 
   toggleShortcuts(): void {
@@ -313,9 +324,8 @@ export class Screen {
    * Listen for keys.
    *
    * With a handler, every decoded key goes to it and nothing is interpreted
-   * here. Without one — the one-shot run — the two keys the status line
-   * advertises are handled: Tab folds reasoning, and Ctrl-C, which raw mode
-   * would otherwise swallow, is forwarded as the interrupt it means.
+   * here. Without one — the one-shot run — Tab folds reasoning, Ctrl-O opens
+   * the output viewer, and Ctrl-C is forwarded as the interrupt it means.
    *
    * Raw mode is entered here and left in `finish()` and on every fatal signal.
    * A terminal left in raw mode after a crash needs `reset` to type in again,
@@ -328,6 +338,8 @@ export class Screen {
     const onData = (chunk: Buffer): void => {
       for (const key of decoder.feed(chunk)) {
         if (handler) handler(key);
+        else if (this.handleOutputViewKey(key)) continue;
+        else if (key.type === "ctrl" && key.key === "o") this.toggleOutputView();
         else if (key.type === "tab") this.toggleThinking();
         else if (key.type === "ctrl" && key.key === "c") process.kill(process.pid, "SIGINT");
       }
@@ -392,7 +404,7 @@ export class Screen {
     this.showThinking = !this.showThinking;
     // Showing rewrites lines already committed to scrollback, so the stable
     // region has to be rebuilt rather than appended to.
-    this.commits.reset();
+    this.committedCells = 0;
     this.paint();
   }
 
@@ -437,14 +449,14 @@ export class Screen {
   /** Paths under this directory are shown relative to it from now on. */
   setCwd(cwd: string): void {
     this.cwd = cwd;
-    this.commits.reset();
+    this.committedCells = 0;
     this.paint();
   }
 
-  /** Show tool output whole, or clipped to a few lines. Ctrl-O in the session. */
+  /** Change the inline output setting; Ctrl-O opens the independent viewer. */
   toggleVerbose(): void {
     this.verbose = !this.verbose;
-    this.commits.reset();
+    this.committedCells = 0;
     this.paint();
   }
 
@@ -452,12 +464,82 @@ export class Screen {
     return this.verbose;
   }
 
+  get outputViewOpen(): boolean { return this.outputView !== null; }
+
+  /** Read-only details live in a separate buffer; normal scrollback stays intact. */
+  toggleOutputView(): void {
+    if (!this.interactive) return;
+    if (this.outputView) { this.closeOutputView(); return; }
+    this.outputView = { top: 0, follow: true, painted: "" };
+    this.write(term.enterAlternate);
+    this.paintOutputView();
+  }
+
+  private closeOutputView(): void {
+    if (!this.outputView) return;
+    this.outputView = null;
+    this.write(term.leaveAlternate + (this.cursorAt || !this.composer ? term.showCursor : term.hideCursor));
+    this.paint();
+  }
+
+  /** Consume navigation/pastes without editing the draft or submitting a task. */
+  handleOutputViewKey(key: Key): boolean {
+    const view = this.outputView;
+    if (!view) return false;
+    if (key.type === "ctrl" && (key.key === "c" || key.key === "d")) {
+      this.closeOutputView();
+      return false; // The controller still owns interrupt and quit.
+    }
+    if (key.type === "escape" || (key.type === "ctrl" && key.key === "o") || (key.type === "text" && key.text === "q")) {
+      this.closeOutputView();
+      return true;
+    }
+    const page = Math.max(1, this.rowCount() - 2);
+    if (key.type === "home") { view.top = 0; view.follow = false; }
+    else if (key.type === "end") view.follow = true;
+    else if (["up", "down", "page-up", "page-down"].includes(key.type)) {
+      view.top += key.type === "up" ? -1 : key.type === "down" ? 1 : key.type === "page-up" ? -page : page;
+      view.follow = false;
+    }
+    this.paintOutputView();
+    return true;
+  }
+
+  private paintOutputView(): void {
+    const view = this.outputView;
+    if (!view) return;
+    const width = Math.max(1, this.columns());
+    const height = Math.max(1, this.rowCount());
+    const page = Math.max(0, height - 2);
+    const opts = { ...this.renderOptions, width, outputLines: Infinity, showShortcuts: false };
+    const key = `${width}|${opts.showThinking}|${opts.cwd}`;
+    if (!view.cache || view.cache.state !== this.state || view.cache.key !== key) {
+      const lines = this.state.cells.flatMap((cell) => renderCellStyled(cell, opts)).concat(renderTailStyled(this.state, opts));
+      view.cache = { state: this.state, key, lines: lines.flatMap((line) => wrapToWidth(line.text, width).map((text) => ({ ...line, text }))) };
+    }
+    const lines = view.cache.lines;
+    const last = Math.max(0, lines.length - page);
+    view.top = view.follow ? last : Math.min(last, Math.max(0, view.top));
+    const range = `${Math.min(lines.length, view.top + 1)}–${Math.min(lines.length, view.top + page)}/${lines.length}`;
+    const rows = [paint(truncateToWidth(`Transcript · full output · ${range}${this.working ? " · working" : ""}`, width), style.accent)];
+    for (let i = 0; i < page; i++) rows.push(lines[view.top + i] ? this.colour(lines[view.top + i]!) : "");
+    if (height > 1) rows.push(paint(truncateToWidth("↑↓ scroll · PgUp/PgDn · Home/End · Esc/Ctrl-O close", width), style.faint));
+    const frame = `${width}|${height}|${rows.join("\n")}`;
+    if (view.painted === frame) return;
+    view.painted = frame;
+    this.withSync(() => {
+      this.write(term.hideCursor + term.home + term.clearScreen);
+      rows.forEach((row, i) => this.write(term.home + term.down(i) + row));
+    });
+  }
+
   /** Erase and rebuild the visible screen. Ctrl-L in the session. */
   redraw(): void {
     this.repaintAll();
   }
 
-  private paint(): void {
+  private paint(tickOnly = false): void {
+    if (this.outputView) { this.paintOutputView(); return; }
     if (
       this.interactive && this.footer.length > 0 &&
       (this.columns() < this.paintedWidth || this.rowCount() !== this.paintedHeight)
@@ -469,21 +551,46 @@ export class Screen {
     }
     const width = this.columns();
     const next = this.interactive ? this.buildFooter(width) : null;
-    const settled = this.settledLines();
-    const pending = Math.max(0, settled.length - this.commits.count);
+    const settledEnd = settledCount(this.state);
+    const pending = Math.max(0, settledEnd - this.committedCells);
     // Compare before clearing. A hidden reasoning token changes no row, and
     // erasing the footer to draw it back is the flash.
     if (pending === 0 && this.sameFooter(next, width)) return;
+    if (tickOnly && pending === 0 && next && this.paintTick(next, width)) return;
     this.withSync(() => {
       this.clearFooter();
       // Only settled cells go to scrollback. A tool cell between `tool_start` and
       // `tool_end` is still growing, and committing it there would print a tool
       // that appears to have produced nothing.
-      const fresh = this.commits.take(settled.map((l) => l.text));
-      for (const line of settled.slice(settled.length - fresh.length)) this.write(this.colour(line) + "\n");
+      for (const cell of this.state.cells.slice(this.committedCells, settledEnd)) {
+        for (const line of renderCellStyled(cell, this.renderOptions)) this.write(this.colour(line) + "\n");
+      }
+      this.committedCells = settledEnd;
       if (next) this.writeFooter(next, width);
       else this.paintFooter();
     });
+  }
+
+  /** A pulse must not append footer copies to scrollback or disturb the editor. */
+  private paintTick(next: { rows: Row[]; cursor: { row: number; col: number } | null }, width: number): boolean {
+    if (this.paintedWidth !== width || this.footer.length !== next.rows.length) return false;
+    if (this.cursorAt?.row !== next.cursor?.row || this.cursorAt?.col !== next.cursor?.col) return false;
+    // A long live reply can extend above the viewport. Never clamp a move to
+    // an off-screen row onto the terminal's first visible line.
+    const firstVisible = Math.max(0, next.rows.length - this.rowCount() + 1);
+    const changed = next.rows.flatMap((row, i) => i >= firstVisible && row.text !== this.footer[i]!.text ? [i] : []);
+    if (changed.length > 0) this.withSync(() => {
+      const anchor = this.cursorAt?.row ?? next.rows.length;
+      let at = anchor;
+      this.write(term.hideCursor);
+      for (const i of changed) {
+        this.write(term.up(at - i) + term.down(i - at) + term.lineStart + term.clearLine + next.rows[i]!.text);
+        at = i;
+      }
+      this.write(term.up(at - anchor) + term.down(anchor - at) + term.column(this.cursorAt?.col ?? 0) + (this.cursorAt || !this.composer ? term.showCursor : term.hideCursor));
+    });
+    this.footer = next.rows;
+    return true;
   }
 
   /** True when the footer about to be drawn is the one already on screen. */
@@ -512,22 +619,6 @@ export class Screen {
   }
 
   /**
-   * The settled transcript, rendered once per change.
-   *
-   * Every keystroke repaints the footer, and the footer's arithmetic starts
-   * from the settled lines; re-rendering a long transcript for each
-   * character typed is work whose result is already known.
-   */
-  private settledLines(): StyledLine[] {
-    const opts = this.renderOptions;
-    const key = `${opts.width}|${opts.showThinking ? 1 : 0}|${opts.outputLines ?? ""}|${opts.showShortcuts ? 1 : 0}|${opts.cwd ?? ""}`;
-    if (this.settledMemo && this.settledMemo.cells === this.state.cells && this.settledMemo.key === key) return this.settledMemo.lines;
-    const lines = renderSettledStyled(this.state, opts);
-    this.settledMemo = { cells: this.state.cells, key, lines };
-    return lines;
-  }
-
-  /**
    * Rebuild the visible screen after a resize.
    *
    * Nothing on screen can be trusted to be where it was: the terminal has
@@ -538,10 +629,12 @@ export class Screen {
    */
   private repaintAll(): void {
     if (!this.interactive) return;
+    if (this.outputView) { this.outputView.painted = ""; this.paintOutputView(); return; }
     const width = this.columns();
-    const settled = this.settledLines();
-    const fresh = this.commits.take(settled.map((l) => l.text));
-    const previous = settled.slice(0, settled.length - fresh.length);
+    const settledEnd = settledCount(this.state);
+    const previous = this.state.cells.slice(0, this.committedCells).flatMap((cell) => renderCellStyled(cell, this.renderOptions));
+    const fresh = this.state.cells.slice(this.committedCells, settledEnd).flatMap((cell) => renderCellStyled(cell, this.renderOptions));
+    this.committedCells = settledEnd;
     const footer = this.buildFooter(width);
     const physical: string[] = [];
     for (const l of previous) for (const t of wrapToWidth(l.text, width)) physical.push(this.colour({ ...l, text: t }));
@@ -552,7 +645,7 @@ export class Screen {
       this.write(term.clearScreen + term.home);
       for (const line of physical.slice(Math.max(0, physical.length - keep))) this.write(line + "\n");
       // Commit newly settled text even when completion raced the resize.
-      for (const line of settled.slice(previous.length)) this.write(this.colour(line) + "\n");
+      for (const line of fresh) this.write(this.colour(line) + "\n");
       this.writeFooter(footer, width);
     });
   }
@@ -573,21 +666,31 @@ export class Screen {
   private buildFooter(width: number): { rows: Row[]; cursor: { row: number; col: number } | null } {
     const opts = { ...this.renderOptions, width };
     const rows: Row[] = [];
+    const liveRows = (l: StyledLine, mutable = true): Row[] => wrapToWidth(l.text, width).map((text, i) => ({
+      text: this.colour({ ...l, text }),
+      width: displayWidth(text),
+      ...(mutable && i === 0 && text.startsWith(BULLET) ? { bulletTail: this.colour({ ...l, text: text.slice(BULLET.length) }) } : {}),
+    }));
 
-    for (const l of renderPendingStyled(this.state, opts)) {
-      rows.push(...this.rows(l.text, (t) => this.colour({ ...l, text: t })));
+    for (const cell of this.state.cells.slice(settledCount(this.state))) {
+      for (const l of renderCellStyled(cell, opts)) rows.push(...liveRows(l, cell.kind === "tool" && cell.ok === undefined));
     }
-    for (const l of renderTailStyled(this.state, opts)) rows.push(...this.rows(l.text, (t) => this.colour({ ...l, text: t })));
+    for (const l of renderTailStyled(this.state, opts)) rows.push(...liveRows(l));
 
     if (this.activity) {
-      const glyph = SPINNER[this.tick % SPINNER.length]!;
+      const glyph = this.working ? BULLET : SPINNER[this.tick % SPINNER.length]!;
       const seconds = Math.max(0, Math.floor((this.now() - this.activity.since) / 1000));
       const text = `${glyph} ${this.activity.text} (esc to interrupt · ${seconds}s)`;
-      rows.push(...this.rows(truncateToWidth(text, width), (t) => paint(t, style.faint)));
+      rows.push(...liveRows({ text: truncateToWidth(text, width), tone: "dim" }));
     }
 
+    const beforeComposer = rows.length;
     let cursor: { row: number; col: number } | null = null;
-    if (this.composer) {
+    if (this.composer?.panel && typeof this.composer.panel !== "function" && !this.composer.confirm && !this.composer.secret) {
+      const block = renderPanel(this.composer.panel, { width, height: Math.max(0, this.rowCount() - 1 - Number(this.working)) });
+      if (block.cursor) cursor = { row: rows.length + block.cursor.row, col: block.cursor.col };
+      rows.push(...block.rows);
+    } else if (this.composer) {
       const block = this.composerRows(this.composer, width);
       cursor = { row: rows.length + block.cursorRow, col: block.cursorCol };
       rows.push(...block.rows);
@@ -599,6 +702,25 @@ export class Screen {
       }
     } else {
       rows.push(...this.rows(this.statusOnly(), (t) => t));
+    }
+    if (this.working) {
+      const firstVisible = Math.max(0, rows.length - this.rowCount() + 1);
+      let target = rows.findLastIndex((row, i) => i >= firstVisible && row.bulletTail !== undefined);
+      // Hidden reasoning, settled prose and a long live reply all need an
+      // indicator near the composer when their own bullet is not visible.
+      if (target < 0) {
+        const fallback = liveRows({ text: truncateToWidth(`${BULLET} Working…`, width), tone: "bullet" });
+        rows.splice(beforeComposer, 0, ...fallback);
+        if (cursor) cursor.row += fallback.length;
+        target = beforeComposer;
+      }
+      const row = rows[target]!;
+      if (row.bulletTail !== undefined) {
+        // Explicitly hide the glyph: terminal dim styling is not reliably
+        // visible, and ANSI blink depends on the terminal's preferences.
+        const dot = !NO_COLOR && this.tick % 2 === 1 ? " ".repeat(displayWidth(BULLET)) : paint(BULLET, style.accent);
+        row.text = dot + row.bulletTail;
+      }
     }
     // Leave one row below the footer for the parked cursor. Only the newest
     // live rows are visible; omitted rows remain live and are never committed.
@@ -657,13 +779,14 @@ export class Screen {
       width: inner,
       prompt: view.secret ? view.secret.prompt : "> ",
       ...(view.placeholder !== undefined && !view.secret ? { placeholder: view.placeholder } : {}),
+      ...(view.commandRange && !view.secret ? { commandRange: view.commandRange } : {}),
     });
     const border = (l: string, r: string): Row => ({
       text: paint(`${wideBox ? "+" : l}${(wideBox ? "-" : "─").repeat(inner + 2)}${wideBox ? "+" : r}`, style.faint),
       width: inner + 4,
     });
     const rows: Row[] = boxed ? [border("╭", "╮")] : [];
-    const panel = view.panel?.(width, this.rowCount()) ?? view.confirm;
+    const panel = view.confirm ?? (!view.secret && typeof view.panel === "function" ? view.panel(width, this.rowCount()) : undefined);
     if (panel) {
       const fit = (s: string): string => {
         const t = truncateToWidth(s, inner);
@@ -705,7 +828,10 @@ export class Screen {
       header = body.length;
     }
     for (const row of render.rows) {
-      const body = render.placeholder ? paint(row.body, style.faint) : row.body;
+      const range = row.commandRange;
+      const body = render.placeholder ? paint(row.body, style.faint) : range
+        ? row.body.slice(0, range.start) + paint(row.body.slice(range.start, range.end), style.accent) + row.body.slice(range.end)
+        : row.body;
       const plainWidth = displayWidth(row.prefix) + displayWidth(row.body);
       const pad = " ".repeat(Math.max(0, inner - plainWidth));
       rows.push({
@@ -797,18 +923,25 @@ export class Screen {
 
   /** Release the footer so the shell prompt lands cleanly. */
   finish(): void {
+    this.closeOutputView();
     this.detachInput?.();
     this.detachInput = null;
-    this.setActivity(null);
+    this.working = false;
+    this.activity = null;
+    this.updateTicker();
+    if (this.streamTimer) {
+      clearTimeout(this.streamTimer);
+      this.streamTimer = null;
+    }
     this.composer = null;
     this.hint = "";
     this.clearFooter();
     // Flush anything still pending — a session that ended mid-tool should still
     // show what that tool did.
-    const rest = renderPendingStyled(this.state, this.renderOptions);
-    const all = renderSettledStyled(this.state, this.renderOptions).concat(rest);
-    const fresh = this.commits.take(all.map((l) => l.text));
-    for (const line of all.slice(all.length - fresh.length)) this.write(this.colour(line) + "\n");
+    for (const cell of this.state.cells.slice(this.committedCells)) {
+      for (const line of renderCellStyled(cell, this.renderOptions)) this.write(this.colour(line) + "\n");
+    }
+    this.committedCells = this.state.cells.length;
     if (this.interactive) this.write(term.showCursor);
   }
 }

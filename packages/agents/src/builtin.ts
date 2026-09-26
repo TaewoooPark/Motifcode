@@ -23,7 +23,12 @@ export const BUILTIN_AGENTS: readonly AgentDef[] = Object.freeze([
     readOnly: true,
     description: "Read-only reconnaissance of unfamiliar code — returns a map, changes nothing",
     toolCount: 3, // done, bash, read
-    maxTurns: 20,
+    // Motif-3 spends a turn per call here. Mapping a 200-file repository, 3 of
+    // 11 runs hit a ceiling of 20 before calling `done`, and the parent got
+    // nothing back; the runs that finished used 9 to 19. This is headroom for
+    // those, not a cure: a child that never proposes `done` runs out at any
+    // ceiling, as two of seven did again at 40.
+    maxTurns: 40,
     source: "builtin",
     instructions: [
       "You explore and report. You cannot modify anything, and you should not try.",

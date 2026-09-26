@@ -7,6 +7,8 @@ export interface GitHubBrowserLoginOptions {
   /** Human terminal UI only. Never put device codes in model context or a journal. */
   onProgress?: (message: string) => void;
   openBrowser?: (url: URL) => Promise<void>;
+  /** Show the fixed device URL and code without launching a local browser. */
+  noBrowser?: boolean;
   /** A real terminal panel owned by the host, never a model tool's output pipe. */
   humanInteractive?: boolean;
   /** Host environment; token overrides are removed before invoking gh. */
@@ -52,9 +54,10 @@ export async function runGithubBrowserLogin(options: GitHubBrowserLoginOptions):
       // Require a complete line before parsing a possibly split stream chunk.
       if (!output.includes(url + "\n") && !output.includes(url + "\r")) return;
       if (url !== "https://github.com/login/device") { stop(failure("github_login_failed", "GitHub login returned an unexpected verification address.")); return; }
-      try { options.onProgress?.(`GitHub code: ${code} · github.com/login/device`); }
+      try { options.onProgress?.(`GitHub code: ${code} · ${options.noBrowser ? url : "github.com/login/device"}`); }
       catch { stop(failure("github_login_failed", "Could not display the GitHub verification code.")); return; }
-      opening = Promise.resolve().then(() => (options.openBrowser ?? openExternalUrl)(new URL(url)));
+      opening = options.noBrowser ? Promise.resolve()
+        : Promise.resolve().then(() => (options.openBrowser ?? openExternalUrl)(new URL(url)));
       void opening.catch(() => stop(failure("github_browser_failed", "Could not open GitHub in the browser. Run gh auth login directly, then retry Motif login.")));
     };
     child.stdout.on("data", consume); child.stderr.on("data", consume);

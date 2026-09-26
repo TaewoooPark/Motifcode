@@ -50,7 +50,7 @@ export async function connectMcpServers(config: McpConfig, options: ConnectMcpOp
     await auth.login(resolveServerConfig(server, options.env ?? process.env), {
       signal: options.signal, timeoutMs: options.timeoutMs, noBrowser: options.noBrowser === true,
       ...(human ? { onAuthorization: (url: URL) => { options.onProgress?.(`Authorization URL for ${server.id}${options.noBrowser ? "" : " (if the browser did not open)"}:\n${url.href}`); } } : {}),
-      onGitHubLogin: ({ signal }) => runGithubBrowserLogin({ signal, onProgress: options.onProgress, openBrowser: options.openBrowser, env: options.env }),
+      onGitHubLogin: ({ signal }) => runGithubBrowserLogin({ signal, onProgress: options.onProgress, openBrowser: options.openBrowser, noBrowser: options.noBrowser, humanInteractive: human, env: options.env }),
     });
   };
   try {

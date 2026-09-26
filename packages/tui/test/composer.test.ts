@@ -146,6 +146,26 @@ describe("rendering", () => {
   });
 });
 
+describe("command highlighting layout", () => {
+  it.each([5, 8, 20])("preserves text, wrapping and every cursor position at width %i", (width) => {
+    const text = "\t\n/model 한글🙂\n/help";
+    for (let cursor = 0; cursor <= [...text].length; cursor++) {
+      const plain = renderComposer({ text, cursor }, { width });
+      const marked = renderComposer({ text, cursor }, { width, commandRange: { start: 2, end: 8 } });
+      expect({ ...marked, rows: marked.rows.map(({ commandRange, ...row }) => row) }).toEqual(plain);
+      expect(marked.rows.map((r) => r.commandRange ? r.body.slice(r.commandRange.start, r.commandRange.end) : "").join("")).toBe("/model");
+    }
+  });
+
+  it("converts Unicode command offsets to complete row-local slices", () => {
+    const r = renderComposer({ text: "/한🙂 args", cursor: 3 }, { width: 6, commandRange: { start: 0, end: 3 } });
+    expect(r.rows.map((row) => row.commandRange ? row.body.slice(row.commandRange.start, row.commandRange.end) : "").join("")).toBe("/한🙂");
+    const tiny = renderComposer({ text: "/한🙂 args", cursor: 3 }, { width: 1, commandRange: { start: 0, end: 3 } });
+    expect(tiny.rows.filter((row) => row.commandRange).map((row) => row.body)).toEqual(["/", "?", "?"]);
+    expect(tiny.rows.filter((row) => row.commandRange).every((row) => row.commandRange!.end === row.body.length)).toBe(true);
+  });
+});
+
 describe("narrow composer rendering", () => {
   afterEach(() => vi.unstubAllEnvs());
 

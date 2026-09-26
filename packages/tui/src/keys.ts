@@ -35,6 +35,8 @@ export type Key =
   | { type: "right" }
   | { type: "home" }
   | { type: "end" }
+  | { type: "page-up" }
+  | { type: "page-down" }
   | { type: "word-left" }
   | { type: "word-right" }
   | { type: "delete-word" }
@@ -76,6 +78,10 @@ function csiKey(params: string, final: string): Key | null {
           return { type: "end" };
         case "3":
           return { type: "delete" };
+        case "5":
+          return { type: "page-up" };
+        case "6":
+          return { type: "page-down" };
         default:
           return null;
       }

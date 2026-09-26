@@ -57,6 +57,27 @@ describe("built-in agents", () => {
   it("bounds every agent's turns", () => {
     for (const def of reg.list()) expect(def.maxTurns, def.name).toBeGreaterThan(0);
   });
+
+  it("gives the explorer room to map a repository", () => {
+    // At 20, three of eleven live runs ran out before calling `done` and the
+    // parent got nothing back; the ones that finished used up to 19.
+    expect(reg.get("explorer")!.maxTurns).toBeGreaterThanOrEqual(40);
+  });
+});
+
+describe("the index the parent sees", () => {
+  it("lists each agent and says what to do with what comes back", () => {
+    const index = reg.index();
+    for (const def of reg.list()) expect(index).toContain(`  ${def.name} — ${def.description}`);
+    // The parent went back over a finished child's ground after every
+    // delegation, and once reported an unfinished child as done.
+    expect(index).toContain("summary is its result: build on it rather than redoing");
+    expect(index).toContain("did not finish has not done the work");
+  });
+
+  it("is empty when there is no one to delegate to", () => {
+    expect(new AgentRegistry().index()).toBe("");
+  });
 });
 
 describe("scheduling", () => {
@@ -95,6 +116,17 @@ describe("scheduling", () => {
     const s = new AgentScheduler(1, (e) => states.push(e.state));
     await s.submit("reviewer", "x", async () => "done");
     expect(states).toEqual(["queued", "running", "done"]);
+  });
+
+  it("marks a result the caller calls a failure as failed, and still returns it", async () => {
+    // A child that hits its turn limit comes back with `ok: false` instead of
+    // throwing, and the queue used to show it as done.
+    const states: string[] = [];
+    const s = new AgentScheduler(1, (e) => states.push(e.state));
+    const out = await s.submit("explorer", "x", async () => ({ ok: false }), (r) => !r.ok);
+    expect(out).toEqual({ ok: false });
+    expect(states).toEqual(["queued", "running", "failed"]);
+    expect(s.pending).toHaveLength(0);
   });
 
   it("marks a failure and rethrows", async () => {

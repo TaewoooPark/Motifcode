@@ -19,7 +19,8 @@ exports[`transcript > renders a full session 1`] = `
 · Motif-3-Coder-A13B · http://zgx-1c3b:8080 · toolcall · tools[8] #9f3c1a20
 
 ⏺ Bash(rg -n 'ohe_subtract' hallbar/backend/)
-  ⎿  hallbar/backend/ohe_subtraction.py:41  def ohe_subtract(rxy, field, ...)
+  ⎿  hallbar/backend/ohe_subtraction.py:41  def ohe_subtract(rxy, field,
+ ...)
 
 ⏺ Patch(--- a/ohe_subtraction.py…) · repaired
      --- a/ohe_subtraction.py

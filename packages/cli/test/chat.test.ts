@@ -79,8 +79,9 @@ function session(transport: Transport, extra: Partial<ConstructorParameters<type
   agents.registerAll(BUILTIN_AGENTS);
   const cwd = mkdtempSync(join(tmpdir(), "motif-chat-"));
   let now = 1_000_000;
+  const terminal = new Screen({ write: (s) => out.push(s), columns: () => 100, interactive: true, cwd });
   const chat = new Chat({
-    screen: new Screen({ write: (s) => out.push(s), columns: () => 100, interactive: true, cwd }),
+    screen: terminal,
     stdin: stdin as unknown as NodeJS.ReadStream,
     settings: { model: "motif/motif-3", endpoint: "https://llm.onerouter.pro", channel: "toolcall", maxTurns: 20, cwd, theme: "motif", compactAt: 0.75, permissions: "auto" },
     channelPolicy: "fixed",
@@ -91,6 +92,7 @@ function session(transport: Transport, extra: Partial<ConstructorParameters<type
     journalDir: join(cwd, ".motif", "sessions"),
     version: "test",
     makeTransport: () => transport,
+    balanceFetch: async () => new Response(JSON.stringify({ credit_balance: 0 })),
     hero: false,
     now: () => now,
     ...extra,
@@ -100,7 +102,7 @@ function session(transport: Transport, extra: Partial<ConstructorParameters<type
     stdin.write(s);
   };
   const screen = (): string => strip(out.join(""));
-  return { chat, type, screen, finished, tick: (ms: number) => (now += ms), cwd };
+  return { chat, type, screen, terminal, finished, tick: (ms: number) => (now += ms), cwd };
 }
 
 // In a conversation the first `done` is final: the person is the confirmation.
@@ -295,6 +297,36 @@ describe("interactive session", () => {
     expect(s.chat.transcript[1]!.content).toBe("안녕하세요! 무엇을 도와드릴까요?");
   });
 
+  it("shows a subagent that finished as done, and one that ran out of turns as failed", async () => {
+    const agents = new AgentRegistry();
+    agents.registerAll(BUILTIN_AGENTS);
+    // One turn, and a first `done` is only a proposal: it ends at its turn limit.
+    agents.register({ name: "hasty", description: "d", toolCount: 3, maxTurns: 1, instructions: "Map it.", source: "project" });
+    // Parent and child share this transport, so the bodies are in request
+    // order: the parent delegates, the child answers, the parent replies.
+    const t = new GateTransport([
+      toolCallBody("task", { agent: "explorer", prompt: "map the repo" }),
+      doneBody("mapped"),
+      doneBody("mapped", { confirm: true }),
+      ...reply("the explorer mapped it"),
+      toolCallBody("task", { agent: "hasty", prompt: "map the repo" }),
+      doneBody("partial"),
+      ...reply("the hasty subagent did not finish"),
+    ]);
+    const s = session(t, { agents });
+    open.push(s);
+
+    s.type("map it\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    expect(s.screen()).toContain("Task(explorer) · done");
+
+    s.type("again, faster\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(2));
+    expect(s.screen()).toContain("subagent did not finish (turn_limit)");
+    expect(s.screen()).toContain("Task(hasty) · failed");
+    expect(s.screen()).not.toContain("Task(hasty) · done");
+  });
+
   it("runs the command the menu has selected", async () => {
     const t = new GateTransport([]);
     const s = session(t);
@@ -304,9 +336,83 @@ describe("interactive session", () => {
     await vi.waitFor(() => expect(s.screen()).toContain("❯ /status"));
     expect(s.screen()).toContain("> /sta");
     s.type("\r");
-    await vi.waitFor(() => expect(s.screen()).toContain("──  /status"));
-    expect(s.screen()).toContain("model       motif/motif-3");
+    await vi.waitFor(() => expect(s.screen()).toContain("Current session"));
+    expect(s.screen()).toContain("motif/motif-3");
+    expect(s.screen()).toMatch(/Config\W+Status\W+Stats\W+Usage/);
     expect(t.seen).toHaveLength(0);
+  });
+
+  it("marks a manually completed command and removes the mark when editing makes it incomplete", () => {
+    const t = new GateTransport([]);
+    const s = session(t);
+    open.push(s);
+    const compose = vi.spyOn(s.terminal, "setComposer");
+    const current = () => compose.mock.calls.at(-1)![0]!;
+    s.type("/sta");
+    expect(current().commandRange).toBeUndefined();
+    s.type("tus");
+    expect(current().commandRange).toEqual({ start: 0, end: 7 });
+    s.type("\x7f");
+    expect(current().commandRange).toBeUndefined();
+    s.type("sx");
+    expect(current().commandRange).toBeUndefined();
+    s.type("\x7f argument /help");
+    expect(current().commandRange).toEqual({ start: 0, end: 7 });
+    expect(current().draft.text).toBe("/status argument /help");
+    expect(current().draft.text).not.toContain(ESC);
+    expect(t.seen).toHaveLength(0);
+  });
+
+  it("marks a Tab completion with arguments and submits its original plain text", async () => {
+    const t = new GateTransport([]);
+    const s = session(t);
+    open.push(s);
+    const compose = vi.spyOn(s.terminal, "setComposer");
+    s.type("/mod\t");
+    expect(compose.mock.calls.at(-1)![0]).toMatchObject({
+      draft: { text: "/model ", cursor: 7 },
+      commandRange: { start: 0, end: 6 },
+    });
+    s.type("other/모델🙂");
+    const draft = compose.mock.calls.at(-1)![0]!;
+    expect(draft.commandRange).toEqual({ start: 0, end: 6 });
+    expect(draft.draft).toEqual({ text: "/model other/모델🙂", cursor: [..."/model other/모델🙂"].length });
+    s.type("\r");
+    await vi.waitFor(() => expect(s.screen()).toContain("model set to other/모델🙂"));
+    expect(t.seen).toHaveLength(0);
+  });
+
+  it("recognizes aliases and complete token boundaries using command execution semantics", () => {
+    const s = session(new GateTransport([]));
+    open.push(s);
+    const compose = vi.spyOn(s.terminal, "setComposer");
+    for (const [text, range] of [
+      ["/CoSt", { start: 0, end: 5 }],
+      ["  /STATUS verbose", { start: 2, end: 9 }],
+      ["/status/extra", undefined],
+      ["/unknown", undefined],
+      ["text /status", undefined],
+      ["/", undefined],
+    ] as const) {
+      s.type(text);
+      expect(compose.mock.calls.at(-1)![0]!.commandRange, text).toEqual(range);
+      s.type(ESC);
+    }
+  });
+
+  it("marks installed skills with their exact registered spelling", () => {
+    const skills = new SkillRegistry();
+    skills.register(parseSkill("---\nname: Review🙂\ndescription: project review\n---\nReview changes.", "project"));
+    const s = session(new GateTransport([]), { skills });
+    open.push(s);
+    const compose = vi.spyOn(s.terminal, "setComposer");
+    s.type("/Review🙂 changes 한글");
+    const view = compose.mock.calls.at(-1)![0]!;
+    expect(view.commandRange).toEqual({ start: 0, end: 8 });
+    expect(view.draft.text).toBe("/Review🙂 changes 한글");
+    s.type(ESC);
+    s.type("/review🙂");
+    expect(compose.mock.calls.at(-1)![0]!.commandRange).toBeUndefined();
   });
 
   it("applies a setting to the next task", async () => {
@@ -340,6 +446,65 @@ describe("interactive session", () => {
     expect(s.screen()).toContain("Interrupted");
     // The conversation keeps what happened; the next task follows it.
     expect(s.chat.transcript.map((m) => m.role)).toEqual(["user"]);
+  });
+
+  it("keeps the working indicator through partial prose, pauses for approval, and resumes until completion", async () => {
+    const t = new GateTransport([toolCallBody("bash", { command: "echo pulse-approval" }), ...reply("done")]);
+    const complete = t.complete.bind(t);
+    t.complete = (req) => {
+      req.onDelta?.({ content: "I will create the game now." });
+      return complete(req);
+    };
+    t.gated = true;
+    const s = session(t);
+    open.push(s);
+    const working = vi.spyOn(s.terminal, "setWorking");
+    s.type(`${ESC}[Z`); // Ask before the tool runs.
+    s.type("create a game\r");
+    await vi.waitFor(() => expect(t.seen).toHaveLength(1));
+    expect(working).toHaveBeenLastCalledWith(true);
+
+    t.open();
+    await vi.waitFor(() => expect(s.screen()).toContain("Run this command?"));
+    expect(s.chat.running).toBe(true);
+    expect(working).toHaveBeenLastCalledWith(false);
+
+    t.gated = true;
+    s.type("1");
+    await vi.waitFor(() => expect(t.seen).toHaveLength(2));
+    expect(working).toHaveBeenLastCalledWith(true);
+    t.open();
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    expect(working).toHaveBeenLastCalledWith(false);
+  });
+
+  it.each(["interrupt", "error"])("stops the working indicator after %s and can run again", async (ending) => {
+    const t = new GateTransport([...reply("first"), ...reply("second")]);
+    const complete = t.complete.bind(t);
+    t.complete = async (req) => {
+      const result = await complete(req);
+      if (ending === "error" && t.seen.length === 1) throw new Error("fixture transport failure");
+      return result;
+    };
+    t.gated = true;
+    const s = session(t);
+    open.push(s);
+    const working = vi.spyOn(s.terminal, "setWorking");
+    s.type("first task\r");
+    await vi.waitFor(() => expect(t.seen).toHaveLength(1));
+    expect(working).toHaveBeenLastCalledWith(true);
+    if (ending === "interrupt") s.type(ESC);
+    else t.open();
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    expect(working).toHaveBeenLastCalledWith(false);
+
+    t.gated = true;
+    s.type("second task\r");
+    await vi.waitFor(() => expect(t.seen).toHaveLength(2));
+    expect(working).toHaveBeenLastCalledWith(true);
+    t.open();
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(2));
+    expect(working).toHaveBeenLastCalledWith(false);
   });
 
   it("queues messages sent while a task runs, and sends them in order after", async () => {
@@ -607,17 +772,65 @@ describe("interactive session", () => {
     expect(t.seen).toHaveLength(1);
   });
 
-  it("shows tool output in full on ctrl-o and clips it again", async () => {
+  it("opens and closes full tool output with Ctrl-O without changing the draft, model history or journal", async () => {
     const long = Array.from({ length: 30 }, (_, i) => `line ${i}`).join("\\n");
     const t = new GateTransport([toolCallBody("bash", { command: `printf '${long}'` }), ...reply("ok")]);
     const s = session(t);
     open.push(s);
     s.type("go\r");
     await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
-    expect(s.screen()).toContain("… +24 lines");
-    expect(s.chat.transcript.length).toBeGreaterThan(0);
+    expect(s.screen()).toMatch(/… \+27 (?:lines|rows)/);
+    const transcript = structuredClone(s.chat.transcript);
+    const cells = structuredClone(s.terminal.view.cells);
+    const requestCount = t.seen.length;
+    const journalDir = join(s.cwd, ".motif", "sessions");
+    const journalPath = join(journalDir, readdirSync(journalDir)[0]!);
+    const journal = readFileSync(journalPath, "utf8");
+    const compose = vi.spyOn(s.terminal, "setComposer");
+    s.type("next task 한글🙂\x1b[D\x1b[D");
+    const draft = compose.mock.calls.at(-1)![0]!.draft;
+    expect(draft).toEqual({ text: "next task 한글🙂", cursor: [..."next task 한"].length });
     s.type("\x0f");
     await vi.waitFor(() => expect(s.screen()).toContain("line 29"));
+    expect(s.terminal.outputViewOpen).toBe(true);
+    expect(s.terminal.verboseOutput).toBe(false);
+    expect(compose.mock.calls.at(-1)![0]!.draft).toEqual(draft);
+    s.type("\x0f");
+    expect(s.terminal.outputViewOpen).toBe(false);
+    expect(compose.mock.calls.at(-1)![0]!.draft).toEqual(draft);
+    expect(s.chat.transcript).toEqual(transcript);
+    expect(s.terminal.view.cells).toEqual(cells);
+    expect(t.seen).toHaveLength(requestCount);
+    expect(readFileSync(journalPath, "utf8")).toBe(journal);
+    s.type("\x0f");
+    s.type("ignored text\r\x1b[A\x1b[B");
+    expect(s.terminal.outputViewOpen).toBe(true);
+    s.type("q");
+    expect(s.terminal.outputViewOpen).toBe(false);
+    expect(compose.mock.calls.at(-1)![0]!.draft).toEqual(draft);
+    expect(t.seen).toHaveLength(requestCount);
+    expect(readFileSync(journalPath, "utf8")).toBe(journal);
+  });
+
+  it("keeps Ctrl-C interrupt and Ctrl-D quit available while full output is open", async () => {
+    const t = new GateTransport([...reply("should be interrupted")]);
+    t.gated = true;
+    const s = session(t);
+    open.push(s);
+    s.type("go\r");
+    await vi.waitFor(() => expect(t.seen).toHaveLength(1));
+    s.type("\x0f");
+    expect(s.terminal.outputViewOpen).toBe(true);
+    s.type("\x03");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    expect(s.terminal.outputViewOpen).toBe(false);
+    expect(t.seen[0]!.signal?.aborted).toBe(true);
+    s.type("\x0f");
+    expect(s.terminal.outputViewOpen).toBe(true);
+    s.type("\x04");
+    expect(await s.finished).toBe(0);
+    expect(s.terminal.outputViewOpen).toBe(false);
+    expect(t.seen).toHaveLength(1);
   });
 
   it("asks before a command runs, and a yes runs it", async () => {
@@ -752,11 +965,14 @@ describe("interactive session", () => {
     it("asks for the key before the first prompt, masks it, checks it and saves it", async () => {
       const t = new GateTransport([...done("ok")]);
       const envPath = freshEnvPath();
+      const balanceFetch = vi.fn<typeof fetch>().mockImplementation(async () => new Response(JSON.stringify({ credit_balance: 0 })));
+      const checkKey = vi.fn(verifyKey);
       let seenKey: string | undefined;
       const s = session(t, {
         requireKey: true,
         envPath,
-        verifyKey,
+        verifyKey: checkKey,
+        balanceFetch,
         makeTransport: (_settings, apiKey) => {
           seenKey = apiKey;
           return t;
@@ -770,8 +986,15 @@ describe("interactive session", () => {
       s.type("\r");
       await vi.waitFor(() => expect(s.screen()).toContain("rejected this key"));
       expect(existsSync(envPath)).toBe(false);
-      s.type("sk-good\r");
+      expect(balanceFetch).not.toHaveBeenCalled();
+      s.type("\x1b[200~export MOTIF_API_KEY=\"sk-good\"\n\x1b[201~\r");
       await vi.waitFor(() => expect(s.screen()).toContain("signed in"));
+      await vi.waitFor(() => expect(balanceFetch).toHaveBeenCalledTimes(1));
+      expect(checkKey).toHaveBeenLastCalledWith("sk-good");
+      expect(balanceFetch.mock.calls[0]).toEqual(["https://api.onerouter.pro/v1/balance", {
+        method: "GET", headers: { Authorization: "Bearer sk-good", Accept: "application/json" },
+        redirect: "error", signal: expect.any(AbortSignal),
+      }]);
       expect(readFileSync(envPath, "utf8")).toBe("MOTIF_API_KEY=sk-good\n");
       expect(statSync(envPath).mode & 0o777).toBe(0o600);
       expect(s.screen()).not.toContain("sk-good");

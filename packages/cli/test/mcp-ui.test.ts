@@ -77,6 +77,21 @@ afterEach(async () => {
 });
 
 describe("MCP authorization UI", () => {
+  it("keeps dashboard and MCP panels usable in the same session", async () => {
+    const c = controls(); const s = session(c.mcp, undefined, 0.75, { mcpPresets: listMcpPresets });
+    const compose = vi.spyOn(s.screen, "setComposer");
+    s.type("/config\r");
+    expect(compose.mock.calls.at(-1)![0]!.panel).toMatchObject({ activeTab: 0 });
+    s.type(ESC + "/mcp\r");
+    expect(typeof compose.mock.calls.at(-1)![0]!.panel).toBe("function");
+    s.type("\r"); await vi.waitFor(() => expect(c.calls).toContain("connect:memory"));
+    await vi.waitFor(() => expect(s.output()).toContain("9 allowed tools"));
+    s.type(ESC + "/status\r");
+    expect(compose.mock.calls.at(-1)![0]!.panel).toMatchObject({ activeTab: 1 });
+    s.type(ESC + "editable draft");
+    expect(compose.mock.calls.at(-1)![0]!.draft.text).toBe("editable draft");
+    expect(s.complete).not.toHaveBeenCalled();
+  });
   it("routes explicit login and local logout without model requests", async () => {
     const c = controls(); const login = vi.fn(async () => {}); const logout = vi.fn(async () => {});
     const s = session(c.mcp, undefined, 0.75, { mcpLogin: login, mcpLogout: logout });

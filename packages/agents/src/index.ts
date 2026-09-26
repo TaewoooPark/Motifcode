@@ -51,6 +51,23 @@ export interface ResolvedAgent extends AgentDef {
   tools: Tool[];
 }
 
+/**
+ * What the parent does with what comes back.
+ *
+ * Motif-3 treats a subagent's summary as a lead to follow up rather than as
+ * the result: in each of 11 delegated runs the parent went on with 1 to 16
+ * more calls, mostly `ls`, `package.json` and the README the child had just
+ * read. Once, told that a child had hit its turn limit, it reported the
+ * child's work as completed. This states the contract; on its own it did not
+ * measurably shorten the follow-up in a rerun.
+ */
+const AFTER_DELEGATING = [
+  "A subagent's summary is its result: build on it rather than redoing the work it",
+  "reports, and check a claim yourself only when your next step depends on it. A",
+  "subagent that did not finish has not done the work; say so rather than reporting",
+  "it as done.",
+].join("\n");
+
 export class AgentRegistry {
   private readonly agents = new Map<string, AgentDef>();
 
@@ -73,11 +90,11 @@ export class AgentRegistry {
     return [...this.agents.values()].sort((a, b) => a.name.localeCompare(b.name));
   }
 
-  /** One line each, for the system prompt. */
+  /** One line each, for the system prompt, then what to do with the result. */
   index(): string {
     const rows = this.list().map((a) => `  ${a.name} — ${a.description}`);
     if (rows.length === 0) return "";
-    return ["# Subagents", "", "Delegate with the `task` tool:", ...rows].join("\n");
+    return ["# Subagents", "", "Delegate with the `task` tool:", ...rows, "", AFTER_DELEGATING].join("\n");
   }
 }
 
@@ -114,10 +131,16 @@ export class AgentScheduler {
     return this.queue;
   }
 
+  /**
+   * `failed` classifies a result that came back rather than being thrown. A
+   * child that hits its turn limit returns normally, with `ok: false`, and
+   * without it the queue showed that child as done.
+   */
   async submit<T>(
     agent: string,
     prompt: string,
     run: (agent: string, prompt: string) => Promise<T>,
+    failed?: (result: T) => boolean,
   ): Promise<T> {
     const entry: QueueEntry = { agent, prompt, state: "queued" };
     this.queue.push(entry);
@@ -132,7 +155,7 @@ export class AgentScheduler {
     this.onChange?.(entry);
     try {
       const result = await run(agent, prompt);
-      entry.state = "done";
+      entry.state = failed?.(result) ? "failed" : "done";
       entry.result = describe(result);
       this.onChange?.(entry);
       return result;

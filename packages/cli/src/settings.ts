@@ -30,6 +30,8 @@ export interface StoredSettings {
   theme?: string;
   /** Show the model's reasoning in the transcript. */
   thinking?: boolean;
+  /** Show unabridged tool output. */
+  verbose?: boolean;
   /** Fraction of the context window at which the transcript is compacted. */
   compactAt?: number;
   /** Whether the session asks before a tool that changes the world runs. */
@@ -56,6 +58,7 @@ const KEYS: readonly (keyof StoredSettings)[] = [
   "seed",
   "theme",
   "thinking",
+  "verbose",
   "compactAt",
   "permissions",
 ];
@@ -107,9 +110,11 @@ export function parseSettings(text: string): { values: StoredSettings; problems:
   int("maxTurns", 1);
   int("maxOutputTokens", 1);
   int("seed", 0);
-  if (obj["thinking"] !== undefined) {
-    if (typeof obj["thinking"] === "boolean") values.thinking = obj["thinking"];
-    else problems.push("thinking must be true or false");
+  for (const key of ["thinking", "verbose"] as const) {
+    if (obj[key] !== undefined) {
+      if (typeof obj[key] === "boolean") values[key] = obj[key];
+      else problems.push(`${key} must be true or false`);
+    }
   }
   if (obj["compactAt"] !== undefined) {
     const v = obj["compactAt"];

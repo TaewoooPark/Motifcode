@@ -59,6 +59,7 @@ import {
   type ComposerView,
   type Key,
   type MenuItem,
+  type PanelView,
 } from "@motifcode/tui";
 import { forgetFiles, listFiles, matchFiles } from "./files.js";
 import { expandSkillInput } from "./skill-input.js";
@@ -66,7 +67,11 @@ import { installCommand } from "./install.js";
 import { loginLines, normaliseKeyInput, verifyApiKey, type VerifyResult } from "./login.js";
 import { COMMANDS, findCommand, parseSlash, runSlash, type ChatSettings, type CommandContext, type CommandOutput, type PersistableKey } from "./commands.js";
 import { MCP_USAGE, mcpCatalogEntries, mcpFailureHint, mcpListLines, mcpLoginPanelView, mcpPanelKeys, mcpPanelView, mcpStatusLabel, mcpToolCount, parseMcpRequest, type McpAction } from "./mcp-ui.js";
-import type { LoadedSettings } from "./settings.js";
+import type { LoadedSettings, StoredSettings } from "./settings.js";
+import { CONFIG_FIELDS, configField, parseConfigValue, type ConfigField } from "./config-controls.js";
+import { collectInsights, statsRows, usageRows } from "./insights.js";
+import { InfronBilling } from "./billing.js";
+import { balanceRows } from "./billing-view.js";
 import { doctor, formatChecks } from "./doctor.js";
 import { ToolExecutor, type ExecutorOptions } from "./executor.js";
 import { policyForAgent } from "./policy.js";
@@ -105,6 +110,8 @@ export interface ChatOptions {
   now?: () => number;
   /** What the settings files said, for `/config`. */
   settingsInfo?: LoadedSettings;
+  /** Effective startup origins including flags and environment overrides. */
+  settingSources?: Partial<Record<keyof StoredSettings, string>>;
   /** Writes one setting to the person's file; returns its path, or null when not persisted. */
   persist?: (key: PersistableKey, value: unknown) => string | null;
   /** Where the composer's history is kept between sessions. */
@@ -127,6 +134,8 @@ export interface ChatOptions {
   envPath?: string;
   /** Injected for tests; defaults to a one-token completion with the key. */
   verifyKey?: (apiKey: string) => Promise<VerifyResult>;
+  /** Injected balance transport for deterministic account integration tests. */
+  balanceFetch?: typeof fetch;
   /**
    * Offer to install the `motif` command before the first prompt. Set when
    * this run came from `npx` and no `motif` is on the PATH.
@@ -153,6 +162,9 @@ interface Totals {
   cachedTokens: number;
   lastContext: number;
 }
+
+type DashboardTab = "config" | "status" | "stats" | "usage";
+const DASHBOARD_TABS: readonly DashboardTab[] = ["config", "status", "stats", "usage"];
 
 const PLACEHOLDER = "type a task, / for commands";
 /** Empty: the screen shows `? for shortcuts` in its place. */
@@ -189,6 +201,10 @@ export class Chat {
   private readonly screen: Screen;
   private readonly composer = new Composer();
   private readonly settings: ChatSettings;
+  private panel: { tab: DashboardTab; selected: number; offset: number; message?: string; error?: boolean; editing?: ConfigField } | null = null;
+  private readonly configEditor = new Composer();
+  private readonly changedSettings = new Map<keyof StoredSettings, string>();
+  private insightRows: PanelView["rows"] = [];
   private menuSelected = 0;
   private menuFilter = "";
   private history: Message[] = [];
@@ -198,6 +214,7 @@ export class Chat {
   private shellSequence = 0;
   /** A `!command` in flight; tasks sent meanwhile wait behind it. */
   private shellBusy = false;
+  private compacting = false;
   /** A tool call waiting for the person's yes or no, and which of the three answers is selected. */
   private pendingConfirm: { call: ToolInvocation; resolve: (v: "allow" | "deny") => void; selected: number; force: boolean } | null = null;
   /** A question with numbered answers in place of the prompt, and which one is selected. */
@@ -214,6 +231,10 @@ export class Chat {
   /** The credential for this session. Starts as the caller's; `/login` replaces it, `/logout` drops it. */
   private apiKey: string | undefined;
   private apiKeySource: string | undefined;
+  private apiKeyVerified = false;
+  private authGeneration = 0;
+  private verifyingLogin: number | null = null;
+  private readonly billing: InfronBilling;
   /** Tools the person allowed for the rest of the session with `a`. */
   private readonly alwaysAllowed = new Set<string>();
   /** MCP calls a person approved in the call prompt, consumed by the same call. */
@@ -248,8 +269,14 @@ export class Chat {
     this.apiKey = opts.apiKey;
     this.apiKeySource = opts.apiKeySource;
     this.now = opts.now ?? (() => Date.now());
+    this.billing = new InfronBilling({
+      fetchImpl: opts.balanceFetch,
+      now: this.now,
+      onChange: () => { if (!this.quitting && this.panel?.tab === "usage") this.refresh(); },
+    });
+    this.billing.configure(this.settings.endpoint, this.apiKey);
     this.scheduler = new AgentScheduler(concurrencyFor(this.settings.endpoint), (entry) =>
-      this.screen.apply({ type: "queue", agent: entry.agent, state: entry.state === "failed" ? "done" : entry.state }),
+      this.screen.apply({ type: "queue", agent: entry.agent, state: entry.state }),
     );
     this.executor = this.makeExecutor(this.settings.cwd);
     if (opts.historyPath) this.composer.seedHistory(readHistory(opts.historyPath));
@@ -305,8 +332,11 @@ export class Chat {
 
   /** What happens before the first prompt is free: the login, the resumed conversation, the first task. */
   private async start(): Promise<void> {
+    void this.billing.refresh();
     if (this.needsLogin) {
-      this.screen.append({ kind: "system", title: "login", lines: await this.login("startup") });
+      const lines = await this.login("startup");
+      if (this.quitting) return;
+      this.screen.append({ kind: "system", title: "login", lines });
       this.refresh();
     }
     if (this.opts.offerInstall) await this.offerInstall();
@@ -328,6 +358,7 @@ export class Chat {
   /* ---------------------------------------------------------------- */
 
   private onKey(key: Key): void {
+    if (this.screen.handleOutputViewKey(key)) return;
     if (this.pendingSecret) {
       this.answerSecret(key);
       return;
@@ -344,11 +375,15 @@ export class Chat {
       this.answerMcp(key);
       return;
     }
+    if (this.panel) {
+      this.panelKey(key);
+      return;
+    }
     const menu = this.menuItems();
     switch (key.type) {
       case "shift-tab":
         this.settings.permissions = this.settings.permissions === "ask" ? "auto" : "ask";
-        this.opts.persist?.("permissions", this.settings.permissions);
+        this.rememberSetting("permissions", this.settings.permissions);
         this.screen.append({
           kind: "notice",
           level: "info",
@@ -393,6 +428,7 @@ export class Chat {
           this.composer.insert(`/${item.name}${item.usage ? " " : ""}`);
         } else if (this.composer.empty) {
           this.screen.toggleThinking();
+          this.changedSettings.set("thinking", "session only");
         }
         break;
       case "escape":
@@ -471,7 +507,7 @@ export class Chat {
         this.composer.killToEnd();
         break;
       case "o":
-        this.screen.toggleVerbose();
+        this.screen.toggleOutputView();
         break;
       case "l":
         this.screen.redraw();
@@ -782,6 +818,9 @@ export class Chat {
    * to open at all.
    */
   private async login(reason: "startup" | "task" | "command"): Promise<string[]> {
+    this.invalidateAuthentication();
+    const generation = this.authGeneration;
+    const endpoint = this.settings.endpoint;
     const title =
       reason === "command" ? "Paste your Infron API key" : reason === "task" ? "An API key is needed before the task can run" : "Paste your Infron API key to get started";
     const cancelHint = reason === "command" ? "enter to check and save · esc to cancel" : "enter to check and save · esc to skip for now";
@@ -794,18 +833,27 @@ export class Chat {
       }
       const key = normaliseKeyInput(raw);
       if (key === "") continue;
+      this.verifyingLogin = generation;
       this.screen.setActivity("Checking the key…");
       let result: VerifyResult;
       try {
         result = await (this.opts.verifyKey ?? ((k: string) => verifyApiKey({ endpoint: this.settings.endpoint, model: this.settings.model, apiKey: k })))(key);
       } finally {
-        this.screen.setActivity(null);
+        if (this.verifyingLogin === generation) {
+          this.verifyingLogin = null;
+          if (!this.quitting) this.screen.setActivity(null);
+        }
+      }
+      if (this.quitting || generation !== this.authGeneration || endpoint !== this.settings.endpoint) {
+        return ["login cancelled because the session or endpoint changed; /login to try again"];
       }
       if (!result.ok) {
         this.screen.append({ kind: "notice", level: "error", text: `${result.reason} — try again, or press esc` });
         continue;
       }
       this.apiKey = key;
+      this.apiKeyVerified = true;
+      this.syncBilling();
       try {
         const path = saveApiKey(key, this.envPath);
         this.apiKeySource = `${path} (MOTIF_API_KEY)`;
@@ -818,11 +866,14 @@ export class Chat {
   }
 
   private logout(): string[] {
+    this.invalidateAuthentication();
     const source = this.apiKeySource;
     const had = this.apiKey !== undefined;
     const removed = forgetApiKey(this.envPath);
     this.apiKey = undefined;
     this.apiKeySource = undefined;
+    this.apiKeyVerified = false;
+    this.billing.configure(this.settings.endpoint);
     if (!had && !removed) return ["no key is set"];
     const lines = removed ? [`the key was removed from ${this.envPath}`] : [`this session's key came from ${source ?? "the caller"}, which was left as it is`];
     lines.push("the session no longer sends a key; the next task asks for one, or /login now");
@@ -1111,8 +1162,19 @@ export class Chat {
     const items = this.menuItems();
     const pendingChoice = this.pendingChoice;
     const loginNotice = this.mcpBusy?.notice ?? this.mcpLoginNotice;
+    // Receiving prose is not the end of a task. Keep the live indicator on
+    // through streaming and tool execution, but pause while a person decides.
+    this.screen.setWorking(Boolean(this.active) && !this.pendingConfirm && !this.pendingChoice && !this.pendingSecret);
+    // Use the same registry as submission, including aliases and skills. Derive
+    // the range from the draft so typing, Tab, history and edits stay in sync.
+    const command = /^(\s*)(\/\S+)/u.exec(this.composer.text);
+    const name = command?.[2]?.slice(1);
+    const start = [...(command?.[1] ?? "")].length;
     const view: ComposerView = {
       draft: this.composer.snapshot(),
+      ...(name && (findCommand(name) || this.opts.skills.get(name))
+        ? { commandRange: { start, end: start + [...command![2]!].length } }
+        : {}),
       placeholder: PLACEHOLDER,
       ...(this.pendingConfirm ? { confirm: this.confirmView(this.pendingConfirm.call, this.pendingConfirm.selected) } : {}),
       ...(pendingChoice?.wrap ? { panel: (width: number) => ({ title: pendingChoice.title, lines: pendingChoice.lines.flatMap(line => wrapWords(line, Math.max(1, width - 8))), choices: pendingChoice.options.map((option, index) => `${index === pendingChoice.selected ? "❯" : " "} ${option}`) }) } : {}),
@@ -1125,7 +1187,8 @@ export class Chat {
         width, this.mcpBusy ? this.mcpBusy.notice ?? `${this.mcpBusy.action} in progress…` : this.mcpPanel?.notice, height, this.opts.mcpPresets?.(),
       ), hint: this.mcpBusy ? this.hintText() : mcpPanelKeys(width) }) } : {}),
       ...(loginNotice && !this.pendingConfirm && !this.pendingChoice && !this.pendingSecret ? { panel: (width: number, height: number) => ({ ...mcpLoginPanelView(loginNotice, width, height), hint: "esc cancels authorization" }) } : {}),
-      ...(items.length > 0 && !this.mcpLoginNotice && !this.pendingConfirm && !this.pendingSecret && !this.pendingChoice && !this.mcpPanel && !this.mcpBusy
+      ...(this.panel && !this.pendingConfirm && !this.pendingChoice && !this.pendingSecret && !this.mcpPanel && !this.mcpBusy && !loginNotice ? { panel: this.panelView() } : {}),
+      ...(items.length > 0 && !this.panel && !this.mcpLoginNotice && !this.pendingConfirm && !this.pendingSecret && !this.pendingChoice && !this.mcpPanel && !this.mcpBusy
         ? { menu: { items, selected: clampSelection(this.menuSelected, items.length), prefix: this.mentionOpen() ? "@" : "/" } }
         : {}),
     };
@@ -1197,8 +1260,12 @@ export class Chat {
         this.refresh();
         return;
       }
+      const previousEndpoint = this.settings.endpoint;
       const out = await runSlash(text, this.context());
-      if (!this.quitting && out.lines.length > 0) {
+      if (previousEndpoint !== this.settings.endpoint) { this.apiKeyVerified = false; this.invalidateAuthentication(); }
+      // /endpoint and /login share the same credential-bound billing state.
+      this.syncBilling();
+      if (!this.quitting && !out.silent && out.lines.length > 0) {
         this.screen.append(
           out.error
             ? { kind: "notice", level: "error", text: out.lines.join(" ") }
@@ -1437,9 +1504,12 @@ export class Chat {
     } finally {
       this.settlingTask = true;
       this.active = null;
+      this.screen.setWorking(false);
       this.screen.setActivity(null);
       this.screen.setTitle(`motif · ${this.settings.cwd.split("/").pop() ?? this.settings.cwd}`);
       this.totals.tasks += 1;
+      this.reloadInsights();
+      void this.billing.refresh(true);
       forgetFiles();
       this.refresh();
     }
@@ -1512,9 +1582,11 @@ export class Chat {
    * person's messages stay verbatim, the rest becomes a handoff.
    */
   private async compactNow(focus = ""): Promise<string[]> {
+    if (this.compacting) throw new Error("A compaction is already in progress.");
     if (this.history.length === 0) return ["nothing to compact; the conversation is empty"];
     const before = this.totals.lastContext;
     const transport = (this.opts.makeTransport ?? defaultTransport)(this.settings, this.apiKey);
+    this.compacting = true;
     this.screen.setActivity("Compacting the conversation…");
     try {
       const summary = await summarizeTranscript({
@@ -1532,7 +1604,9 @@ export class Chat {
     } catch (err) {
       throw new Error(`compaction failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
+      this.compacting = false;
       this.screen.setActivity(null);
+      if (!this.quitting) this.refresh();
     }
   }
 
@@ -1558,6 +1632,8 @@ export class Chat {
   }
 
   private finish(): void {
+    this.invalidateAuthentication();
+    this.billing.close();
     this.executor.close();
     this.screen.finish();
     this.finished?.(0);
@@ -1689,7 +1765,7 @@ export class Chat {
             childExecutor.close();
             this.opts.mcp?.clearScope(childScope.scopeId);
           }
-        });
+        }, (out) => !out.ok);
       },
     });
   }
@@ -1703,6 +1779,10 @@ export class Chat {
       settings: this.settings,
       status: () => this.statusLines(),
       config: () => this.configLines(),
+      openPanel: (tab) => this.openPanel(tab),
+      configure: (args) => this.configure(args),
+      stats: () => statsRows(this.insights()).flatMap((r) => [`${r.label}  ${r.value ?? ""}`, ...(r.detail ? [`  ${r.detail}`] : [])]),
+      usage: () => [...balanceRows(this.billing.state), ...usageRows(this.insights())].flatMap((r) => [`${r.label}  ${r.value ?? ""}`, ...(r.detail ? [`  ${r.detail}`] : [])]),
       themes: () => Object.entries(THEMES).map(([name, t]) => `${name.padEnd(10)} ${t.description}`),
       setTheme: (name) => {
         if (!applyTheme(name)) return [`no theme named ${name}; /theme lists them`];
@@ -1718,7 +1798,7 @@ export class Chat {
       },
       hooks: () => this.opts.hookLines ?? ["no hooks"],
       mcp: (args) => this.mcpCommand(args),
-      persist: (key, value) => (this.opts.persist ? this.opts.persist(key, value) : null),
+      persist: (key, value) => this.rememberSetting(key, value),
       login: () => this.login("command"),
       logout: () => this.logout(),
       doctor: async () =>
@@ -1761,10 +1841,217 @@ export class Chat {
     };
   }
 
+  private settingSource(key: keyof StoredSettings): string {
+    return this.changedSettings.get(key) ?? this.opts.settingSources?.[key] ?? this.opts.settingsInfo?.sources[key] ?? "default";
+  }
+
+  private rememberSetting(key: PersistableKey, value: unknown): string | null {
+    const path = this.opts.persist?.(key, value) ?? null;
+    this.changedSettings.set(key, path ? "session + user file" : "session only");
+    return path;
+  }
+
+  private configValue(key: keyof StoredSettings): string {
+    if (key === "thinking") return String(this.screen.thinkingShown);
+    if (key === "verbose") return String(this.screen.verboseOutput);
+    return String(this.settings[key] ?? "off");
+  }
+
+  private configure(args: string): CommandOutput {
+    const match = /^(\S+)\s+([\s\S]+)$/.exec(args.trim());
+    const field = match ? configField(match[1]!) : undefined;
+    if (!field) return { title: "/config", error: true, lines: [`Use /config <key> <value>. Keys: ${CONFIG_FIELDS.map((f) => f.key).join(", ")}`] };
+    return this.applyConfig(field, match![2]!);
+  }
+
+  private applyConfig(field: ConfigField, raw: string): CommandOutput {
+    const fail = (message: string): CommandOutput => ({ title: "/config", error: true, lines: [message] });
+    // A running loop captured its budgets/transport at task start. Avoid a UI
+    // that claims a new value controls that in-flight request.
+    if ((this.active || this.shellBusy || this.compacting) && !["thinking", "verbose", "theme"].includes(field.key)) {
+      return fail("Wait for the running task to finish, or close this panel and press Esc to interrupt it.");
+    }
+    let value: ReturnType<typeof parseConfigValue>;
+    let path: string | null;
+    try {
+      value = parseConfigValue(field, raw);
+      // Save first: a failed write must not partially apply the new setting.
+      path = this.rememberSetting(field.key, value);
+    } catch (err) {
+      return fail(err instanceof Error ? err.message : String(err));
+    }
+    switch (field.key) {
+      case "thinking":
+        if (this.screen.thinkingShown !== value) this.screen.toggleThinking();
+        break;
+      case "verbose":
+        if (this.screen.verboseOutput !== value) this.screen.toggleVerbose();
+        break;
+      case "theme":
+        applyTheme(value as string);
+        this.settings.theme = value as string;
+        break;
+      case "channel":
+        if (this.settings.channel !== value) {
+          this.history = [];
+          this.tasks = [];
+          this.totals.lastContext = 0;
+          this.settings.channel = value as ChannelId;
+        }
+        break;
+      default:
+        (this.settings as unknown as Record<string, unknown>)[field.key] = value;
+        break;
+    }
+    if (field.key === "endpoint") { this.apiKeyVerified = false; this.invalidateAuthentication(); this.syncBilling(); }
+    const suffix = field.key === "channel" ? " Conversation restarted when the channel changed." : "";
+    return {
+      title: "/config",
+      lines: [
+        `${field.key} = ${this.configValue(field.key)}${path ? " · saved" : " · session only"}.${suffix}`,
+        ...(path ? [`Saved to ${path}. Startup flags, environment and trusted project settings can override this default next time.`] : []),
+      ],
+    };
+  }
+
+  private invalidateAuthentication(): void {
+    this.authGeneration++;
+    if (this.verifyingLogin !== null) {
+      this.verifyingLogin = null;
+      if (!this.quitting) this.screen.setActivity(null);
+    }
+  }
+
+  private syncBilling(): void {
+    if (this.quitting) return;
+    this.billing.configure(this.settings.endpoint, this.apiKey);
+    void this.billing.refresh();
+  }
+
+  private insights() {
+    return collectInsights(this.opts.journalDir, { now: this.now(), activePath: this.active?.journal.path });
+  }
+
+  private reloadInsights(): void {
+    if (this.panel?.tab === "stats" || this.panel?.tab === "usage") {
+      const insights = this.insights();
+      this.insightRows = this.panel.tab === "stats" ? statsRows(insights) : usageRows(insights);
+    }
+  }
+
+  private openPanel(tab: DashboardTab): void {
+    this.panel = { tab, selected: 0, offset: 0 };
+    this.configEditor.clear();
+    this.reloadInsights();
+    if (tab === "usage") void this.billing.refresh();
+    this.refresh();
+  }
+
+  private panelView(): PanelView {
+    const panel = this.panel!;
+    const rows: PanelView["rows"] = panel.tab === "config"
+      ? CONFIG_FIELDS.map((f) => ({ label: f.label, value: this.configValue(f.key), detail: `${f.detail}${f.key === "permissions" && this.alwaysAllowed.size ? ` Already allowed this session: ${[...this.alwaysAllowed].join(", ")}.` : ""} Source: ${this.settingSource(f.key)}.` }))
+      : panel.tab === "status" ? [
+        { label: "Version", value: this.opts.version },
+        { label: "State", value: this.active ? "Running" : this.shellBusy ? "Shell running" : this.compacting ? "Compacting" : "Ready", tone: "good" },
+        { label: "Model", value: this.settings.model },
+        { label: "Endpoint", value: this.settings.endpoint },
+        { label: "Authentication", value: this.apiKey ? this.apiKeyVerified ? "Verified this session" : "API key loaded" : "No API key · /login" },
+        { label: "Working directory", value: this.settings.cwd },
+        { label: "Channel / policy", value: `${this.settings.channel} / ${this.opts.channelPolicy}` },
+        { label: "Permissions", value: `${this.settings.permissions}${this.alwaysAllowed.size ? ` · ${this.alwaysAllowed.size} session grants` : ""}`, detail: this.alwaysAllowed.size ? `Allowed this session: ${[...this.alwaysAllowed].join(", ")}` : "No per-tool session grants." },
+        { label: "Conversation", value: `${this.history.length} messages · ${this.queued.length} queued` },
+        { label: "Session tasks", value: `${this.totals.tasks} ended · ${this.totals.done} done · ${this.totals.interrupted} interrupted` },
+        { label: "Last context", value: `${this.totals.lastContext.toLocaleString("en-US")} / ${MAX_CONTEXT.toLocaleString("en-US")} tokens`, detail: "Last reported root prompt tokens, not a live estimate." },
+        { label: "Skills / agents", value: `${this.opts.skills.list().length} skills · ${this.opts.agents.list().length} agents` },
+        { label: "Tool registry", value: `${this.opts.tools.length} tools` },
+        { label: "User settings", value: this.opts.settingsInfo?.userPath ?? "Session only" },
+        { label: "Project settings", value: this.opts.settingsInfo?.projectApplied ? "Trusted and applied" : "Not applied" },
+        { label: "Journals", value: this.opts.journalDir },
+      ] : panel.tab === "usage" ? [...balanceRows(this.billing.state), ...this.insightRows] : this.insightRows;
+    return {
+      tabs: ["Config", "Status", "Stats", "Usage"],
+      activeTab: DASHBOARD_TABS.indexOf(panel.tab),
+      subtitle: panel.tab === "config"
+        ? "Changes apply here and save to your user defaults."
+        : panel.tab === "status" ? "Current session" : panel.tab === "usage" ? "Account balance + local recorded usage · r refresh" : "Local task journals · press r to refresh",
+      rows: rows.map((row) => ({ ...row, detail: row.detail ?? (row.value ? `${row.label}: ${row.value}` : undefined) })),
+      selected: panel.tab === "config" ? panel.selected : Math.min(panel.offset, Math.max(0, rows.length - 1)),
+      message: panel.message,
+      error: panel.error,
+      hint: panel.editing ? "enter save · esc cancel · ctrl-u clear"
+        : panel.tab === "config" ? "↑↓ select · enter edit · ←→ change · tab next · esc close"
+        : "↑↓ inspect · tab / ←→ switch · r refresh · esc close",
+      ...(panel.editing ? { editing: { label: panel.editing.label, draft: this.configEditor.snapshot() } } : {}),
+    };
+  }
+
+  private panelKey(key: Key): void {
+    const panel = this.panel!;
+    const editor = this.configEditor;
+    if (panel.editing) {
+      switch (key.type) {
+        case "escape": panel.editing = undefined; panel.message = undefined; panel.error = false; break;
+        case "enter": {
+          const result = this.applyConfig(panel.editing, editor.text);
+          panel.message = result.lines[0]; panel.error = result.error;
+          if (!result.error) panel.editing = undefined;
+          break;
+        }
+        case "text": case "paste": editor.insert(key.text.replace(/[\r\n\t]/g, " ")); break;
+        case "backspace": editor.backspace(); break;
+        case "delete": editor.deleteForward(); break;
+        case "left": editor.left(); break;
+        case "right": editor.right(); break;
+        case "home": editor.home(); break;
+        case "end": editor.end(); break;
+        case "word-left": editor.wordLeft(); break;
+        case "word-right": editor.wordRight(); break;
+        case "delete-word": editor.deleteWordBack(); break;
+        case "ctrl":
+          if (key.key === "u") editor.killToStart();
+          if (key.key === "k") editor.killToEnd();
+          if (key.key === "c") { panel.editing = undefined; panel.message = undefined; panel.error = false; }
+          if (key.key === "l") this.screen.redraw();
+          break;
+        default: break;
+      }
+      this.refresh();
+      return;
+    }
+    if (key.type === "escape" || (key.type === "ctrl" && (key.key === "c" || key.key === "d"))) {
+      this.panel = null;
+    } else if (key.type === "tab" || key.type === "shift-tab" || (panel.tab !== "config" && (key.type === "left" || key.type === "right"))) {
+      const direction = key.type === "shift-tab" || key.type === "left" ? -1 : 1;
+      this.openPanel(DASHBOARD_TABS[(DASHBOARD_TABS.indexOf(panel.tab) + direction + DASHBOARD_TABS.length) % DASHBOARD_TABS.length]!);
+    } else if (key.type === "up" || key.type === "down") {
+      const delta = key.type === "up" ? -1 : 1;
+      if (panel.tab === "config") panel.selected = Math.max(0, Math.min(CONFIG_FIELDS.length - 1, panel.selected + delta));
+      else panel.offset = Math.max(0, Math.min(this.panelView().rows.length - 1, panel.offset + delta));
+      panel.message = undefined; panel.error = false;
+    } else if (panel.tab === "config" && ["enter", "left", "right"].includes(key.type)) {
+      const field = CONFIG_FIELDS[panel.selected]!;
+      if (field.choices) {
+        const current = field.choices.indexOf(this.configValue(field.key));
+        const delta = key.type === "left" ? -1 : 1;
+        const value = field.choices[(current + delta + field.choices.length) % field.choices.length]!;
+        const result = this.applyConfig(field, value);
+        panel.message = result.lines[0]; panel.error = result.error;
+      } else if (key.type === "enter") {
+        editor.clear(); editor.insert(this.configValue(field.key));
+        panel.editing = field; panel.message = undefined; panel.error = false;
+      }
+    } else if (key.type === "text" && key.text === "r" && panel.tab !== "config") {
+      this.reloadInsights();
+      if (panel.tab === "usage") void this.billing.refresh(true);
+    } else if (key.type === "ctrl" && key.key === "l") this.screen.redraw();
+    this.refresh();
+  }
+
   private configLines(): string[] {
     const info = this.opts.settingsInfo;
     const s = this.settings;
-    const src = (key: keyof LoadedSettings["sources"]): string => info?.sources[key] ?? "default";
+    const src = (key: keyof LoadedSettings["sources"]): string => this.settingSource(key);
     const rows: [string, string, string][] = [
       ["model", s.model, src("model")],
       ["endpoint", s.endpoint, src("endpoint")],
@@ -1773,7 +2060,8 @@ export class Chat {
       ["maxOutputTokens", s.maxOutputTokens === undefined ? "off" : String(s.maxOutputTokens), src("maxOutputTokens")],
       ["seed", s.seed === undefined ? "off" : String(s.seed), src("seed")],
       ["theme", s.theme, src("theme")],
-      ["thinking", this.screen.thinkingShown ? "shown" : "hidden", src("thinking")],
+      ["thinking", String(this.screen.thinkingShown), src("thinking")],
+      ["verbose", String(this.screen.verboseOutput), src("verbose")],
       ["compactAt", String(s.compactAt), src("compactAt")],
       ["permissions", s.permissions, src("permissions")],
     ];

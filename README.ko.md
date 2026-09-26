@@ -427,7 +427,9 @@ Infron의 [무료 모델 약관](https://infron.ai/docs/overview/free-models)에
 |---|---|
 | `/help` | 명령과 단축키 |
 | `/status` (`/cost`) | 연결, 설정, 세션 누적치 |
-| `/config` | 유효한 설정과 각각의 출처, 설정 파일 |
+| `/config` | 대시보드에서 설정 변경; `/config show`로 값과 출처 확인 |
+| `/stats` | 로컬 세션 기록의 작업·도구 통계 |
+| `/usage` | Infron 잔액, 기록된 토큰 사용량과 요청 비용 |
 | `/doctor` | 엔드포인트 점검: 인증, 파서, 캐시, 채널 |
 | `/mcp [list\|connect NAME\|disconnect NAME\|reconnect NAME\|login NAME\|logout NAME]` | MCP 관리 화면에서 프리셋 추가, 연결 상태 조회·제어와 로그인 |
 | `/mcp-setup <URL>` | 내장 스킬로 MCP 서버 등록과 연결 확인 |
@@ -451,9 +453,19 @@ Infron의 [무료 모델 약관](https://infron.ai/docs/overview/free-models)에
 
 ```
 enter send · \ + enter newline · esc interrupt or clear · ctrl-c twice quit · ctrl-d quit
-↑ ↓ history · tab show or hide reasoning · ctrl-o full tool output · ctrl-l redraw · shift-tab permissions
+↑ ↓ history · tab show or hide reasoning · ctrl-o output viewer · ctrl-l redraw · shift-tab permissions
 @ attach a file · ! run a shell line · # add a project note · / commands · ? hide this
 ```
+
+도구 결과는 긴 한 줄 JSON과 오류를 포함해 기본적으로 화면 3줄까지만 표시합니다.
+`Ctrl+O`로 전체 출력 뷰어를 열고 ↑/↓, PageUp/PageDown, Home/End로 탐색합니다.
+Esc, `q`, `Ctrl+O`로 닫으면 입력 중이던 문장과 스크롤 기록으로 돌아옵니다.
+모델에 전달되는 도구 데이터는 이 표시 방식 때문에 잘리지 않습니다.
+항상 전체 출력을 표시하려면 `--verbose` 또는 `/config verbose true`를 사용합니다.
+
+최초 로그인 때 입력한 키로 Infron 잔액이 자동 연결됩니다. Usage에서 `r`로
+새로고침할 수 있습니다. 계정 잔액과 로컬 기록의 요청 비용은 별도로 표시하며,
+보고되지 않았거나 기록에 없는 비용을 추정해서 더하지 않습니다.
 
 ---
 

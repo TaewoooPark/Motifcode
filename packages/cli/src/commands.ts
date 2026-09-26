@@ -42,7 +42,7 @@ export interface ChatSettings {
 }
 
 /** Settings a command may write to the person's file. */
-export type PersistableKey = "model" | "endpoint" | "channel" | "maxTurns" | "maxOutputTokens" | "seed" | "theme" | "thinking" | "compactAt" | "permissions";
+export type PersistableKey = "model" | "endpoint" | "channel" | "maxTurns" | "maxOutputTokens" | "seed" | "theme" | "thinking" | "verbose" | "compactAt" | "permissions";
 
 export interface CommandContext {
   settings: ChatSettings;
@@ -50,6 +50,11 @@ export interface CommandContext {
   status(): string[];
   /** Effective settings with where each came from, and the files involved. */
   config(): string[];
+  /** Interactive dashboard; plain outputs remain available without a screen. */
+  openPanel?(tab: "config" | "status" | "stats" | "usage"): void;
+  configure?(args: string): CommandOutput;
+  stats?(): string[];
+  usage?(): string[];
   doctor(): Promise<string[]>;
   skills(): string[];
   agents(): string[];
@@ -90,6 +95,8 @@ export interface CommandOutput {
   lines: string[];
   /** True when the command failed and the output is an error. */
   error?: boolean;
+  /** An interactive panel has already handled this command. */
+  silent?: boolean;
 }
 
 export interface SlashCommand {
@@ -109,7 +116,7 @@ const KEYS: readonly [string, string][] = [
   ["?", "on an empty prompt, show or hide the key list"],
   ["shift-tab", "toggle permissions: ask before tools run, or run everything"],
   ["1 / 2 / 3", "when asked about a tool call: run it once, stop asking for that tool this session, decline (↑↓ enter and esc work too)"],
-  ["ctrl-o", "show tool output in full, or clipped again"],
+  ["ctrl-o", "open full output viewer; ↑↓ / PgUp / PgDn / Home / End browse, esc closes"],
   ["ctrl-l", "redraw the screen"],
   ["@path", "attach a file or directory to the message; @skill:name attaches a skill's instructions"],
   ["!command", "run a shell command here and put its output in the conversation"],
@@ -138,6 +145,15 @@ function saved(ctx: CommandContext, key: PersistableKey, value: unknown): string
   return path ? [`saved to ${path}`] : [];
 }
 
+function dashboard(ctx: CommandContext, tab: "config" | "status" | "stats" | "usage", args: string, lines: () => string[]): CommandOutput {
+  if (args === "" && ctx.openPanel) {
+    ctx.openPanel(tab);
+    return { title: `/${tab}`, lines: [], silent: true };
+  }
+  if (args && args !== "show") return fail(`/${tab}`, `Use /${tab} or /${tab} show.`);
+  return ok(`/${tab}`, lines());
+}
+
 export const COMMANDS: readonly SlashCommand[] = [
   {
     name: "help",
@@ -157,12 +173,25 @@ export const COMMANDS: readonly SlashCommand[] = [
   {
     name: "status",
     description: "connection, settings and session totals",
-    run: (ctx) => ok("/status", ctx.status()),
+    run: (ctx, args) => dashboard(ctx, "status", args, () => ctx.status()),
   },
   {
     name: "config",
-    description: "effective settings, where each came from, and the files",
-    run: (ctx) => ok("/config", ctx.config()),
+    description: "edit settings in the session and save defaults",
+    usage: "[key value|show]",
+    run: (ctx, args) => args && args !== "show" && ctx.configure
+      ? ctx.configure(args)
+      : dashboard(ctx, "config", args, () => ctx.config()),
+  },
+  {
+    name: "stats",
+    description: "activity across recorded local tasks",
+    run: (ctx, args) => dashboard(ctx, "stats", args, () => ctx.stats?.() ?? ["No recorded tasks."]),
+  },
+  {
+    name: "usage",
+    description: "reported token usage across local task journals",
+    run: (ctx, args) => dashboard(ctx, "usage", args, () => ctx.usage?.() ?? ["No reported usage."]),
   },
   {
     name: "doctor",

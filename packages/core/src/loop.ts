@@ -604,6 +604,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
       promptTokens: response.usage?.promptTokens,
       completionTokens: response.usage?.completionTokens,
       ...(response.usage?.cachedTokens !== undefined ? { cachedTokens: response.usage.cachedTokens } : {}),
+      ...(response.usage?.reportedCost ? { reportedCost: response.usage.reportedCost } : {}),
       requestMs: response.ms,
     });
     if (

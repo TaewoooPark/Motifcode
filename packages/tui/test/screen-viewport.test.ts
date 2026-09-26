@@ -37,6 +37,60 @@ function wideAmbiguous(terminal: TerminalInstance): void {
 afterEach(() => { vi.unstubAllEnvs(); vi.useRealTimers(); });
 
 describe("physical footer viewport", () => {
+  it.each([1, 45])("blinks a %i-line live reply inside the viewport without moving the editor or scrollback", async (count) => {
+    vi.stubEnv("NO_COLOR", undefined);
+    vi.stubEnv("TERM", "xterm-256color");
+    vi.resetModules();
+    const { Screen: ColourScreen } = await import("../src/screen.js");
+    const answer = Array.from({ length: count }, (_, i) => `PULSE_${String(i).padStart(2, "0")}`).join("\n");
+    const chunks: string[] = [];
+    const frames: string[] = [];
+    const frame = (): void => { frames.push(chunks.splice(0).join("")); };
+    const screen = new ColourScreen({ write: (text) => chunks.push(text), columns: () => 40, rows: () => 8, interactive: true });
+    vi.useFakeTimers();
+    try {
+      screen.setComposer({ draft: { text: "draft", cursor: 3 } });
+      screen.append({ kind: "user", text: "SETTLED_USER" });
+      screen.setWorking(true);
+      screen.apply({ type: "stream", content: answer });
+      vi.advanceTimersByTime(40);
+      frame();
+      vi.advanceTimersByTime(960);
+      frame();
+      vi.advanceTimersByTime(1000);
+      frame();
+      screen.apply({ type: "content_delta", text: answer });
+      screen.setWorking(false);
+      expect(vi.getTimerCount()).toBe(0);
+      frame();
+    } finally { screen.finish(); vi.useRealTimers(); }
+
+    const terminal = new Terminal({ convertEol: true, allowProposedApi: true, cols: 40, rows: 8, scrollback: 2000 });
+    try {
+      let baseY = 0;
+      for (const [i, frame] of frames.slice(0, 3).entries()) {
+        await write(terminal, frame);
+        const buffer = terminal.buffer.active;
+        const visible = lines(terminal).slice(buffer.baseY);
+        const indicator = visible.find((line) => line.includes(count === 1 ? "PULSE_00" : "Working…"));
+        expect(indicator).toBeDefined();
+        expect(indicator![0]).toBe(i === 1 ? " " : "⏺");
+        expect(buffer.getLine(buffer.baseY + buffer.cursorY)!.translateToString(true)).toContain("draft");
+        expect(buffer.cursorX).toBe(7);
+        if (i === 0) baseY = buffer.baseY;
+        else {
+          expect(buffer.baseY).toBe(baseY);
+          expect(frame).not.toContain("\n");
+        }
+        expect(lines(terminal, buffer.baseY).join("\n")).not.toMatch(/PULSE_|Working…|draft|╭|╰/);
+      }
+      await write(terminal, frames[3]!);
+      const all = lines(terminal).join("\n");
+      for (const line of answer.split("\n")) expect(all.split(line), line).toHaveLength(2);
+      expect(all).not.toContain("Working…");
+    } finally { terminal.dispose(); }
+  });
+
   it("keeps repeated live frames out of scrollback and commits the answer once", async () => {
     const answer = Array.from({ length: 45 }, (_, i) => `LIVE_${String(i).padStart(2, "0")}`).join("\n");
     const frames = recording(40, 8, (screen, frame) => {

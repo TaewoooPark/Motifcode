@@ -11,7 +11,7 @@
  * the recovery loop that a pruned checkpoint depends on.
  */
 
-import type { Action, ChannelId } from "@motifcode/protocol";
+import type { Action, ChannelId, ReportedCost } from "@motifcode/protocol";
 
 export interface ToolInvocation {
   /** Synthesised by the harness — the model never emits ids. */
@@ -85,7 +85,8 @@ export type LoopEvent =
     }
   | { type: "parse_failure"; kind: ParseFailureKind; sample: string }
   | { type: "channel_downgrade"; from: ChannelId; to: ChannelId; reason: string }
-  | { type: "queue"; agent: string; state: "queued" | "running" | "done" }
+  /** `failed` covers a child that ended without calling `done`, not only one that threw. */
+  | { type: "queue"; agent: string; state: "queued" | "running" | "done" | "failed" }
   | { type: "prefix"; sharedChars: number; totalChars: number; invalidatedBy?: string }
   | {
       type: "usage";
@@ -101,6 +102,8 @@ export type LoopEvent =
        * server's own claim, and the only one that is a cache measurement.
        */
       cachedTokens?: number;
+      /** Provider-reported charge for this request, when available. */
+      reportedCost?: ReportedCost;
       /**
        * Whole-request wall time, prefill and queueing included.
        *
