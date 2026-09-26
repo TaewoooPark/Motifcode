@@ -30,6 +30,7 @@ import {
   buildCompactedHistory,
   defaultEnvPath,
   forgetApiKey,
+  resumeBlock,
   runLoop,
   saveApiKey,
   summarizeTranscript,
@@ -290,6 +291,8 @@ export class Chat {
         this.screen.append({ kind: "system", title: "continuing", lines: await this.resume(this.opts.continueFrom) });
       } catch (err) {
         this.screen.append({ kind: "notice", level: "error", text: err instanceof Error ? err.message : String(err) });
+        this.refresh();
+        return; // Do not silently submit an initial task as a new run after continuation failed.
       }
       this.refresh();
     }
@@ -1494,6 +1497,13 @@ export class Chat {
     const state = loadResume(path);
     if (state.corruption !== undefined) throw new Error(`this journal is corrupt (${state.corruption})`);
     if (!state.checkpoint) throw new Error("no checkpoint was written in that session; there is nothing to continue");
+    const blocker = resumeBlock(state.checkpoint, null);
+    if (blocker?.kind === "execution_uncertain") {
+      throw new Error(
+        `cannot resume: the run stopped while \`${blocker.tool}\` (${blocker.id}) was running, and whether it ` +
+        "took effect is unknowable from here. Inspect the working tree, then start a new run",
+      );
+    }
     const lines: string[] = [];
     if (state.checkpoint.currentChannel !== this.settings.channel) {
       // The transcript is in that channel's format, so the session follows it.

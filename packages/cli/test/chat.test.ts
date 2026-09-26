@@ -9,7 +9,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -17,6 +17,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentRegistry, BUILTIN_AGENTS } from "@motifcode/agents";
 import { TransportError, type CompletionRequest, type CompletionResponse, type Transport } from "@motifcode/core";
 import { DEFAULT_HOOKS } from "@motifcode/hooks";
+import type { JournalLine } from "@motifcode/journal";
 import { doneBody, toolCallBody } from "@motifcode/replay";
 import { BUILTIN_SKILLS, SkillRegistry } from "@motifcode/skills";
 import { CORE_TOOLS, toolPrefix } from "@motifcode/tools";
@@ -468,6 +469,63 @@ describe("interactive session", () => {
     expect(t.seen[1]!.messages.map((m) => m.role)).toEqual(["system", "user", "assistant", "user"]);
     s.type("/resume 9\r");
     await vi.waitFor(() => expect(s.screen()).toContain("no session 9"));
+  });
+
+  it.each([
+    ["slash", false], ["slash", true], ["continue", false], ["continue", true],
+  ] as const)("refuses %s of an uncertain write with mutating=%s before changing history", async (entry, mutating) => {
+    const t = new GateTransport([...reply("original reply"), ...reply("unexpected continuation")]);
+    const original = session(t);
+    open.push(original);
+    original.type("original task\r");
+    await vi.waitFor(() => expect(original.chat.tasksCompleted).toBe(1));
+    const previous = structuredClone(original.chat.transcript);
+    const folder = join(original.cwd, ".motif", "sessions");
+    const file = join(folder, readdirSync(folder)[0]!);
+    const lines = readFileSync(file, "utf8").trimEnd().split("\n").map((line) => JSON.parse(line) as JournalLine);
+    for (const line of lines) {
+      if ("t" in line || line.record.t !== "checkpoint") continue;
+      line.record.state.inFlightTool = { name: "write", id: "root-c1", argumentsHash: "fixture", mutating };
+      line.record.state.currentChannel = "object";
+      line.record.state.messages = [{ role: "system", content: "old system" }, { role: "user", content: "UNSAFE_HISTORY" }];
+    }
+    writeFileSync(file, lines.map((line) => JSON.stringify(line)).join("\n") + "\n");
+    const target = entry === "slash" ? original : session(t, { continueFrom: file, initialTask: "must not run" });
+    if (target !== original) open.push(target);
+    else target.type(`/resume ${file}\r`);
+    await vi.waitFor(() => expect(target.screen()).toContain("Inspect the working tree"));
+    expect(target.screen()).toContain("start a new run");
+    expect(target.chat.transcript).toEqual(entry === "slash" ? previous : []);
+    expect(target.screen()).not.toContain("channel set to object");
+    expect(t.seen).toHaveLength(1);
+  });
+
+  it.each([
+    ["slash", "read"], ["slash", "complete"], ["continue", "read"], ["continue", "complete"],
+  ] as const)("still loads %s conversations with %s checkpoints", async (entry, state) => {
+    const t = new GateTransport([...reply("recorded reply")]);
+    const original = session(t);
+    open.push(original);
+    original.type("recorded task\r");
+    await vi.waitFor(() => expect(original.chat.tasksCompleted).toBe(1));
+    const folder = join(original.cwd, ".motif", "sessions");
+    const file = join(folder, readdirSync(folder)[0]!);
+    const lines = readFileSync(file, "utf8").trimEnd().split("\n").map((line) => JSON.parse(line) as JournalLine);
+    for (const line of lines) {
+      if ("t" in line) line.header.model.id = "previous/model";
+      else if (line.record.t === "checkpoint" && state === "read") {
+        line.record.state.inFlightTool = { name: "read", id: "root-c1", argumentsHash: "fixture", mutating: false };
+      }
+    }
+    writeFileSync(file, lines.map((line) => JSON.stringify(line)).join("\n") + "\n");
+    const target = session(t, entry === "continue" ? { continueFrom: file } : {});
+    open.push(target);
+    if (entry === "slash") target.type(`/resume ${file}\r`);
+    await vi.waitFor(() => expect(target.screen()).toContain("continuing from"));
+    expect(target.chat.transcript).toEqual(original.chat.transcript);
+    expect(target.screen()).toContain("recorded against previous/model");
+    expect(target.screen()).toContain("that session had finished");
+    expect(t.seen).toHaveLength(1);
   });
 
   it("shows tool output in full on ctrl-o and clips it again", async () => {
