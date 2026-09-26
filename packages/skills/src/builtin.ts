@@ -205,6 +205,29 @@ did, it is not a skill — it is a comment.`,
 
   /* ---------------------------------------------------------------- */
   `---
+name: mcp-setup
+description: Register an MCP server from a GitHub URL or server docs, then verify it
+budget: 1500
+tags: setup mcp
+---
+Register the MCP server the person asked for in Motifcode and verify the connection. Follow only the steps below. If the person asked only for an explanation or a review of the setup, change nothing. Follow the original request and the current execution permissions.
+
+Done means the target server is \`ready\` in \`motif mcp doctor --connect\`. On success, report the result at once and stop. Do not hand-craft JSON-RPC, start the server in the background, or run a README's separate smoke tests or business examples.
+
+1. Check \`motif mcp --help\` and \`motif mcp list\` with \`bash\`. If the CLI is missing or has no MCP support, report that limit. Do not look for or modify Motifcode's source.
+2. Choose one path from the address.
+   - **A service URL with an HTTP/SSE transport:** skip repository exploration and curl checks and register it directly: \`motif mcp add ID --transport http URL\`. Use sse only when SSE is stated. Then go to step 4.
+   - **A GitHub repository URL:** check only the README, manifest/scripts and version. Never register the repository URL itself as an HTTP server. Prefer a documented \`npx\` or \`uvx\` command and pin the version you reviewed, for example \`motif mcp add ID -- npx -y PACKAGE_SPEC\`. Keep the documented arguments exactly. For a cold npx cache, preinstall only the exact reviewed package before doctor with \`npm exec --yes --package=PACKAGE_SPEC -- node -e 'process.exit(0)'\` (this does not start the server). Then go to step 4. Consider the source install in step 3 only when no documented command exists or it failed. Do not explore other folders.
+3. Only when a source install is needed, use a durable path such as \`"$HOME/.motif/mcp-servers/ID"\`. Never guess HOME from the user name or the working path; get paths from the real \`$HOME\` and \`command -v\` in bash. Read metadata outside the working folder with bash too. Review the install scripts first; with a \`package-lock.json\` run \`npm ci --ignore-scripts\`, then only the reviewed, required build. Do not edit or regenerate the original sources, manifest, lock files or tsconfig; if the build is unsupported, report the limit. Node example: \`motif mcp add ID -- node "$HOME/.motif/mcp-servers/ID/dist/index.js"\`. First confirm that this entry is the documented path and that it exists. **A .js file is an argument to node: never make it the command, whatever its permissions.** For Python, uv or Docker keep the documented runtime and arguments. Put every argument after \`--\`. Never save a temporary checkout path. Do not \`rm -rf\` an existing temporary or install directory; check it and reuse it, or use a new directory that does not collide.
+4. Connect only the target server with \`motif mcp connect ID --login\`. When needed it opens the browser, waits for the person's provider sign-in and then lists the tools again. Set bash \`timeout_s\` to 240 so sign-in can finish. Skip this step when the person asked only for registration, not for login or connection. If \`authentication_required\` remains, point the person to \`motif mcp login ID\` or \`/mcp login ID\` in the TUI. If the provider requires a preregistered client ID, pass the person's Motif client ID with \`--client-id\`, and \`--callback-port\` and \`--scope\` when needed. Never copy Claude/Codex client IDs or tokens.
+5. Check \`ready\` and the tool count in the result. \`connecting\` or exit 0 alone is not success. Report a cancellation, declined consent or missing permission as that state and do not sign in again automatically. Even after success, do not resend a business tool that already ran. For diagnosis without login use \`motif mcp doctor --connect\`. A service that needs provider approval, or a connector given only as an app ID, cannot be guaranteed to connect automatically.
+
+Keep existing configuration. An identical ID alone does not mean the same server: compare command/args/URL locally without printing credentials (\`get\` withholds values). Replace an existing entry only when the person wants that; you may fix a failed entry you created in this task. Do not read other homes, credential stores or \`.env\` files, and never print the whole environment. Never store or print tokens; reference them with \`--env-ref NAME=ENV\` or \`--header-env HEADER=ENV\`. Never reuse the model key as an MCP key. For a separate config file, follow the hash trust procedure for its current and edited versions.
+
+The final reply or \`done.summary\` must state, in the person's language, all four of: **the server ID, the saved command and version without credentials (or the HTTP/SSE transport), whether it is ready and its tool count, and whether Motif must restart.** If you registered a server or changed configuration, say in the final reply as well that **the current Motif must be quit and started again before the server can be used; \`/new\` and \`/mcp\` do not reread configuration**, not only in earlier progress notes. Make clear that doctor does not verify running a business tool.`,
+
+  /* ---------------------------------------------------------------- */
+  `---
 name: motif-endpoint
 description: Diagnose the Motif-3 endpoint when tool calls or output quality look wrong
 budget: 900
@@ -423,6 +446,83 @@ names and quoted output. Translating an error message helps nobody.
 
 Match the register of the surrounding material — a commit log, a code comment
 and a design document are three different voices.`,
+  /* ---------------------------------------------------------------- */
+  `---
+name: skill-setup
+description: Install a skill from a link, Claude/Codex or a marketplace and verify it
+budget: 1500
+tags: setup skills
+---
+Install the skill the person asked for into Motifcode's managed library and verify the result.
+A request to install is a request to act. If the person asked only for an explanation, a review or a preview, do not install.
+Follow the source, skills and scope the person chose, and the current execution permissions.
+
+Done means the selected skill appears in the install receipts and the registered list, with the source, name and scope
+the person asked for. Once verified, report how to use it and its limits, then stop. Do not run another model session
+or a skill's example task to verify the installation.
+
+1. Check \`pwd\` and \`motif skills --help\` with \`bash\`. A project scope stays in this
+   working directory; do not move to a parent Git root or the Motif source folder.
+   If the person named another target folder, pass that path with \`--cwd\`. Use this CLI for
+   every later install or management step. Do not explore or modify Motif's source, and do not copy a SKILL.md by hand.
+   If the CLI is missing or does not support the step, report that limit.
+2. Look up the given source once.
+   - A repository, skill folder, SKILL.md link or local folder:
+     \`motif skills inspect 'SOURCE' --json\`. Pass GitHub tree/blob and raw SKILL.md
+     links unchanged, quoted as one shell argument.
+   - An existing Claude/Codex installation: \`motif skills import claude --json\` or
+     \`motif skills import codex --json\`. Without a selection it only lists candidates.
+   - A specific marketplace entry:
+     \`motif skills inspect 'SOURCE' --plugin ENTRY --json\`.
+     If the entry name is unknown, list it with \`motif skills marketplace 'SOURCE' --json\`.
+   Follow the candidates, selectionId values and diagnostics the installer returns. From a collection select the
+   skill the person named; when several candidates remain and nothing decides between them, ask for the name. Do not use
+   \`--all\` unless the person asked for everything. For an unsupported link or an ambiguous ref,
+   explain the error and ask for the exact repository/ref/path. Do not search unrelated directories.
+3. Install with \`motif skills add 'SOURCE' --skill 'SELECTION_ID' --scope SCOPE --json\`.
+   For a client import use
+   \`motif skills import CLIENT --skill 'SELECTION_ID' --scope SCOPE --json\`.
+   Keep any \`--plugin\`, \`--path\` or \`--ref\` used for inspect.
+   The default SCOPE is user. A global request ("globally", "for all projects", or the Korean "글로벌"/"전역") also means user:
+   it installs under \`~/.motif/\` for every project. A request for this project or repository only
+   means project. Installing a global skill needs no global npm package.
+   If a namespace was named, apply the same \`--namespace\` to lookup and install.
+   Resolve a name collision with a namespace, never by deleting the original. A \`--dry-run\` request
+   ends with the preview. If the same source, selection and scope is already installed, only verify it.
+4. Check \`motif skills installed --scope SCOPE --json\` together with \`motif skills list --json\`.
+   Compare the receipt's source/ref with the registered name, filePath and diagnostics.
+   If the person also asked to verify files or references, read only those files through the receipt's snapshot
+   and relativeFile. The snapshot is relative to \`~/.motif/\` for user scope or
+   \`<working directory>/.motif/\` for project scope; list's filePath is absolute.
+   The installed skill is not in the current session yet, so do not
+   call it with the skill tool to verify it.
+5. If the person also asked to connect, sign in to or activate its services, check the command, address, required environment variables and unsupported app IDs with \`motif skills connect 'REGISTERED_NAME' --scope SCOPE --dry-run --json\`. Select only what the person approved and run \`motif skills connect 'REGISTERED_NAME' --scope SCOPE --server SERVER --yes --login --json\`. Use \`--all\` only when every connection was requested. \`--yes\` approves the reviewed execution plan; it does not replace sign-in consent. Use bash \`timeout_s\` 240. The person completes provider sign-in in the browser; never ask for tokens or authorization codes in the conversation. Skip this step when only installation was requested.
+6. Briefly report the installed name, scope, verification result and each connection's state. Tell the person to quit and restart Motif,
+   then use it as \`/<registered name> task\` or \`@skill:<registered name> task\`.
+   An installed file is not proof that the real task succeeds. Name any remaining dependencies, such as external executables, MCP servers,
+   connectors or authentication. Never copy credentials or run plugin hooks, and never claim that a
+   complete Claude/Codex plugin environment was installed.
+
+For an update or removal, first check \`motif skills installed --scope SCOPE --json\`, then use
+\`motif skills update NAME\` or \`motif skills remove NAME\` in the same scope.
+Never bypass the protection for locally modified copies or change another client's installation.`,
+
+  /* ---------------------------------------------------------------- */
+  `---
+name: plugin-setup
+description: Install Claude/Codex skill packages, approve their MCP connections and open required browser sign-in
+budget: 1200
+tags: setup plugins auth
+---
+Complete the person's plugin installation or connection request with the Motif CLI. If only an explanation or a review is requested, change nothing.
+1. For connecting, activating or signing in to an already installed plugin whose registered name or namespace the person gave, run \`motif plugins inspect 'NAME' --scope SCOPE --json\` first and continue with the plan review in step 3. If there is no name, or the result is not_installed, find the registered name in the short text list from \`motif plugins installed --scope SCOPE\`. Do not add --json to that list or excerpt whole receipts with head/tail. Do not explore the original cache, the whole filesystem or the CLI's install location. For an existing installation skip exploring the original SOURCE, inspect, add and reinstalling. Only for a new installation check candidates with \`pwd\`, \`motif plugins --help\` and \`motif skills inspect 'SOURCE' --json\`, adding \`--plugin ENTRY\` for a marketplace entry. Stay in the current working folder.
+2. Install the requested skill with \`motif plugins add 'SOURCE' --skill SELECTION --scope user --json\`. Use \`--all\` when the person explicitly asked for the whole package. A global request ("globally", "for all projects", or the Korean "글로벌"/"전역") means user; a request for the current project only means project. If the same package is already installed, do not reinstall it; use its registered name.
+3. Run \`motif plugins inspect 'REGISTERED_NAME_OR_PLUGIN_NAMESPACE' --scope SCOPE --json\`. Check the commands, addresses, required environment variables and unsupported diagnostics. This step runs nothing. Plugin hooks, agents and host-only app IDs are not activated automatically, so keep them apart from connection success.
+4. If the person asked to connect and the plan fits that request, run \`motif plugins connect NAME --scope SCOPE --server SERVER --yes --login --json\`. Use \`--all\` only when every connection was requested. Set bash \`timeout_s\` to 240. \`--yes\` approves running the reviewed processes and connections; the person completes provider sign-in in the browser. Never set up automatic approval or copy another client's token or client ID. If sign-in is cancelled or declined, do not repeat it; report the remaining state.
+5. Report installation, registration, authentication and actual connection separately, then stop. \`ready\` confirms the tool list, not that the real task succeeds. Never report partial or unsupported results as full success. A project configuration must run with the returned configPath/configHash as \`--mcp-config PATH --trust-mcp HASH\`. Restart Motif to use newly installed skills or MCP registrations. Sign-in for an existing registration can continue in the current session with \`/mcp login ID\` in the TUI.
+
+The plugins command does not yet install an MCP-only package as a whole; use the explicit server registration path of the built-in mcp-setup skill instead. A connector given only as an app ID needs its original host unless a provider-specific adapter exists; never claim that a public MCP alternative matches every capability of the original connector.`,
+
 ];
 
 export const BUILTIN_SKILLS: readonly Skill[] = Object.freeze(

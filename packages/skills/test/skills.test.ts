@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BUILTIN_SKILLS, SkillRegistry, parseSkill } from "../src/index.js";
+import { BUILTIN_SKILLS, SkillRegistry, estimateTokens, parseSkill } from "../src/index.js";
 
 describe("skill parsing", () => {
   it("reads the standard name/description frontmatter", () => {
@@ -9,13 +9,10 @@ describe("skill parsing", () => {
     expect(s.body.trim()).toBe("body here");
   });
 
-  it("refuses a skill that tries to declare tools", () => {
-    // The whole point of the design: skills inject instructions, never
-    // capability. A skill that changed the tool list would invalidate the
-    // prompt prefix every time it loaded.
-    expect(() =>
-      parseSkill("---\nname: bad\ndescription: d\nallowed-tools: bash\n---\nbody"),
-    ).toThrow(/never capability/);
+  it("preserves upstream tool declarations without granting capabilities", () => {
+    const skill = parseSkill("---\nname: compatible\ndescription: d\nallowed-tools: bash\n---\nbody");
+    expect(skill.allowedTools).toEqual(["bash"]);
+    expect(skill.diagnostics).toContainEqual(expect.objectContaining({ code: "tool-preapproval", severity: "warning" }));
   });
 
   it("requires frontmatter, a name and a description", () => {
@@ -67,6 +64,36 @@ describe("built-in skills", () => {
     const out = reg.render("commit");
     expect(out.startsWith('<skill name="commit">')).toBe(true);
     expect(out.trimEnd().endsWith("</skill>")).toBe(true);
+  });
+
+  it("discovers MCP setup in one short line and loads its complete body on demand", () => {
+    const skill = reg.get("mcp-setup")!;
+    const index = reg.index();
+    const row = index.split("\n").find(line => line.trim().startsWith("mcp-setup —"))!;
+    expect(skill.source).toBe("builtin");
+    expect(row.length).toBeLessThan(140);
+    expect(row).toContain("GitHub URL");
+    expect(row).toContain("verify it");
+    expect(index).not.toContain("motif mcp doctor --connect");
+    expect(estimateTokens(skill.body.trim())).toBeLessThanOrEqual(skill.budget!);
+    // The estimate counts characters; English needs more of them than Korean did.
+    expect(skill.budget).toBeLessThanOrEqual(1500);
+    expect(reg.render("mcp-setup")).toBe(`<skill name="mcp-setup">\n${skill.body.trim()}\n</skill>`);
+  });
+
+  it("lets user and project MCP setup instructions override the built-in without changing its source", () => {
+    const r = new SkillRegistry(); r.registerAll(BUILTIN_SKILLS);
+    const original = r.get("mcp-setup")!;
+    const count = r.list().length;
+    r.register(parseSkill("---\nname: mcp-setup\ndescription: user setup\n---\nuser installation policy", "user"));
+    expect(r.get("mcp-setup")!.source).toBe("user");
+    expect(r.render("mcp-setup")).toContain("user installation policy");
+    r.register(parseSkill("---\nname: mcp-setup\ndescription: project setup\n---\nproject installation policy", "project"));
+    expect(r.get("mcp-setup")!.source).toBe("project");
+    expect(r.render("mcp-setup")).toContain("project installation policy");
+    expect(r.list()).toHaveLength(count);
+    expect(BUILTIN_SKILLS.find(skill => skill.name === "mcp-setup")).toBe(original);
+    expect(original.source).toBe("builtin");
   });
 
   it("answers usefully for an unknown skill", () => {

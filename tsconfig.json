@@ -6,6 +6,7 @@
     "declaration": false,
     "declarationMap": false,
     "paths": {
+      "@motifcode/mcp": ["./packages/mcp/src/index.ts"],
       "@motifcode/protocol": [
         "./packages/protocol/src/index.ts"
       ],

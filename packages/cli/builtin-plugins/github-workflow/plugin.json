@@ -1,0 +1,6 @@
+{
+  "name": "github-workflow",
+  "description": "Investigate GitHub issues and pull requests, reproduce changes and perform authorized follow-up.",
+  "version": "1.0.0",
+  "mcpPresets": ["github"]
+}

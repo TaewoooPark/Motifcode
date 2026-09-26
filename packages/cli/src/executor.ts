@@ -55,7 +55,7 @@ export interface ExecutorOptions {
   /** Runs a subagent; supplied by the CLI so this module stays loop-agnostic. The call id lets it report progress against the parent's cell. */
   runAgent?: (agent: string, prompt: string, callId?: string) => Promise<SubagentOutcome>;
   /** Called for MCP proxy calls. Absent means no servers are connected. */
-  callMcp?: (server: string, method: string, args: unknown) => Promise<string>;
+  callMcp?: (server: string, method: string, args: unknown, signal?: AbortSignal, observe?: () => Promise<ToolResult>) => Promise<string | ToolResult>;
   onHook?: (event: HookEvent, label: string, ok: boolean) => void;
   timeoutMs?: number;
   /**
@@ -458,15 +458,19 @@ export class ToolExecutor implements Executor {
 
   async run(call: ToolInvocation, signal?: AbortSignal): Promise<ToolResult> {
     const { cwd, hooks } = this.opts;
+    if (signal?.aborted) return { ok: false, output: "Tool call cancelled before execution." };
 
     // Policy first. A call the agent is not allowed to make should not reach a
     // hook, which might have side effects of its own.
     const decision = approve(this.policy, call);
-    if (!decision.allowed) {
+    const skillResourceRead = call.name === "read" && this.policy.allowedTools.has("read") &&
+      this.opts.skills?.canReadResource(str(call.arguments, "path"), cwd) === true;
+    if (!decision.allowed && !skillResourceRead) {
       return { ok: false, output: `refused by execution policy: ${decision.reason}` };
     }
 
-    if (this.opts.confirm && CONFIRMED_TOOLS.has(call.name)) {
+    const localMcpControl = call.name === "mcp" && call.arguments.server === "__motif_host__";
+    if (this.opts.confirm && CONFIRMED_TOOLS.has(call.name) && !localMcpControl) {
       const verdict = await this.opts.confirm(call);
       if (verdict === "deny") {
         // Worded for the model: what happened, and what to do about it. Not
@@ -479,6 +483,7 @@ export class ToolExecutor implements Executor {
       }
     }
 
+    if (signal?.aborted) return { ok: false, output: "Tool call cancelled before execution." };
     if (hooks) {
       const pre = await runHooks(hooks, {
         event: "PreToolUse",
@@ -493,9 +498,10 @@ export class ToolExecutor implements Executor {
       }
     }
 
+    if (signal?.aborted) return { ok: false, output: "Tool call cancelled before execution." };
     const result = await this.dispatch(call, signal);
 
-    if (hooks) {
+    if (hooks && !signal?.aborted) {
       const paths =
         call.name === "apply_patch"
           ? patchPaths(str(call.arguments, "patch"))
@@ -515,6 +521,10 @@ export class ToolExecutor implements Executor {
       // the model should see without it looking like the tool itself failed.
       const failed = post.filter((h) => !h.ok);
       if (failed.length > 0) {
+        // Bounded outputs are protocol envelopes, not free-form terminal text.
+        // Keep their JSON, result handles and execution state byte-for-byte;
+        // onHook above reports the independent post-processing failure.
+        if (result.bounded) return result;
         return {
           ok: result.ok,
           output: `${result.output}\n\n[hooks] ${failed.map((h) => `${h.label}: ${h.output}`).join("; ")}`,
@@ -602,7 +612,10 @@ export class ToolExecutor implements Executor {
       case "skill": {
         const reg = this.opts.skills;
         if (!reg) return { ok: false, output: "no skills are loaded" };
-        return { ok: true, output: reg.render(str(args, "name")) };
+        const result = reg.load(str(args, "name"), { invocation: "model", cwd, ...(typeof args.arguments === "string" ? { arguments: args.arguments } : {}) });
+        // The registry validates its complete byte budget. Do not let the loop
+        // silently remove the middle of an instruction sheet at the tool cap.
+        return { ...result, ...(result.ok ? { bounded: true } : {}) };
       }
 
       case "task": {
@@ -632,17 +645,37 @@ export class ToolExecutor implements Executor {
       case "mcp": {
         const callMcp = this.opts.callMcp;
         if (!callMcp) return { ok: false, output: "no MCP servers are connected" };
-        let parsed: unknown = {};
-        const raw = str(args, "args");
-        if (raw) {
+        let parsed: unknown = args.args ?? {};
+        // Old programmatic callers can still send strings. New sessions only
+        // advertise an object, so their prefix does not change during a run.
+        if (typeof parsed === "string") {
           try {
-            parsed = JSON.parse(raw);
+            parsed = JSON.parse(parsed);
           } catch {
-            return { ok: false, output: `args must be a JSON object string; got: ${raw.slice(0, 200)}` };
+            return { ok: false, output: "args must be an object (or a valid legacy JSON object string)" };
           }
         }
+        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+          return { ok: false, output: "args must be an object" };
+        }
+        const server = str(args, "server");
+        const method = str(args, "method");
+        let observed = false;
+        // A trusted profile may request one fixed observation. Re-enter the
+        // ordinary executor so no approval, policy or hook boundary is bypassed.
+        const observe = method === "browser_snapshot" ? undefined : async (): Promise<ToolResult> => {
+          if (observed) return { ok: false, output: "MCP snapshot observation was already attempted; no tool was dispatched." };
+          observed = true;
+          if (signal?.aborted) return { ok: false, output: "MCP snapshot observation cancelled before execution." };
+          return this.run({
+            id: `${call.id}-snapshot`, name: "mcp",
+            arguments: { server, method: "browser_snapshot", args: {} },
+            validated: true, repaired: false,
+          }, signal);
+        };
         try {
-          return { ok: true, output: await callMcp(str(args, "server"), str(args, "method"), parsed) };
+          const outcome = await callMcp(server, method, parsed, signal, observe);
+          return typeof outcome === "string" ? { ok: true, output: outcome } : outcome;
         } catch (err) {
           return { ok: false, output: String(err) };
         }

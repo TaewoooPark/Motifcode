@@ -22,7 +22,8 @@
  * controller runs against a fake stream in a test.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { AgentRegistry, AgentScheduler, concurrencyFor } from "@motifcode/agents";
 import {
@@ -43,7 +44,7 @@ import {
 import { runHooks, runShell, type HookConfig, type RunResult } from "@motifcode/hooks";
 import { Journal, listSessions, loadResume, newHeader, type ScopeIdentity } from "@motifcode/journal";
 import { MAX_CONTEXT, SAMPLING_DEFAULTS, systemPromptHash, toolSchemaHash, type ChannelId, type Message, type Tool } from "@motifcode/protocol";
-import type { SkillRegistry } from "@motifcode/skills";
+import { substituteSkillArguments, type SkillRegistry } from "@motifcode/skills";
 import { CORE_TOOL_NAMES } from "@motifcode/tools";
 import {
   Composer,
@@ -52,27 +53,32 @@ import {
   applyTheme,
   clampSelection,
   mentionAt,
-  mentionsIn,
   menuItemsFor,
   relativise,
+  wrapWords,
   type ComposerView,
   type Key,
   type MenuItem,
   type PanelView,
 } from "@motifcode/tui";
-import { expandMentions, forgetFiles, listFiles, matchFiles } from "./files.js";
+import { forgetFiles, listFiles, matchFiles } from "./files.js";
+import { expandSkillInput } from "./skill-input.js";
 import { installCommand } from "./install.js";
 import { loginLines, normaliseKeyInput, verifyApiKey, type VerifyResult } from "./login.js";
-import { COMMANDS, findCommand, parseSlash, runSlash, type ChatSettings, type CommandContext, type PersistableKey, type CommandOutput } from "./commands.js";
+import { COMMANDS, findCommand, parseSlash, runSlash, type ChatSettings, type CommandContext, type CommandOutput, type PersistableKey } from "./commands.js";
+import { MCP_USAGE, mcpCatalogEntries, mcpFailureHint, mcpListLines, mcpLoginPanelView, mcpPanelKeys, mcpPanelView, mcpStatusLabel, mcpToolCount, parseMcpRequest, type McpAction } from "./mcp-ui.js";
 import type { LoadedSettings, StoredSettings } from "./settings.js";
 import { CONFIG_FIELDS, configField, parseConfigValue, type ConfigField } from "./config-controls.js";
 import { collectInsights, statsRows, usageRows } from "./insights.js";
 import { InfronBilling } from "./billing.js";
 import { balanceRows } from "./billing-view.js";
 import { doctor, formatChecks } from "./doctor.js";
-import { ToolExecutor } from "./executor.js";
+import { ToolExecutor, type ExecutorOptions } from "./executor.js";
 import { policyForAgent } from "./policy.js";
 import { buildAgentPrompt, buildSystemPrompt } from "./prompt.js";
+import { compactMcpContext, MCP_CONTEXT_PREFIX, type McpSession, type McpPreset, type McpStatus, type McpElicitationRequest, type McpElicitationResponse, McpAuthError, McpPresetError } from "@motifcode/mcp";
+import { requestMcpInteraction } from "./mcp-interaction.js";
+import { McpConfigEditError } from "./mcp-config-edit.js";
 
 export interface ChatOptions {
   screen: Screen;
@@ -86,6 +92,13 @@ export interface ChatOptions {
   hooks: HookConfig;
   projectNotes?: string;
   tools: Tool[];
+  mcp?: McpSession;
+  mcpPresets?: () => McpPreset[];
+  mcpConfigLabel?: string;
+  mcpInstall?: (id: string, options: { root?: string; tokenEnv?: string }, signal: AbortSignal) => Promise<McpStatus>;
+  mcpLogin?: (server: string, signal: AbortSignal, onProgress?: (message: string) => void) => Promise<void>;
+  mcpLogout?: (server: string) => void | Promise<void>;
+  openBrowser?: (url: URL) => Promise<void>;
   /** Where each task's journal is written. */
   journalDir: string;
   version: string;
@@ -203,11 +216,18 @@ export class Chat {
   private shellBusy = false;
   private compacting = false;
   /** A tool call waiting for the person's yes or no, and which of the three answers is selected. */
-  private pendingConfirm: { call: ToolInvocation; resolve: (v: "allow" | "deny") => void; selected: number } | null = null;
+  private pendingConfirm: { call: ToolInvocation; resolve: (v: "allow" | "deny") => void; selected: number; force: boolean } | null = null;
   /** A question with numbered answers in place of the prompt, and which one is selected. */
-  private pendingChoice: { title: string; lines: string[]; options: string[]; selected: number; resolve: (v: number | null) => void } | null = null;
+  private pendingChoice: { title: string; lines: string[]; options: string[]; selected: number; wrap?: boolean; resolve: (v: number | null) => void } | null = null;
   /** A secret being typed in place of the prompt — the API key at login. */
-  private pendingSecret: { title: string; lines: string[]; prompt: string; cancelHint: string; resolve: (v: string | null) => void } | null = null;
+  private pendingSecret: { title: string; lines: string[]; prompt: string; cancelHint: string; allowEmpty: boolean; masked: boolean; resolve: (v: string | null) => void } | null = null;
+  /** Connection controls never share a model task's tool-dispatch lifetime. */
+  private mcpPanel: { selected: number; notice?: string } | null = null;
+  private mcpInteractionBusy = false;
+  private mcpLoginNotice: string | null = null;
+  private readonly mcpLoginOffered = new Set<string>();
+  private mcpBusy: { abort: AbortController; server: string; action: McpAction | "install"; notice?: string } | null = null;
+  private mcpRefreshTimer: NodeJS.Timeout | null = null;
   /** The credential for this session. Starts as the caller's; `/login` replaces it, `/logout` drops it. */
   private apiKey: string | undefined;
   private apiKeySource: string | undefined;
@@ -217,7 +237,11 @@ export class Chat {
   private readonly billing: InfronBilling;
   /** Tools the person allowed for the rest of the session with `a`. */
   private readonly alwaysAllowed = new Set<string>();
+  /** MCP calls a person approved in the call prompt, consumed by the same call. */
+  private readonly humanApprovedMcp = new Set<string>();
   private active: ActiveTask | null = null;
+  /** A finished loop can still compact history before starting a queued task. */
+  private settlingTask = false;
   /** Messages sent while a task ran, in order; each becomes a task when the prompt is free. */
   private queued: string[] = [];
   private quitting = false;
@@ -273,7 +297,7 @@ export class Chat {
 
   /** Resolves once no task is running and nothing is queued. */
   whenIdle(): Promise<void> {
-    if (!this.active && this.queued.length === 0) return Promise.resolve();
+    if (!this.active && !this.settlingTask && this.queued.length === 0) return Promise.resolve();
     return new Promise((r) => this.idleWaiters.push(r));
   }
 
@@ -300,7 +324,7 @@ export class Chat {
           text: "no API key is configured: /login, or set MOTIF_API_KEY in ~/.motif/.env or ./.env, then /doctor",
         });
       }
-      this.screen.attachInput(this.opts.stdin, (key) => this.onKey(key));
+      this.screen.attachInput(this.opts.stdin, (key) => this.onKey(key), () => this.stop());
       this.refresh();
       void this.start();
     });
@@ -345,6 +369,10 @@ export class Chat {
     }
     if (this.pendingConfirm) {
       this.answerConfirm(key);
+      return;
+    }
+    if (this.mcpPanel || this.mcpBusy) {
+      this.answerMcp(key);
       return;
     }
     if (this.panel) {
@@ -492,9 +520,9 @@ export class Chat {
   /** Built-in commands, then every skill that does not share a name with one. */
   private allMenuItems(): MenuItem[] {
     const skills = this.opts.skills
-      .list()
+      .listFor("user")
       .filter((s) => !findCommand(s.name))
-      .map((s) => ({ name: s.name, description: `skill · ${s.description}`, usage: "[input]" }));
+      .map((s) => ({ name: s.name, description: `skill · ${s.description}`, usage: s.argumentHint ?? "[input]" }));
     return [...MENU_ITEMS, ...skills];
   }
 
@@ -509,7 +537,7 @@ export class Chat {
     if (!m) return [];
     const q = m.query;
     const skills: MenuItem[] = this.opts.skills
-      .list()
+      .listFor("user")
       .filter((s) => q === "" || `skill:${s.name}`.includes(q.toLowerCase()) || s.name.startsWith(q.toLowerCase()))
       .map((s) => ({ name: `skill:${s.name}`, description: `skill · ${s.description}` }));
     const files: MenuItem[] = matchFiles(listFiles(this.settings.cwd), q).map((f) => ({
@@ -568,17 +596,24 @@ export class Chat {
       this.refresh();
       return;
     }
-    if (choice === 2) this.alwaysAllowed.add(pending.call.name);
+    if (choice === 2 && !pending.force) this.alwaysAllowed.add(this.permissionKey(pending.call));
+    // A person just approved this exact MCP call: that is the per-call human
+    // confirmation a server-gated tool needs, so do not ask a second time.
+    if (choice !== 3 && !pending.force && pending.call.name === "mcp") this.humanApprovedMcp.add(mcpApprovalKey(pending.call.arguments.server, pending.call.arguments.method, pending.call.arguments.args));
     this.pendingConfirm = null;
     pending.resolve(choice === 3 ? "deny" : "allow");
     this.refresh();
   }
 
   /** Put a tool call to the person, unless the mode or an earlier `a` says not to. */
-  private confirm(call: ToolInvocation): Promise<"allow" | "deny"> {
-    if (this.settings.permissions === "auto" || this.alwaysAllowed.has(call.name)) return Promise.resolve("allow");
+  private permissionKey(call: ToolInvocation): string {
+    return call.name === "mcp" ? `mcp:${String(call.arguments.server)}/${String(call.arguments.method)}` : call.name;
+  }
+
+  private confirm(call: ToolInvocation, force = false): Promise<"allow" | "deny"> {
+    if (!force && (this.settings.permissions === "auto" || this.alwaysAllowed.has(this.permissionKey(call)))) return Promise.resolve("allow");
     return new Promise((resolve) => {
-      this.pendingConfirm = { call, resolve, selected: 1 };
+      this.pendingConfirm = { call, resolve, selected: 1, force };
       this.refresh();
     });
   }
@@ -610,11 +645,17 @@ export class Chat {
         title = "Send this to the terminal?";
         lines = preview(text("keystrokes"), 6);
         break;
+      case "mcp":
+        title = `Call ${text("server")}/${text("method")}?`;
+        lines = preview(JSON.stringify(a.args, null, 2), 10);
+        break;
       default:
         title = `Run ${call.name}?`;
         lines = preview(JSON.stringify(a), 4);
     }
-    const options = ["1. Yes", `2. Yes, and don't ask again for ${call.name} this session`, "3. No, and tell the model what to do instead"];
+    const options = ["1. Yes", this.pendingConfirm?.force
+      ? "2. Yes, for this call (the server requires human confirmation)"
+      : `2. Yes, and don't ask again for ${this.permissionKey(call)} this session`, "3. No, and tell the model what to do instead"];
     return {
       title,
       lines,
@@ -635,9 +676,9 @@ export class Chat {
   }
 
   /** Take over the prompt for one question; resolves with the index chosen, or null on esc. */
-  private askChoice(title: string, lines: string[], options: string[]): Promise<number | null> {
+  private askChoice(title: string, lines: string[], options: string[], wrap = false): Promise<number | null> {
     return new Promise((resolve) => {
-      this.pendingChoice = { title, lines, options, selected: 0, resolve };
+      this.pendingChoice = { title, lines, options, selected: 0, wrap, resolve };
       this.refresh();
     });
   }
@@ -691,10 +732,10 @@ export class Chat {
   }
 
   /** Take over the prompt for one secret; resolves with the text, or null when given up. */
-  private askSecret(title: string, lines: string[], prompt: string, cancelHint: string): Promise<string | null> {
+  private askSecret(title: string, lines: string[], prompt: string, cancelHint: string, allowEmpty = false, masked = true): Promise<string | null> {
     return new Promise((resolve) => {
       this.composer.clear();
-      this.pendingSecret = { title, lines, prompt, cancelHint, resolve };
+      this.pendingSecret = { title, lines, prompt, cancelHint, allowEmpty, masked, resolve };
       this.refresh();
     });
   }
@@ -723,7 +764,7 @@ export class Chat {
         this.composer.insert(key.text.replace(/[\r\n]+/g, ""));
         break;
       case "enter":
-        if (this.composer.text.trim() !== "") finish(this.composer.text);
+        if (pending.allowEmpty || this.composer.text.trim() !== "") finish(this.composer.text);
         break;
       case "escape":
         finish(null);
@@ -851,12 +892,279 @@ export class Chat {
     return items;
   }
 
+  private async askMcpChoice(signal: AbortSignal, title: string, lines: string[], options: string[]): Promise<number | null> {
+    if (signal.aborted || this.quitting) return null;
+    const answer = this.askChoice(title, lines, options, true);
+    const pending = this.pendingChoice;
+    const cancel = () => { if (pending && this.pendingChoice === pending) { this.pendingChoice = null; pending.resolve(null); this.refresh(); } };
+    signal.addEventListener("abort", cancel, { once: true });
+    try { return await answer; } finally { signal.removeEventListener("abort", cancel); }
+  }
+
+  /** MCP dispatch for one result scope, with the person's per-call decisions. */
+  private mcpInvoker(scopeId: string): ExecutorOptions["callMcp"] {
+    const session = this.opts.mcp;
+    if (!session) return undefined;
+    return async (server, method, args, signal, observe) => {
+      const approval = mcpApprovalKey(server, method, args);
+      try {
+        return await session.invoke(server, method, args, {
+          scopeId, signal, observe,
+          confirmInteraction: (server, method, args) => this.humanApprovedMcp.delete(approval) ? Promise.resolve(true)
+            : this.confirm({ id: "mcp-interaction", name: "mcp", arguments: { server, method, args }, validated: true, repaired: false }, true).then((answer) => answer === "allow"),
+          confirmRepeat: (server, method) => this.confirmMcpRepeat(server, method, signal),
+        });
+      } finally { this.humanApprovedMcp.delete(approval); }
+    };
+  }
+
+  /** A person, not the model, decides whether an uncertain call runs again. */
+  private async confirmMcpRepeat(server: string, method: string, signal?: AbortSignal): Promise<boolean> {
+    const choice = await this.askMcpChoice(signal ?? new AbortController().signal, `Run ${server}/${method} again?`, [
+      "An identical earlier call may or may not have run; its outcome is unknown.",
+      "Check the service first. Repeating a write can apply it twice.",
+    ], ["1. Run it again", "2. Don't run it"]);
+    return choice === 0;
+  }
+
+  /** SDK callback: the human, not the model, supplies remote form/URL consent. */
+  async handleMcpElicitation(request: McpElicitationRequest): Promise<McpElicitationResponse> {
+    if (this.mcpInteractionBusy || this.pendingChoice || this.pendingSecret || this.pendingConfirm || this.quitting) return { action: "decline" };
+    this.mcpInteractionBusy = true;
+    try {
+      return await requestMcpInteraction(request, {
+        choose: (title, lines, choices) => this.askMcpChoice(request.signal, title, lines, choices),
+        input: async (title, lines, prompt, masked = true) => {
+          if (request.signal.aborted) return null;
+          const answer = this.askSecret(title, lines, prompt, "enter submit · esc cancel", true, masked);
+          const pending = this.pendingSecret;
+          const cancel = () => { if (pending && this.pendingSecret === pending) { this.pendingSecret = null; this.composer.clear(); pending.resolve(null); this.refresh(); } };
+          request.signal.addEventListener("abort", cancel, { once: true });
+          try { return await answer; } finally { request.signal.removeEventListener("abort", cancel); }
+        },
+        openBrowser: this.opts.openBrowser,
+      });
+    } finally { this.mcpInteractionBusy = false; }
+  }
+
+  private async loginMcp(server: string, signal: AbortSignal): Promise<void> {
+    if (!this.opts.mcpLogin) throw new McpAuthError("unsupported", "MCP login is unavailable in this session.");
+    try {
+      await this.opts.mcpLogin(server, signal, message => {
+        // Device codes belong only to this temporary human interface: never
+        // append them to the conversation, task context or journal.
+        if (this.mcpBusy) this.mcpBusy.notice = message;
+        else this.mcpLoginNotice = message;
+        if (!this.quitting) this.refresh();
+      });
+    } finally {
+      if (this.mcpBusy) delete this.mcpBusy.notice;
+      this.mcpLoginNotice = null;
+      if (!this.quitting) this.refresh();
+    }
+  }
+
+  private async prepareMcp(task: string, signal: AbortSignal): Promise<string | undefined> {
+    const session = this.opts.mcp;
+    if (!session) return undefined;
+    // Starting a server can take seconds (npx downloads, slow endpoints); say so.
+    const connecting = session.statuses().some((s) => s.enabled && !["ready", "paused", "disabled"].includes(s.state));
+    if (connecting) this.screen.setActivity("Connecting to MCP…");
+    let context: string;
+    try { context = await session.prepare(task, signal); }
+    finally { if (connecting) this.screen.setActivity(null); }
+    if (!this.opts.mcpLogin || signal.aborted) return context;
+    let changed = false;
+    for (const status of session.statuses()) {
+      if (status.error?.code !== "authentication_required" || this.mcpLoginOffered.has(status.server) || signal.aborted) continue;
+      this.mcpLoginOffered.add(status.server);
+      const answer = await this.askMcpChoice(signal, "Connect your MCP account", [`${status.server} needs browser authorization before its tools can be used.`], ["1. Sign in", "2. Continue without this connection"]);
+      if (answer !== 0 || signal.aborted) continue;
+      try { await this.loginMcp(status.server, signal); await session.reconnect(status.server, signal); changed = true; }
+      catch { this.screen.append({ kind: "notice", level: "warn", text: `${status.server}: authorization did not complete. Use /mcp login ${status.server} to try again.` }); }
+    }
+    if (changed && !signal.aborted) context = await session.prepare(task, signal);
+    return context;
+  }
+
+  private async mcpCommand(args: string): Promise<CommandOutput> {
+    const request = parseMcpRequest(args);
+    if (!request) return { title: "/mcp", lines: [MCP_USAGE], error: true };
+    const servers = this.opts.mcp?.statuses() ?? [];
+    const taskPending = this.active || this.settlingTask || this.queued.length > 0;
+    if (request.action === "list" || (request.action === "panel" && taskPending)) {
+      return { title: "/mcp", lines: [...mcpListLines(servers, this.opts.mcpPresets?.()), ...(taskPending ? ["Wait for the task to finish before changing connections."] : [])] };
+    }
+    if (request.action === "panel") {
+      this.mcpPanel = { selected: 0 };
+      this.refresh();
+      return { title: "/mcp", lines: [] };
+    }
+    if (request.action === "install") return this.installMcp(request.server);
+    return this.changeMcp(request.action, request.server);
+  }
+
+  /** Human-only setup: browsing the catalog never saves config or starts a server. */
+  private async installMcp(id: string, login = false): Promise<CommandOutput> {
+    const output = (line: string, error = false): CommandOutput => ({ title: "/mcp", lines: [line], ...(error ? { error } : {}) });
+    if (this.active || this.settlingTask || this.queued.length > 0 || this.shellBusy) return output("Wait for the running task and its queued work to finish before changing connections.", true);
+    if (this.mcpBusy) return output("An MCP connection change is already in progress.", true);
+    const preset = this.opts.mcpPresets?.().find(entry => entry.id === id);
+    if (!preset || !this.opts.mcpInstall) return output("Preset setup is unavailable. Use motif mcp install PRESET, then restart this session.", true);
+    const before = this.opts.mcp?.statuses().find(entry => entry.server === id);
+    if (before?.enabled) return output(`${id} is already registered. Use /mcp connect ${id}.`);
+    // Gmail's developer preview needs external enrollment and a token reference.
+    // Do not solicit a bearer token or pretend generic browser OAuth can supply it.
+    if (!before && id === "gmail") return output("Gmail preview requires Google enrollment and an OAuth token environment variable. Use motif mcp install gmail --token-env GOOGLE_ACCESS_TOKEN --enable after setup, then restart.", true);
+    const abort = new AbortController();
+    this.mcpBusy = { abort, action: "install", server: id };
+    this.refresh();
+    try {
+      const options: { root?: string; tokenEnv?: string } = {};
+      if (!before && preset.options.includes("root")) {
+        const choice = await this.askMcpChoice(abort.signal, "Choose filesystem access", ["This server can read and write inside the selected directory.", `Current project: ${this.settings.cwd}`], ["1. Use current project directory", "2. Enter another directory", "3. Cancel"]);
+        if (choice === null || choice === 2) return output("MCP setup cancelled; no configuration changed.");
+        let typed = this.settings.cwd;
+        if (choice !== 0) {
+          const answer = this.askSecret("Filesystem directory", ["Enter an existing directory. You will review it before connecting."], "path › ", "enter review · esc cancel", false, false);
+          const pending = this.pendingSecret;
+          const cancel = () => { if (pending && this.pendingSecret === pending) { this.pendingSecret = null; this.composer.clear(); pending.resolve(null); this.refresh(); } };
+          abort.signal.addEventListener("abort", cancel, { once: true });
+          let root: string | null;
+          try { root = await answer; } finally { abort.signal.removeEventListener("abort", cancel); }
+          if (root === null || abort.signal.aborted) return output("MCP setup cancelled; no configuration changed.");
+          typed = root.trim();
+        }
+        // Review the directory that will actually be granted: ~ expanded,
+        // relative to the project, symlinks resolved.
+        const expanded = typed === "~" ? homedir() : typed.startsWith("~/") ? join(homedir(), typed.slice(2)) : typed;
+        try {
+          options.root = realpathSync(resolve(this.settings.cwd, expanded));
+          if (!statSync(options.root).isDirectory()) throw new Error("not a directory");
+        } catch { return output(`${typed} is not an existing directory; no configuration changed.`, true); }
+      }
+      const choice = await this.askMcpChoice(abort.signal, before ? `Enable ${preset.title}?` : `Set up ${preset.title}?`, [
+        ...(before ? ["Enable the existing server configuration and connect now."] : [preset.description, ...preset.prerequisites, preset.authentication]),
+        `Save to: ${this.opts.mcpConfigLabel ?? "the selected MCP configuration"}`,
+        ...(options.root ? [`Read/write root: ${options.root}`] : []),
+      ], [before ? "1. Enable and connect" : "1. Install and connect", "2. Cancel"]);
+      if (choice !== 0 || abort.signal.aborted) return output("MCP setup cancelled; no configuration changed.");
+      let after = await this.opts.mcpInstall(id, options, abort.signal);
+      if (this.opts.mcpLogin && this.opts.mcp && !abort.signal.aborted && (login || after.error?.code === "authentication_required")) {
+        const consent = login ? 0 : await this.askMcpChoice(abort.signal, "MCP login required", [`${id} needs account authorization. The saved connection will remain available next session.`], ["1. Sign in", "2. Not now"]);
+        if (consent === 0 && !abort.signal.aborted) {
+          await this.loginMcp(id, abort.signal);
+          after = await this.opts.mcp.reconnect(id, abort.signal);
+        }
+      }
+      return output(`${id}: registered · ${mcpStatusLabel(after)} · ${mcpToolCount(after)}${after.state === "error" ? `. ${mcpFailureHint(after)}` : ". Available in this and future sessions."}`, after.state === "error");
+    } catch (cause) {
+      if (cause instanceof McpPresetError || cause instanceof McpConfigEditError || cause instanceof McpAuthError) return output(cause.message, true);
+      return output(abort.signal.aborted ? "MCP setup stopped. Check /mcp list for any saved connection." : "MCP setup did not complete. Check /mcp list and motif mcp doctor; saved connections can be retried.", true);
+    } finally {
+      this.mcpBusy = null;
+      if (!this.quitting) this.refresh();
+    }
+  }
+
+  private async changeMcp(action: McpAction, server: string): Promise<CommandOutput> {
+    const fail = (line: string): CommandOutput => ({ title: "/mcp", lines: [line], error: true });
+    if (this.active || this.settlingTask || this.queued.length > 0 || this.shellBusy) return fail("Wait for the running task and its queued work to finish before changing connections.");
+    if (this.mcpBusy) return fail("An MCP connection change is already in progress.");
+    const session = this.opts.mcp;
+    const before = session?.statuses().find((s) => s.server === server);
+    const preset = this.opts.mcpPresets?.().find(entry => entry.id === server);
+    if ((!before || !before.enabled) && preset && ["connect", "reconnect", "login"].includes(action)) return this.installMcp(server, action === "login");
+    if (!before && preset) return fail(`${server} is not set up yet. Press enter on it in /mcp, or use /mcp install ${server}.`);
+    if (!session || !before) return fail("Unknown MCP server. /mcp list shows configured names and available presets.");
+    if (!before.enabled) return fail(mcpFailureHint(before));
+    const abort = new AbortController();
+    this.mcpBusy = { abort, action, server };
+    this.refresh();
+    try {
+      if (action === "logout") {
+        if (!this.opts.mcpLogout) return fail("MCP logout is unavailable in this session.");
+        await this.opts.mcpLogout(server);
+        this.mcpLoginOffered.delete(server);
+        await session.disconnect(server);
+        return { title: "/mcp", lines: [`${server}: signed out locally and disconnected. Provider account grants are unchanged.`] };
+      }
+      if (action === "login") {
+        if (!this.opts.mcpLogin) return fail("MCP login is unavailable in this session.");
+        await this.loginMcp(server, abort.signal);
+      }
+      let after;
+      try { after = await session[action === "login" ? "reconnect" : action](server, abort.signal); }
+      catch (cause) { after = session.statuses().find(row => row.server === server); if (after?.state !== "error") throw cause; }
+      if (after.error?.code === "authentication_required" && action !== "login" && action !== "disconnect" && this.opts.mcpLogin) {
+        const answer = await this.askMcpChoice(abort.signal, "MCP login required", [`${server} requires authorization in your browser.`], ["1. Sign in", "2. Not now"]);
+        if (answer === 0 && !abort.signal.aborted) { await this.loginMcp(server, abort.signal); after = await session.reconnect(server, abort.signal); }
+      }
+      if (after.state === "error") return fail(mcpFailureHint(after));
+      return { title: "/mcp", lines: [`${server}: ${mcpStatusLabel(after)} · ${mcpToolCount(after)}`] };
+    } catch (cause) {
+      // Connection failures can contain credentials or stderr. Only fixed
+      // guidance and the manager's public state are allowed onto the screen.
+      if (cause instanceof McpAuthError) return fail(cause.message);
+      return fail(abort.signal.aborted
+        ? action === "login" ? "MCP login cancelled." : `Stopped waiting. The connection may still finish; /mcp disconnect ${server} stops it.`
+        : mcpFailureHint(session.statuses().find((s) => s.server === server)));
+    } finally {
+      this.mcpBusy = null;
+      if (!this.quitting) this.refresh();
+    }
+  }
+
+  private answerMcp(key: Key): void {
+    const close = key.type === "escape" || (key.type === "ctrl" && (key.key === "c" || key.key === "d"));
+    if (this.mcpBusy) {
+      if (close && this.mcpBusy.action !== "disconnect") this.mcpBusy.abort.abort();
+      return;
+    }
+    const panel = this.mcpPanel;
+    if (!panel) return;
+    const servers = mcpCatalogEntries(this.opts.mcp?.statuses() ?? [], this.opts.mcpPresets?.());
+    if (close || (!servers.length && key.type === "enter")) this.mcpPanel = null;
+    else if (key.type === "up" || key.type === "down") {
+      const direction = key.type === "up" ? -1 : 1;
+      panel.selected = Math.max(0, Math.min(servers.length - 1, panel.selected + direction));
+      delete panel.notice;
+    } else {
+      const server = servers[panel.selected];
+      const shortcut = key.type === "text" ? key.text.toLowerCase() : "";
+      const action = key.type === "enter" ? (server?.status?.state === "ready" || server?.status?.state === "connecting" ? "disconnect" : "connect")
+        : shortcut === "r" ? "reconnect" : shortcut === "c" ? "connect" : shortcut === "d" ? "disconnect" : shortcut === "l" ? "login" : undefined;
+      if (action && server) {
+        void this.changeMcp(action, server.server).then((out) => {
+          if (this.mcpPanel === panel) {
+            panel.notice = out.lines.join(" ");
+            panel.selected = Math.max(0, mcpCatalogEntries(this.opts.mcp?.statuses() ?? [], this.opts.mcpPresets?.()).findIndex(entry => entry.server === server.server));
+          }
+          if (!this.quitting) this.refresh();
+        });
+      }
+    }
+    this.refresh();
+  }
+
   /** Repaint the composer, the menu and the hint from current state. */
   private refresh(): void {
+    // Reading local status is cheap. Keep a visible panel current if a shared
+    // startup outlives a cancelled waiter; never poll a remote server here.
+    const pendingConnection = this.mcpPanel && this.opts.mcp?.statuses().some((s) => s.state === "connecting");
+    if (pendingConnection && !this.mcpRefreshTimer && !this.quitting) {
+      this.mcpRefreshTimer = setTimeout(() => { this.mcpRefreshTimer = null; if (!this.quitting) this.refresh(); }, 250);
+      this.mcpRefreshTimer.unref();
+    } else if (!pendingConnection && this.mcpRefreshTimer) {
+      clearTimeout(this.mcpRefreshTimer);
+      this.mcpRefreshTimer = null;
+    }
+    const items = this.menuItems();
+    const pendingChoice = this.pendingChoice;
+    const loginNotice = this.mcpBusy?.notice ?? this.mcpLoginNotice;
     // Receiving prose is not the end of a task. Keep the live indicator on
     // through streaming and tool execution, but pause while a person decides.
     this.screen.setWorking(Boolean(this.active) && !this.pendingConfirm && !this.pendingChoice && !this.pendingSecret);
-    const items = this.menuItems();
     // Use the same registry as submission, including aliases and skills. Derive
     // the range from the draft so typing, Tab, history and edits stay in sync.
     const command = /^(\s*)(\/\S+)/u.exec(this.composer.text);
@@ -869,12 +1177,18 @@ export class Chat {
         : {}),
       placeholder: PLACEHOLDER,
       ...(this.pendingConfirm ? { confirm: this.confirmView(this.pendingConfirm.call, this.pendingConfirm.selected) } : {}),
-      ...(this.pendingChoice
+      ...(pendingChoice?.wrap ? { panel: (width: number) => ({ title: pendingChoice.title, lines: pendingChoice.lines.flatMap(line => wrapWords(line, Math.max(1, width - 8))), choices: pendingChoice.options.map((option, index) => `${index === pendingChoice.selected ? "❯" : " "} ${option}`) }) } : {}),
+      ...(this.pendingChoice && !this.pendingChoice.wrap
         ? { confirm: { title: this.pendingChoice.title, lines: this.pendingChoice.lines, choices: this.pendingChoice.options.map((o, i) => `${i === this.pendingChoice!.selected ? "❯" : " "} ${o}`) } }
         : {}),
-      ...(this.pendingSecret ? { secret: { title: this.pendingSecret.title, lines: this.pendingSecret.lines, prompt: this.pendingSecret.prompt } } : {}),
-      ...(this.panel ? { panel: this.panelView() } : {}),
-      ...(items.length > 0 && !this.panel && !this.pendingConfirm && !this.pendingSecret && !this.pendingChoice
+      ...(this.pendingSecret ? { secret: { title: this.pendingSecret.title, lines: this.pendingSecret.lines, prompt: this.pendingSecret.prompt, masked: this.pendingSecret.masked } } : {}),
+      ...((this.mcpPanel || this.mcpBusy) && !this.pendingConfirm && !this.pendingChoice && !this.pendingSecret ? { panel: (width: number, height: number) => ({ ...mcpPanelView(
+        this.opts.mcp?.statuses() ?? [], this.mcpPanel?.selected ?? Math.max(0, this.opts.mcp?.statuses().findIndex((s) => s.server === this.mcpBusy?.server) ?? 0),
+        width, this.mcpBusy ? this.mcpBusy.notice ?? `${this.mcpBusy.action} in progress…` : this.mcpPanel?.notice, height, this.opts.mcpPresets?.(),
+      ), hint: this.mcpBusy ? this.hintText() : mcpPanelKeys(width) }) } : {}),
+      ...(loginNotice && !this.pendingConfirm && !this.pendingChoice && !this.pendingSecret ? { panel: (width: number, height: number) => ({ ...mcpLoginPanelView(loginNotice, width, height), hint: "esc cancels authorization" }) } : {}),
+      ...(this.panel && !this.pendingConfirm && !this.pendingChoice && !this.pendingSecret && !this.mcpPanel && !this.mcpBusy && !loginNotice ? { panel: this.panelView() } : {}),
+      ...(items.length > 0 && !this.panel && !this.mcpLoginNotice && !this.pendingConfirm && !this.pendingSecret && !this.pendingChoice && !this.mcpPanel && !this.mcpBusy
         ? { menu: { items, selected: clampSelection(this.menuSelected, items.length), prefix: this.mentionOpen() ? "@" : "/" } }
         : {}),
     };
@@ -886,6 +1200,8 @@ export class Chat {
     if (this.pendingSecret) return this.pendingSecret.cancelHint;
     if (this.pendingChoice) return "1 2 or ↑↓ enter · esc leaves it";
     if (this.pendingConfirm) return "1 2 3 or ↑↓ enter · esc declines";
+    if (this.mcpBusy) return this.mcpBusy.action === "disconnect" ? "closing connection…" : "esc stops waiting";
+    if (this.mcpPanel) return mcpPanelKeys(this.screen.width);
     if (this.ctrlCArmedAt > 0 && this.now() - this.ctrlCArmedAt <= CTRL_C_WINDOW_MS) return "ctrl-c again to quit";
     if (this.queued.length > 0) {
       const first = this.queued[0]!.split("\n")[0]!;
@@ -927,11 +1243,15 @@ export class Chat {
         this.refresh();
         return;
       }
-      await this.runTask(skillTask(this.opts.skills.render(slash.name), slash.args), text);
+      const expanded = expandSkillInput(text, { cwd: this.settings.cwd, skills: this.opts.skills });
+      if (expanded.errors.length) {
+        this.screen.append({ kind: "notice", level: "error", text: expanded.errors.join("\n") }); this.refresh(); return;
+      }
+      await this.runTask(expanded.task, text);
       return;
     }
     if (slash) {
-      if (this.active && BLOCKED_WHILE_RUNNING.has(slash.name.toLowerCase())) {
+      if ((this.active || this.settlingTask) && BLOCKED_WHILE_RUNNING.has(slash.name.toLowerCase())) {
         this.screen.append({
           kind: "notice",
           level: "warn",
@@ -945,7 +1265,7 @@ export class Chat {
       if (previousEndpoint !== this.settings.endpoint) { this.apiKeyVerified = false; this.invalidateAuthentication(); }
       // /endpoint and /login share the same credential-bound billing state.
       this.syncBilling();
-      if (!this.quitting && !out.silent) {
+      if (!this.quitting && !out.silent && out.lines.length > 0) {
         this.screen.append(
           out.error
             ? { kind: "notice", level: "error", text: out.lines.join(" ") }
@@ -955,17 +1275,18 @@ export class Chat {
       }
       return;
     }
-    if (this.active) {
+    if (this.active || this.settlingTask) {
       // Queued, in order, and sent one by one as the prompt frees up — the
       // person keeps typing while the model works.
       this.queued.push(text);
       this.refresh();
       return;
     }
-    const { task, attached } = expandMentions(text, mentionsIn(text), {
-      cwd: this.settings.cwd,
-      renderSkill: (name) => (this.opts.skills.get(name) ? this.opts.skills.render(name) : undefined),
+    const { task, attached, errors } = expandSkillInput(text, {
+      cwd: this.settings.cwd, skills: this.opts.skills,
+      automatic: this.opts.tools.some(tool => "function" in tool && tool.function?.name === "skill"), slash: false,
     });
+    if (errors.length) { this.screen.append({ kind: "notice", level: "error", text: errors.join("\n") }); this.refresh(); return; }
     if (attached.length > 0) {
       this.screen.append({ kind: "notice", level: "info", text: `attached ${attached.map((a) => `@${a}`).join(", ")}` });
     }
@@ -1125,11 +1446,18 @@ export class Chat {
 
     let result: LoopResult | undefined;
     try {
+      const mcpContext = await this.prepareMcp(display ?? task, abort.signal);
+      // Earlier tasks' contexts stay in history for the cached prefix; repeat
+      // only what changed since the latest complete one.
+      const previous = this.history.findLast((m) => m.role === "user" && typeof m.content === "string" && m.content.startsWith(MCP_CONTEXT_PREFIX));
       result = await runLoop({
         transport,
         tools: this.opts.tools,
         system: (ch) => this.systemFor(ch),
         userTask: task,
+        context: mcpContext && compactMcpContext(mcpContext, previous?.content as string | undefined),
+        contextOnRestart: mcpContext,
+        replyRecovery: (content) => this.opts.mcp?.replyRecovery(content),
         history: this.history,
         executor: this.executor,
         emit,
@@ -1174,6 +1502,7 @@ export class Chat {
     } catch (err) {
       this.screen.append({ kind: "notice", level: "error", text: err instanceof Error ? err.message : String(err) });
     } finally {
+      this.settlingTask = true;
       this.active = null;
       this.screen.setWorking(false);
       this.screen.setActivity(null);
@@ -1186,6 +1515,7 @@ export class Chat {
     }
 
     if (this.quitting) {
+      this.settlingTask = false;
       this.finish();
       return;
     }
@@ -1205,6 +1535,8 @@ export class Chat {
         });
       }
     }
+    this.settlingTask = false;
+    if (this.quitting) { this.finish(); return; }
     const next = this.queued.shift();
     if (next !== undefined) {
       await this.submit(next);
@@ -1278,9 +1610,19 @@ export class Chat {
     }
   }
 
+  /** Abort active work and let the owner await connection cleanup. */
+  stop(): void {
+    this.quit();
+  }
+
   private quit(): void {
     if (this.quitting) return;
     this.quitting = true;
+    this.mcpBusy?.abort.abort();
+    if (this.pendingChoice) { const pending = this.pendingChoice; this.pendingChoice = null; pending.resolve(null); }
+    if (this.pendingSecret) { const pending = this.pendingSecret; this.pendingSecret = null; this.composer.clear(); pending.resolve(null); }
+    if (this.mcpRefreshTimer) clearTimeout(this.mcpRefreshTimer);
+    this.mcpRefreshTimer = null;
     if (this.active) {
       // The task ends first; `finish` runs from its tail.
       this.interrupt();
@@ -1325,6 +1667,7 @@ export class Chat {
       hooks: this.opts.hooks,
       skills: this.opts.skills,
       policy: policyForAgent({ root: cwd, tools: toolNames, readOnly: false }),
+      callMcp: this.mcpInvoker("root"),
       confirm: (call) => this.confirm(call),
       onHook: (event, label, ok) => this.screen.apply({ type: "hook", event, label, ok }),
       runAgent: async (name, prompt, callId) => {
@@ -1350,6 +1693,7 @@ export class Chat {
           const childExecutor = new ToolExecutor({
             cwd: this.settings.cwd,
             skills: this.opts.skills,
+            callMcp: this.mcpInvoker(childScope.scopeId),
             confirm: (call) => this.confirm(call),
             policy: policyForAgent({
               root: this.settings.cwd,
@@ -1383,11 +1727,14 @@ export class Chat {
                 buildAgentPrompt({
                   name: def.name,
                   instructions: def.instructions,
+                  skills: this.opts.skills,
                   tools: def.tools,
                   channel: ch,
                   cwd: this.settings.cwd,
                 }),
               userTask: prompt,
+              context: def.toolCount >= CORE_TOOL_NAMES.length && !def.readOnly ? await this.opts.mcp?.prepare(prompt, active.abort.signal, childScope.scopeId) : undefined,
+              replyRecovery: def.toolCount >= CORE_TOOL_NAMES.length && !def.readOnly ? (content) => this.opts.mcp?.replyRecovery(content) : undefined,
               executor: childExecutor,
               emit: childEmit,
               onCheckpoint: active.journal.checkpointFor(childScope),
@@ -1416,6 +1763,7 @@ export class Chat {
             };
           } finally {
             childExecutor.close();
+            this.opts.mcp?.clearScope(childScope.scopeId);
           }
         }, (out) => !out.ok);
       },
@@ -1449,6 +1797,7 @@ export class Chat {
         return [path, "", ...readFileSync(path, "utf8").replace(/\s+$/, "").split("\n")];
       },
       hooks: () => this.opts.hookLines ?? ["no hooks"],
+      mcp: (args) => this.mcpCommand(args),
       persist: (key, value) => this.rememberSetting(key, value),
       login: () => this.login("command"),
       logout: () => this.logout(),
@@ -1480,6 +1829,7 @@ export class Chat {
       newConversation: (reason) => {
         this.history = [];
         this.tasks = [];
+        this.opts.mcp?.clearScope("root");
         this.screen.append({ kind: "notice", level: "info", text: `${reason}; the transcript was cleared` });
       },
       setCwd: (path) => this.setCwd(path),
@@ -1797,7 +2147,9 @@ export class Chat {
     if (state.header.model.id !== this.settings.model) {
       lines.push(`recorded against ${state.header.model.id}; this session sends ${this.settings.model}`);
     }
+    this.opts.skills.restoreResourceAccess(state.checkpoint.messages);
     this.history = state.checkpoint.messages.slice(1);
+    this.opts.mcp?.clearScope("root");
     lines.unshift(
       `continuing from ${path}`,
       `${this.history.length} turn(s) loaded${state.task ? ` — last task: ${state.task.split("\n")[0]}` : ""}`,
@@ -1825,9 +2177,12 @@ export class Chat {
  * one gets the input appended, labelled, so the model knows which part is
  * the person's and which the sheet's.
  */
+function mcpApprovalKey(server: unknown, method: unknown, args: unknown): string {
+  return JSON.stringify([server, method, args ?? {}]);
+}
+
 export function skillTask(rendered: string, input: string): string {
-  if (rendered.includes("$ARGUMENTS")) return rendered.replaceAll("$ARGUMENTS", input);
-  return input === "" ? rendered : `${rendered}\n\nInput from the person:\n${input}`;
+  return substituteSkillArguments(rendered, input);
 }
 
 function readHistory(path: string): string[] {

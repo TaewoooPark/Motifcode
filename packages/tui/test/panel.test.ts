@@ -122,6 +122,16 @@ describe("panel on the physical screen", () => {
       let visible = await flush();
       expect(visible).toContain("Config");
       expect(visible).not.toContain("UNSENT_DRAFT");
+      const mcpPanel = () => ({ title: "MCP servers", lines: ["1 registered"], choices: ["❯ github · connected"] });
+      screen.setComposer({ draft, panel: mcpPanel });
+      visible = await flush();
+      expect(visible).toContain("MCP servers");
+      expect(visible).toContain("github · connected");
+      expect(visible).not.toContain("Setting 0");
+      screen.setComposer({ draft, panel: mcpPanel, secret: { title: "GitHub login", lines: [], prompt: "key: " } });
+      visible = await flush();
+      expect(visible).toContain("GitHub login");
+      expect(visible).not.toContain("github · connected");
       screen.setComposer({ draft, panel: panel(), confirm: { title: "Permission", lines: ["Run?"], choices: ["❯ Yes", "No"] } });
       visible = await flush();
       expect(visible).toContain("Permission");

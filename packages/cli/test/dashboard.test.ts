@@ -78,7 +78,11 @@ function session(extra: Partial<ChatOptions> = {}) {
   const finished = chat.run();
   const type = (value: string): void => { stdin.write(value); };
   const current = (): ComposerView => compose.mock.calls.at(-1)![0]!;
-  const panel = () => current().panel!;
+  const panel = () => {
+    const value = current().panel;
+    if (!value || typeof value === "function") throw new Error("Expected the settings dashboard");
+    return value;
+  };
   const value = (label: string) => panel().rows.find((row) => row.label === label)?.value;
   const saved = (): StoredSettings => JSON.parse(readFileSync(userSettingsPath(cwd), "utf8")) as StoredSettings;
   const screen = () => out.join("").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");

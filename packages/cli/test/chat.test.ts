@@ -13,13 +13,15 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentRegistry, BUILTIN_AGENTS } from "@motifcode/agents";
 import { TransportError, type CompletionRequest, type CompletionResponse, type Transport } from "@motifcode/core";
 import { DEFAULT_HOOKS } from "@motifcode/hooks";
 import type { JournalLine } from "@motifcode/journal";
+import { McpSession } from "@motifcode/mcp";
 import { doneBody, toolCallBody } from "@motifcode/replay";
-import { BUILTIN_SKILLS, SkillRegistry } from "@motifcode/skills";
+import { BUILTIN_SKILLS, SkillRegistry, parseSkill } from "@motifcode/skills";
 import { CORE_TOOLS, toolPrefix } from "@motifcode/tools";
 import { Screen } from "@motifcode/tui";
 import { Chat } from "../src/chat.js";
@@ -119,6 +121,143 @@ describe("interactive session", () => {
       await s.finished;
     }
     open.length = 0;
+  });
+
+  it.each(["typed", "initial", "mention", "slash"] as const)("attaches MCP setup guidance once through %s input", async entry => {
+    const skills = new SkillRegistry(); skills.registerAll(BUILTIN_SKILLS);
+    skills.register(parseSkill("---\nname: mcp-setup\ndescription: local setup\nbudget: 30\n---\nTUI-SETUP-OVERRIDE", "project"));
+    const task = "https://example.test/mcp MCP 추가해주세요";
+    const t = new GateTransport(reply("Instructions received."));
+    const s = session(t, { skills, ...(entry === "initial" ? { initialTask: task } : {}) }); open.push(s);
+    if (entry !== "initial") s.type(`${entry === "mention" ? "@skill:mcp-setup " : entry === "slash" ? "/mcp-setup " : ""}${task}\r`);
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    const user = String(t.seen[0]!.messages[1]!.content);
+    expect(user).toContain(task);
+    expect(user.match(/<skill name="mcp-setup">/g)).toHaveLength(1);
+    expect(user).toContain("TUI-SETUP-OVERRIDE");
+    expect(t.seen[0]!.messages[0]!.content).not.toContain("TUI-SETUP-OVERRIDE");
+    expect(t.seen[0]!.tools).toEqual(toolPrefix(CORE_TOOLS.length - 1));
+  });
+
+  it.each(["typed", "initial", "mention", "slash", "codex"] as const)("routes linked skill installation once through %s TUI input", async entry => {
+    const skills = new SkillRegistry(); skills.registerAll(BUILTIN_SKILLS);
+    skills.register(parseSkill("---\nname: skill-setup\ndescription: project setup policy\nbudget: 30\n---\nTUI-SKILL-INSTALL-POLICY", "project"));
+    const task = "https://github.com/anthropics/skills/tree/main/skills/mcp-builder 이 MCP 스킬을 이 프로젝트에 설치해줘. 결과를 알려줘.";
+    const t = new GateTransport(reply("Instructions received."));
+    const s = session(t, { skills, ...(entry === "initial" ? { initialTask: task } : {}) }); open.push(s);
+    if (entry !== "initial") s.type(`${entry === "mention" ? "@skill:skill-setup " : entry === "slash" ? "/skill-setup " : entry === "codex" ? "$skill-setup " : ""}${task}\r`);
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    const user = String(t.seen[0]!.messages[1]!.content);
+    expect(user).toContain(task);
+    expect(user.match(/<skill name="skill-setup">/g)).toHaveLength(1);
+    expect(user).toContain("TUI-SKILL-INSTALL-POLICY");
+    expect(user).not.toContain('<skill name="mcp-setup">');
+    expect(t.seen[0]!.messages[0]!.content).not.toContain("TUI-SKILL-INSTALL-POLICY");
+    expect(t.seen[0]!.tools).toEqual(toolPrefix(CORE_TOOLS.length - 1));
+  });
+
+  it.each([
+    "https://github.com/openai/skills/tree/main/skills/pdf 이 스킬 글로벌로 설치해줘",
+    "Please install this skill globally: https://example.test/skill",
+  ])("preserves global installation intent through ordinary TUI input: %s", async task => {
+    const t = new GateTransport(reply("Instructions received.")); const s = session(t); open.push(s);
+    s.type(task + "\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    const user = String(t.seen[0]!.messages[1]!.content);
+    expect(user).toContain(`${task}\n\n<skill name="skill-setup">`);
+    expect(user.match(/<skill name="skill-setup">/g)).toHaveLength(1);
+  });
+
+  it.each(["How do I install this skill from https://example.test/skill?", 'Translate "Install this skill from https://example.test/skill".'])("keeps informational TUI input free of automatic skill instructions: %s", async task => {
+    const t = new GateTransport(reply("Explanation."));
+    const s = session(t, { initialTask: task }); open.push(s);
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    expect(t.seen[0]!.messages[1]!.content).toBe(task);
+  });
+
+  it("does not infer skill installation from file content or without the skill tool", async () => {
+    const t = new GateTransport(reply("Read only.")); const s = session(t); open.push(s);
+    writeFileSync(join(s.cwd, "skill-request.txt"), "Install this skill from https://example.test/skill");
+    s.type("Read @skill-request.txt please\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    expect(t.seen[0]!.messages[1]!.content).toContain("Install this skill from https://example.test/skill");
+    expect(t.seen[0]!.messages[1]!.content).not.toContain('<skill name="skill-setup">');
+    const raw = "https://github.com/openai/skills/tree/main/skills/pdf 이거 설치해줘";
+    const noSkill = new GateTransport(reply("No skill tool."));
+    const other = session(noSkill, { tools: toolPrefix(2), initialTask: raw }); open.push(other);
+    await vi.waitFor(() => expect(other.chat.tasksCompleted).toBe(1));
+    expect(noSkill.seen[0]!.messages[1]!.content).toBe(raw);
+  });
+
+  it.each(["slash", "mention", "codex", "initial"])("expands external skill arguments consistently through %s TUI input", async entry => {
+    const skills=new SkillRegistry();skills.register(parseSkill("---\nname: argument-probe\ndescription: arguments\ndisable-model-invocation: true\n---\nBODY $0 / $ARGUMENTS[1] / $ARGUMENTS"));
+    const text=`${entry === "mention" ? "@skill:argument-probe" : entry === "codex" ? "$argument-probe" : "/argument-probe"} "hello world" next`;
+    const t=new GateTransport(reply("received"));const s=session(t,{skills,...(entry === "initial" ? {initialTask:text} : {})});open.push(s);
+    if(entry !== "initial") s.type(text+"\r");
+    await vi.waitFor(()=>expect(s.chat.tasksCompleted).toBe(1));
+    expect(t.seen[0]!.messages[1]!.content).toContain('BODY hello world / next / "hello world" next');
+    expect(t.seen[0]!.messages[0]!.content).not.toContain("argument-probe —");
+  });
+
+  it("does not send hidden or unsupported skill invocations to the model", async () => {
+    const skills=new SkillRegistry();skills.register(parseSkill("---\nname: hidden\ndescription: internal\nuser-invocable: false\n---\nHIDDEN"));
+    skills.register(parseSkill("---\nname: forked\ndescription: child\ncontext: fork\n---\nFORKED"));
+    const t=new GateTransport([]);const s=session(t,{skills});open.push(s);
+    s.type("/hidden\r");await vi.waitFor(()=>expect(s.screen()).toContain("user-invocable: false"));
+    s.type("/forked\r");await vi.waitFor(()=>expect(s.screen()).toContain("compatibility changes"));
+    expect(t.seen).toHaveLength(0);
+  });
+
+  it("does not select MCP setup from attached file content or when the skill tool is absent", async () => {
+    const t = new GateTransport(reply("Read the file.")); const s = session(t); open.push(s);
+    writeFileSync(join(s.cwd, "request.txt"), "https://example.test MCP 설치해줘");
+    s.type("Read @request.txt please\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    expect(t.seen[0]!.messages[1]!.content).toContain("https://example.test MCP 설치해줘");
+    expect(t.seen[0]!.messages[1]!.content).not.toContain('<skill name="mcp-setup">');
+    const noSkill = new GateTransport(reply("No skill tool."));
+    const raw = "Install MCP from https://example.test";
+    const other = session(noSkill, { tools: toolPrefix(2), initialTask: raw }); open.push(other);
+    await vi.waitFor(() => expect(other.chat.tasksCompleted).toBe(1));
+    expect(noSkill.seen[0]!.messages[1]!.content).toBe(raw);
+  });
+
+  it("does not repeat unchanged MCP runtime context in the next task", async () => {
+    const log = join(mkdtempSync(join(tmpdir(), "motif-mcp-context-")), "events.ndjson");
+    const fixture = fileURLToPath(new URL("../../mcp/test/fixtures/client-legacy.mjs", import.meta.url));
+    const mcp = new McpSession({ servers: [{ id: "lab", enabled: true, transport: "stdio", protocol: "legacy", command: process.execPath, args: [fixture, log], startupTimeoutMs: 5_000 }] });
+    const t = new GateTransport([...reply("first"), ...reply("second")]);
+    const s = session(t, { mcp, tools: [...CORE_TOOLS] }); open.push(s);
+    try {
+      s.type("echo the lab text\r");
+      await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1), { timeout: 10_000 });
+      s.type("echo the lab text again\r");
+      await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(2), { timeout: 10_000 });
+      const contexts = t.seen[1]!.messages.filter((m) => m.role === "user" && String(m.content).startsWith("MCP runtime context"));
+      expect(contexts).toHaveLength(2);
+      expect(String(contexts[0]!.content)).toContain('"controls"');
+      expect(String(contexts[1]!.content)).toMatch(/^MCP runtime context update/);
+      expect(String(contexts[1]!.content)).not.toContain('"controls"');
+    } finally { await mcp.close(); }
+  });
+
+  it.each(["ask", "auto"] as const)("asks once before a server-gated MCP tool in %s mode", async mode => {
+    const dir = mkdtempSync(join(tmpdir(), "motif-mcp-gated-")); const log = join(dir, "events.ndjson");
+    const fixture = fileURLToPath(new URL("../../mcp/test/fixtures/client-legacy.mjs", import.meta.url));
+    const mcp = new McpSession({ servers: [{ id: "lab", enabled: true, transport: "stdio", protocol: "legacy", command: process.execPath, args: [fixture, log], startupTimeoutMs: 5_000 }] });
+    const t = new GateTransport([toolCallBody("mcp", { server: "lab", method: "gated", args: {} }), ...reply("done")]);
+    const s = session(t, { mcp, tools: [...CORE_TOOLS] }); open.push(s);
+    try {
+      if (mode === "ask") s.type("/permissions ask\r");
+      s.type("run the gated tool\r");
+      await vi.waitFor(() => expect(s.screen()).toContain("Call lab/gated?"), { timeout: 10_000 });
+      s.type("1");
+      // One answer is enough: an ask-mode approval is the per-call confirmation;
+      // auto mode still shows the server's required prompt, exactly once.
+      await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1), { timeout: 10_000 });
+      expect(s.screen().includes("the server requires human confirmation")).toBe(mode === "auto");
+      expect(readFileSync(log, "utf8")).toContain('"name":"gated"');
+    } finally { await mcp.close(); }
   });
 
   it("runs a task and continues the conversation with the next one", async () => {
@@ -263,7 +402,7 @@ describe("interactive session", () => {
 
   it("marks installed skills with their exact registered spelling", () => {
     const skills = new SkillRegistry();
-    skills.register({ name: "Review🙂", description: "project review", body: "Review changes.", source: "project" });
+    skills.register(parseSkill("---\nname: Review🙂\ndescription: project review\n---\nReview changes.", "project"));
     const s = session(new GateTransport([]), { skills });
     open.push(s);
     const compose = vi.spyOn(s.terminal, "setComposer");

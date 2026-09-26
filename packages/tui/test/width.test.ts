@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { displayWidth, padToWidth, truncateEndToWidth, truncateToWidth, wrapToWidth } from "../src/width.js";
+import { displayWidth, padToWidth, truncateEndToWidth, truncateToWidth, wrapToWidth, wrapWords } from "../src/width.js";
 
 afterEach(() => vi.unstubAllEnvs());
 
@@ -50,5 +50,20 @@ describe("terminal width policy", () => {
     expect(truncateToWidth("a\tb", 4)).toBe("a  …");
     expect(truncateEndToWidth("a\tb", 4)).toBe("…  b");
     expect(padToWidth("a\tb", 7)).toBe("a    b ");
+  });
+});
+
+describe("wrapWords", () => {
+  it("breaks prose at spaces and keeps command flags whole", () => {
+    const line = "Use motif mcp install gmail --token-env GOOGLE_ACCESS_TOKEN --enable after setup, then restart.";
+    const rows = wrapWords(line, 40);
+    expect(rows.every((row) => displayWidth(row) <= 40)).toBe(true);
+    expect(rows.join(" ")).toBe(line);
+    expect(rows.some((row) => row.includes("--token-env"))).toBe(true);
+    expect(rows.some((row) => row.startsWith(" "))).toBe(false);
+  });
+  it("hard-wraps only a word wider than the row and keeps indentation", () => {
+    expect(wrapWords("see https://example.test/abcdefghij", 12)).toEqual(["see", "https://exam", "ple.test/abc", "defghij"]);
+    expect(wrapWords("  alpha beta gamma", 12)).toEqual(["  alpha beta", "  gamma"]);
   });
 });

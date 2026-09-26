@@ -59,7 +59,7 @@ import {
   type Message,
   type Tool,
 } from "@motifcode/protocol";
-import { BUILTIN_SKILLS, SkillRegistry, parseSkill } from "@motifcode/skills";
+import { BUILTIN_SKILLS, SkillRegistry, loadSkill } from "@motifcode/skills";
 import { CORE_TOOLS, CORE_TOOL_NAMES, lintTools, formatFindings, toolPrefix } from "@motifcode/tools";
 import { Screen, applyTheme, themeNames } from "@motifcode/tui";
 import { Chat } from "./chat.js";
@@ -73,8 +73,20 @@ import { doctor, formatChecks, worstState } from "./doctor.js";
 import { ToolExecutor } from "./executor.js";
 import { policyForAgent } from "./policy.js";
 import { buildAgentPrompt, buildSystemPrompt } from "./prompt.js";
+import { loadMcpConfig, listMcpPresets, McpSession, McpAuthBroker, resolveServerConfig } from "@motifcode/mcp";
+import { runMcpArgv } from "./mcp-command.js";
+import { McpCatalogRuntime } from "./mcp-catalog-runtime.js";
+import { runGithubBrowserLogin } from "./github-login.js";
+import { runPluginsArgv } from "./plugins-command.js";
+import { pluginConnectionUi } from "./plugin-connect-ui.js";
+import { openExternalUrl } from "./browser-open.js";
+import { runSkillsArgv } from "./skills-command.js";
+import { loadInstalledSkills } from "./skill-installer.js";
+import { expandSkillInput } from "./skill-input.js";
+import { localMcpAuthTarget } from "./mcp-connect.js";
+import { findCommand, parseSlash } from "./commands.js";
 
-const VERSION = "0.3.4";
+const VERSION = "0.4.0";
 
 interface Args {
   command: string;
@@ -102,6 +114,8 @@ const BOOLEAN_FLAGS = new Set([
   "verbose",
   "experimental-channel",
   "include-children",
+  "dry-run",
+  "connect",
 ]);
 
 function parseArgs(argv: string[]): Args {
@@ -114,7 +128,8 @@ function parseArgs(argv: string[]): Args {
     // a dash and a single letter.
     if (/^-[a-z]$/.test(a) && SHORT_FLAGS[a.slice(1)]) a = `--${SHORT_FLAGS[a.slice(1)]}`;
     if (a === "--help") {
-      command = "help";
+      if (command === "mcp") flags.help = true;
+      else command = "help";
       continue;
     }
     if (a.startsWith("--")) {
@@ -123,7 +138,9 @@ function parseArgs(argv: string[]): Args {
       else if (BOOLEAN_FLAGS.has(a.slice(2))) flags[a.slice(2)] = true;
       else if (argv[i + 1] && !argv[i + 1]!.startsWith("-")) flags[a.slice(2)] = argv[++i]!;
       else flags[a.slice(2)] = true;
-    } else if (rest.length === 0 && ["doctor", "login", "logout", "sessions", "resume", "skills", "agents", "plugins", "config", "lint", "distil", "metrics", "trust", "redact", "corpus-spec", "corpus-render", "help", "version"].includes(a)) {
+    } else if (command === "run" && rest.length === 0 && ["mcp", "doctor", "login", "logout", "sessions", "resume", "skills", "agents", "plugins", "config", "lint", "distil", "metrics", "trust", "redact", "corpus-spec", "corpus-render", "help", "version"].includes(a)) {
+      // These commands own their argv, including repeated selections/values.
+      if (a === "mcp" || a === "skills" || a === "plugins") return { command: a, rest: argv.slice(i + 1), flags };
       command = a;
     } else {
       rest.push(a);
@@ -202,6 +219,10 @@ function loadSkills(cwd: string): SkillRegistry {
   // Plugins sit between the built-ins and the person's own skills: what a
   // plugin ships can be overridden by hand, never the other way round.
   reg.registerAll(plugins(cwd).skills);
+  const installed = loadInstalledSkills({ cwd, home: homedir() });
+  reg.registerAll(installed.skills);
+  const installedPaths = new Set(installed.skills.map(skill => skill.filePath));
+  for (const problem of installed.problems) process.stderr.write(`skipping installed skill: ${problem}\n`);
   // Project skills shadow built-ins of the same name, which is the precedence
   // every other harness uses.
   for (const [dir, source] of [
@@ -209,11 +230,17 @@ function loadSkills(cwd: string): SkillRegistry {
     [join(cwd, CONFIG_DIR, "skills"), "project"],
   ] as const) {
     if (!existsSync(dir)) continue;
-    for (const name of readdirSync(dir)) {
+    for (const name of readdirSync(dir).sort()) {
       const file = join(dir, name, "SKILL.md");
       if (!existsSync(file)) continue;
       try {
-        reg.register(parseSkill(readFileSync(file, "utf8"), source));
+        const skill = loadSkill(file, source); const previous = reg.get(skill.name);
+        if (previous?.filePath && installedPaths.has(previous.filePath)) {
+          const message = `Handwritten skill ${skill.filePath} takes precedence over installed skill ${previous.filePath}. Install with --namespace to make both available.`;
+          skill.diagnostics.push({ code: "skill-shadow", severity: "warning", message });
+          process.stderr.write(`skill precedence: ${message}\n`);
+        }
+        reg.register(skill);
       } catch (err) {
         process.stderr.write(`skipping ${file}: ${String(err)}\n`);
       }
@@ -364,10 +391,20 @@ const HELP = `motif ${VERSION} — a coding agent built for Motif-3 (unofficial;
   motif doctor              check the endpoint, the credentials and what the server produces
   motif sessions            list recorded sessions
   motif resume <file>       resume an interrupted session
-  motif skills              list available skills
+  motif skills              list available skills and compatibility diagnostics
+  motif skills --help       inspect, add, import, update or remove skill packages
   motif agents              list available subagents
   motif config              show the effective settings and where each came from
-  motif plugins             list the plugins under ~/.motif/plugins and .motif/plugins
+  motif plugins             list bundled, user and project plugins
+  motif plugins --help      install skill packages and approve bundled MCP connections
+  motif mcp list            list configured MCP servers without starting them
+  motif mcp presets         show built-in MCP recipes and prerequisites
+  motif mcp install ID      register a built-in recipe offline (disabled by default)
+  motif mcp doctor          check MCP configuration (add --connect to test servers)
+  motif mcp connect NAME    check a server (add --login for browser authentication)
+  motif mcp login NAME      sign in through the provider's browser page and reconnect
+  motif mcp auth-status NAME  inspect local OAuth state; logout NAME clears it
+  motif mcp import          preview Codex TOML or Claude JSON server configuration
   motif lint                lint the tool schemas
   motif trust               approve this repository's .motif/settings.json hooks
   motif distil <dir>        export graded trajectories
@@ -380,6 +417,9 @@ Flags
   --endpoint <url>          model server (default ${DEFAULT_ENDPOINT}; a trailing /v1 is accepted)
   --model <name>            model id to request (default ${DEFAULT_MODEL})
   --env-file <path>         read MOTIF_* settings from this file first
+  --mcp-config <path>       explicit MCP config (requires --trust-mcp with its SHA-256)
+  --trust-mcp <sha256>      authorize exactly that MCP configuration file
+  --mcp-mode <mode>         prefetch (default), search, or catalog comparison mode
   --channel <id>            toolcall | object | raw (default toolcall)
   --channel-policy <p>      fixed | adaptive (default fixed)
   --max-turns <n>           turn ceiling (default 100)
@@ -478,6 +518,19 @@ async function loginAtTerminal(endpoint: string, model: string): Promise<string 
 
 async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2));
+  if (args.command === "mcp") {
+    // Standalone MCP commands skip model setup, not the existing credential boundary.
+    withholdSecrets(process.env);
+    return runMcpArgv(args.rest, args.flags);
+  }
+  if (args.command === "skills" || args.command === "plugins") {
+    withholdSecrets(process.env);
+    const abort = new AbortController(); const cancel = () => abort.abort();
+    const signals = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
+    for (const signal of signals) process.on(signal, cancel);
+    try { return await (args.command === "skills" ? runSkillsArgv : runPluginsArgv)(args.rest, args.flags, { getSkills: cwd => loadSkills(cwd).list(), connectionOptions: pluginConnectionUi(abort.signal) }); }
+    finally { for (const signal of signals) process.removeListener(signal, cancel); }
+  }
   const cwd = flagStr(args.flags, "cwd", process.cwd());
   const envFile = flagStr(args.flags, "env-file", "");
   // The settings files sit below the environment and the flags: a one-off
@@ -532,6 +585,8 @@ async function main(): Promise<number> {
       const chan: ChannelId = flagEnum(args.flags, "channel", CHANNELS, "toolcall");
       const tools = mcpConnectedDefault ? [...CORE_TOOLS] : toolPrefix(CORE_TOOLS.length - 1);
       const skillsForSpec = loadSkills(cwd);
+      // The spec is the no-MCP prompt: bundled MCP workflow skills stay out.
+      skillsForSpec.setMcpServers(() => []);
       const agentsForSpec = new AgentRegistry();
       agentsForSpec.registerAll(BUILTIN_AGENTS);
       const system = buildSystemPrompt({
@@ -655,14 +710,6 @@ async function main(): Promise<number> {
       const findings = lintTools(CORE_TOOLS);
       process.stdout.write(formatFindings(findings) + "\n");
       return findings.length > 0 ? 1 : 0;
-    }
-
-    case "skills": {
-      const reg = loadSkills(cwd);
-      for (const s of reg.list()) {
-        process.stdout.write(`${s.name.padEnd(16)} ${s.description}  (${s.source})\n`);
-      }
-      return 0;
     }
 
     case "agents": {
@@ -836,17 +883,54 @@ async function main(): Promise<number> {
       cwd,
     });
 
-  // No MCP adapter is wired up yet, so the tool is not advertised. Offering a
-  // tool that always answers "no MCP servers are connected" spends prefix
-  // tokens on every request to teach the model about a capability it does not
-  // have. `mcp` is last in the canonical order, so leaving it out is exactly a
-  // prefix and costs no cache.
-  const mcpConnected = mcpConnectedDefault;
-  const activeTools = mcpConnected ? [...CORE_TOOLS] : toolPrefix(CORE_TOOLS.length - 1);
+  const mcpConfig = loadMcpConfig({
+    cwd,
+    ...(typeof args.flags["mcp-config"] === "string" ? { path: args.flags["mcp-config"] } : {}),
+    ...(typeof args.flags["trust-mcp"] === "string" ? { trustHash: args.flags["trust-mcp"] } : {}),
+  });
+  for (const diagnostic of mcpConfig.diagnostics) process.stderr.write(`MCP ${diagnostic.severity}: ${diagnostic.message}\n`);
+  const mcpAuth = new McpAuthBroker({ openBrowser: openExternalUrl });
+  let interactiveChat: Chat | undefined;
+  const mcp = new McpSession(mcpConfig, { exposure: flagEnum(args.flags, "mcp-mode", ["prefetch", "search", "catalog"] as const, "prefetch"), manager: { auth: mcpAuth,
+    onElicitation: request => interactiveChat ? interactiveChat.handleMcpElicitation(request) : Promise.resolve({ action: "decline" }),
+  } });
+  const mcpCatalog = new McpCatalogRuntime(mcp, mcpConfig, {
+    cwd,
+    ...(typeof args.flags["mcp-config"] === "string" ? { path: args.flags["mcp-config"] } : {}),
+    ...(typeof args.flags["trust-mcp"] === "string" ? { trustHash: args.flags["trust-mcp"] } : {}),
+  });
+  const wantsChat = args.flags["interactive"] === true || args.flags["chat"] === true || args.flags["continue"] === true;
+  const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  // Reserve the ninth canonical slot for the interactive catalog even when no
+  // server is registered yet; installation must never change the cached prefix.
+  // A resume keeps the tool set it was recorded with, whatever servers came since.
+  const recordedTools = resumeFrom?.header.prompt.toolSchemaHash;
+  const withoutMcp = toolPrefix(CORE_TOOLS.length - 1);
+  const mcpConnected = recordedTools === toolSchemaHash(CORE_TOOLS)
+    || (recordedTools !== toolSchemaHash(withoutMcp)
+      && (mcp.enabled || (!resumeFrom && tty && (wantsChat || !args.rest.join(" ").trim()))));
+  const activeTools = mcpConnected ? [...CORE_TOOLS] : withoutMcp;
+  // Bundled MCP workflow skills reach the model's index only with their server
+  // and the mcp tool; /mcp setup mutates this same configuration, so a new
+  // preset joins next task.
+  skills.setMcpServers(() => mcpConnected ? mcpConfig.servers.filter((server) => server.enabled).map((server) => server.id) : []);
   const activeToolNames = CORE_TOOL_NAMES.slice(0, activeTools.length);
   const schemaHash = toolSchemaHash(activeTools);
   const promptHash = systemPromptHash(systemFor(channel));
   const printOnly = args.flags["print"] === true || args.flags["p"] === true;
+  const abort = new AbortController();
+  let stopInteractive: (() => void) | undefined;
+  const stop = (signal: NodeJS.Signals): void => {
+    process.exitCode = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 129;
+    abort.abort();
+    stopInteractive?.();
+  };
+  const signalHandlers = (["SIGINT", "SIGTERM", "SIGHUP"] as const).map((signal) => {
+    const handler = () => stop(signal);
+    process.on(signal, handler);
+    return { signal, handler };
+  });
+  try {
 
   // Resume, or start. A resume keeps the recorded task: continuing someone
   // else's transcript with a different task is a new run wearing the old one's
@@ -862,6 +946,7 @@ async function main(): Promise<number> {
       process.stderr.write(`cannot resume: ${blocker}\n`);
       return 2;
     }
+    skills.restoreResourceAccess(resumeFrom.checkpoint!.messages);
     task = resumeFrom.task ?? "";
     (printOnly ? process.stderr : process.stdout).write(
       `resuming ${resumeFrom.header.runId} from turn ${resumeFrom.checkpoint!.turn}` +
@@ -874,8 +959,6 @@ async function main(): Promise<number> {
   // No task and a terminal on both ends means a conversation, not a usage
   // error. Without a terminal the old answer stands: a pipe cannot host a
   // prompt, and printing help is the honest response to an empty command.
-  const wantsChat = args.flags["interactive"] === true || args.flags["chat"] === true || args.flags["continue"] === true;
-  const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
   if (wantsChat && !tty) {
     throw new UsageError("--interactive needs a terminal on stdin and stdout");
   }
@@ -925,17 +1008,43 @@ async function main(): Promise<number> {
       hooks,
       ...(projectNotes !== undefined ? { projectNotes } : {}),
       tools: activeTools,
+      mcp,
+      mcpPresets: listMcpPresets,
+      mcpConfigLabel: mcpCatalog.configLabel,
+      mcpInstall: (id, options, signal) => mcpCatalog.install(id, options, signal),
+      mcpLogin: async (id, signal, onProgress) => {
+        const server = mcpConfig.servers.find(row => row.id === id);
+        if (!server?.enabled || Object.keys(server.headers ?? {}).some(name => name.toLowerCase() === "authorization")) throw new Error("OAuth login unavailable for this server.");
+        await mcpAuth.login(resolveServerConfig(server), { signal,
+          // Human-only login panel: the URL never enters the transcript or journal.
+          onAuthorization: (url) => onProgress?.(`Complete sign-in for ${id} in your browser. If it did not open, visit: ${url.href}`),
+          onGitHubLogin: ({ signal }) => runGithubBrowserLogin({ signal, onProgress, openBrowser: openExternalUrl, humanInteractive: true }),
+        });
+      },
+      mcpLogout: id => { const server = mcpConfig.servers.find(row => row.id === id); if (server) mcpAuth.logout(localMcpAuthTarget(server)); },
       journalDir: join(cwd, CONFIG_DIR, "sessions"),
       version: VERSION,
       hero: args.flags["no-hero"] !== true,
       ...(task ? { initialTask: task } : {}),
     });
-    return chat.run();
+    interactiveChat = chat;
+    stopInteractive = () => chat.stop();
+    return await chat.run();
   }
 
   if (!task) {
     process.stdout.write(HELP);
     return 2;
+  }
+
+  // Attach task guidance once, outside the cached prefix; resumed transcripts
+  // already contain their original attachments. Interactive input uses submit.
+  const discoveryTask = task;
+  if (!resumeFrom) {
+    const slash = parseSlash(task);
+    const expanded = expandSkillInput(task, { cwd, skills, automatic: activeToolNames.includes("skill"), slash: !slash || !findCommand(slash.name) });
+    if (expanded.errors.length) { process.stderr.write(expanded.errors.join("\n") + "\n"); return 2; }
+    task = expanded.task;
   }
 
   // A one-shot task or a print against the hosted endpoint needs the key as
@@ -961,6 +1070,7 @@ async function main(): Promise<number> {
       hooks,
       skills,
       policy: policyForAgent({ root: cwd, tools: activeToolNames, readOnly: false }),
+      callMcp: (server, method, values, signal, observe) => mcp.invoke(server, method, values, { scopeId: "root", signal, observe }),
     });
     try {
       const result = await runLoop({
@@ -968,6 +1078,9 @@ async function main(): Promise<number> {
         tools: activeTools,
         system: (ch) => buildSystemPrompt({ mode: "chat", channel: ch, tools: activeTools, skills, agents, ...(projectNotes !== undefined ? { projectNotes } : {}), cwd }),
         userTask: task,
+        context: mcpConnected ? await mcp.prepare(discoveryTask, abort.signal) : undefined,
+        replyRecovery: (content) => mcp.replyRecovery(content),
+        signal: abort.signal,
         executor,
         emit: (e) => {
           if (e.type === "notice" && e.level === "error") process.stderr.write(`${e.text}\n`);
@@ -1042,7 +1155,7 @@ async function main(): Promise<number> {
   }
   // Attach the key handler before the loop starts, so the shortcut the status
   // line offers exists for the whole session.
-  screen.attachInput();
+  screen.attachInput(process.stdin, undefined, stop);
 
   const rootSink = journal.sinkFor(rootScope);
   const emit = (e: LoopEvent) => {
@@ -1059,6 +1172,7 @@ async function main(): Promise<number> {
     hooks,
     skills,
     policy: policyForAgent({ root: cwd, tools: activeToolNames, readOnly: false }),
+    callMcp: (server, method, values, signal, observe) => mcp.invoke(server, method, values, { scopeId: "root", signal, observe }),
     onHook: (event, label, ok) => emit({ type: "hook", event, label, ok }),
     runAgent: async (name, prompt) => {
       const def = agents.get(name);
@@ -1087,6 +1201,7 @@ async function main(): Promise<number> {
         const childExecutor = new ToolExecutor({
           cwd,
           skills,
+          callMcp: (server, method, values, signal, observe) => mcp.invoke(server, method, values, { scopeId: childScope.scopeId, signal, observe }),
           policy: policyForAgent({
             root: cwd,
             tools: CORE_TOOL_NAMES.slice(0, def.toolCount),
@@ -1110,11 +1225,15 @@ async function main(): Promise<number> {
               buildAgentPrompt({
                 name: def.name,
                 instructions: def.instructions,
+                skills,
                 tools: def.tools,
                 channel: ch,
                 cwd,
               }),
             userTask: prompt,
+            context: def.toolCount >= CORE_TOOLS.length && !def.readOnly ? await mcp.prepare(prompt, abort.signal, childScope.scopeId) : undefined,
+            replyRecovery: def.toolCount >= CORE_TOOLS.length && !def.readOnly ? (content) => mcp.replyRecovery(content) : undefined,
+            signal: abort.signal,
             executor: childExecutor,
             // Subagent events are journalled under their own scope but not
             // painted: the parent's screen shows the queue, not the child's
@@ -1146,20 +1265,28 @@ async function main(): Promise<number> {
           };
         } finally {
           childExecutor.close();
+          mcp.clearScope(childScope.scopeId);
         }
       }, (out) => !out.ok);
     },
   });
 
+  // A signal leaves the root journal as the process exit it replaced did: no
+  // later checkpoint clears a tool that was cut off, and no scope_end marks the
+  // run finished, so `motif resume` still decides from the last safe point.
+  const rootCheckpoint = journal.checkpointFor(rootScope);
   try {
     const result = await runLoop({
       transport,
       tools: activeTools,
       system: systemFor,
       userTask: task,
+      context: mcpConnected ? await mcp.prepare(discoveryTask, abort.signal) : undefined,
+      replyRecovery: (content) => mcp.replyRecovery(content),
+      signal: abort.signal,
       executor,
       emit,
-      onCheckpoint: journal.checkpointFor(rootScope),
+      onCheckpoint: (state) => { if (!abort.signal.aborted) rootCheckpoint(state); },
       lifecycle: async (event, context) => {
         const outcomes = await runHooks(hooks, {
           event,
@@ -1180,7 +1307,7 @@ async function main(): Promise<number> {
       // and the screen ignores them there.
       stream: Boolean(process.stdout.isTTY),
     });
-    journal.record(rootScope, {
+    if (!(result.reason === "aborted" && abort.signal.aborted)) journal.record(rootScope, {
       t: "scope_end",
       result: {
         endReason: result.reason,
@@ -1196,6 +1323,10 @@ async function main(): Promise<number> {
     executor.close();
     screen.finish();
   }
+  } finally {
+    try { await mcp.close(); }
+    finally { for (const { signal, handler } of signalHandlers) process.off(signal, handler); }
+  }
 }
 
 // Before anything opens a socket. Node's default HTTP idle timeouts are set for
@@ -1209,7 +1340,7 @@ async function main(): Promise<number> {
 // and the first request would otherwise race it.
 relaxNodeHttpTimeouts()
   .then(() => main())
-  .then((code) => process.exit(code))
+  .then((code) => process.exit(process.exitCode ?? code))
   .catch((err: unknown) => {
     // Bad usage gets one line and exit 2; anything else is a real failure and
     // keeps its message. Neither prints a stack — a stack trace tells a user

@@ -1,6 +1,6 @@
 {
   "name": "motifcode",
-  "version": "0.3.4",
+  "version": "0.4.0",
   "type": "module",
   "description": "Unofficial coding agent harness built for Motif-3: a Claude Code-style terminal session over the hosted endpoint",
   "keywords": [
@@ -26,7 +26,7 @@
   "author": "Taewoo Park",
   "license": "Apache-2.0",
   "engines": {
-    "node": ">=20"
+    "node": ">=20.3.0"
   },
   "bin": {
     "motif": "dist/motif.js",
@@ -38,13 +38,15 @@
   },
   "files": [
     "dist/motif.js",
-    "dist/build-info.json"
+    "dist/build-info.json",
+    "builtin-plugins"
   ],
   "publishConfig": {
     "access": "public"
   },
   "dependencies": {},
   "devDependencies": {
+    "@motifcode/mcp": "workspace:*",
     "@motifcode/agents": "workspace:*",
     "@motifcode/core": "workspace:*",
     "@motifcode/eval": "workspace:*",

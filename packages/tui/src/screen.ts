@@ -93,15 +93,15 @@ export interface ComposerView {
    * shows, the draft is kept but not painted.
    */
   confirm?: { title: string; lines: string[]; choices: string[] };
+  /** Width-aware management panel using the same box and selection styling. */
+  panel?: PanelView | ((width: number, height: number) => { title: string; lines: string[]; choices: string[]; hint?: string });
   /**
    * A secret being typed — an API key. The title and lines sit above the
    * input, the draft is painted as one `•` per character, and no menu opens.
    */
-  secret?: { title: string; lines: string[]; prompt: string };
+  secret?: { title: string; lines: string[]; prompt: string; masked?: boolean };
   /** The menu under the input: the matching items, which is selected, and their prefix (`/` or `@`). */
   menu?: { items: MenuItem[]; selected: number; prefix?: string };
-  /** Settings and session readings, temporarily replacing the draft. */
-  panel?: PanelView;
 }
 
 export type KeyHandler = (key: Key) => void;
@@ -331,7 +331,7 @@ export class Screen {
    * A terminal left in raw mode after a crash needs `reset` to type in again,
    * which is a worse outcome than never having offered the shortcut.
    */
-  attachInput(stdin: NodeJS.ReadStream = process.stdin, handler?: KeyHandler): void {
+  attachInput(stdin: NodeJS.ReadStream = process.stdin, handler?: KeyHandler, onSignal?: (signal: NodeJS.Signals) => void): void {
     if (!this.interactive || !stdin.isTTY || this.detachInput) return;
 
     const decoder = new KeyDecoder();
@@ -378,7 +378,9 @@ export class Screen {
     };
     const onFatal = (signal: NodeJS.Signals) => (): void => {
       this.finish();
-      process.kill(process.pid, signal);
+      // The owner may need to await external tool shutdown before exiting.
+      if (onSignal) onSignal(signal);
+      else process.kill(process.pid, signal);
     };
     const handlers: [NodeJS.Signals, () => void][] = [
       ["SIGINT", onFatal("SIGINT")],
@@ -684,7 +686,7 @@ export class Screen {
 
     const beforeComposer = rows.length;
     let cursor: { row: number; col: number } | null = null;
-    if (this.composer?.panel && !this.composer.confirm && !this.composer.secret) {
+    if (this.composer?.panel && typeof this.composer.panel !== "function" && !this.composer.confirm && !this.composer.secret) {
       const block = renderPanel(this.composer.panel, { width, height: Math.max(0, this.rowCount() - 1 - Number(this.working)) });
       if (block.cursor) cursor = { row: rows.length + block.cursor.row, col: block.cursor.col };
       rows.push(...block.rows);
@@ -692,8 +694,8 @@ export class Screen {
       const block = this.composerRows(this.composer, width);
       cursor = { row: rows.length + block.cursorRow, col: block.cursorCol };
       rows.push(...block.rows);
-      rows.push(...this.hintRows(width));
-      if (this.shortcutsOpen) {
+      rows.push(...this.hintRows(width, block.hint));
+      if (this.shortcutsOpen && !this.composer.panel) {
         for (const s of SHORTCUTS) {
           rows.push(...this.rows(`  ${truncateToWidth(s, Math.max(1, width - 2))}`, (t) => paint(t, style.faint)));
         }
@@ -759,7 +761,7 @@ export class Screen {
    * Every box row is exactly the terminal width, so the right edge lines up
    * and nothing wraps. Returns where the cursor belongs among the rows.
    */
-  private composerRows(view: ComposerView, width: number): { rows: Row[]; cursorRow: number; cursorCol: number } {
+  private composerRows(view: ComposerView, width: number): { rows: Row[]; cursorRow: number; cursorCol: number; hint?: string } {
     const boxed = width >= 8;
     const inner = boxed ? width - 4 : Math.max(1, width);
     // Box drawing is Ambiguous-width in Unicode. ASCII decorations preserve
@@ -770,7 +772,7 @@ export class Screen {
     const right = boxed ? ` ${side}` : "";
     const edge = boxed ? 2 : 0;
     // The box takes four columns: its edges and a space inside each.
-    const draft = view.secret
+    const draft = view.secret && view.secret.masked !== false
       ? { text: "•".repeat([...view.draft.text].length), cursor: view.draft.cursor }
       : view.draft;
     const render = renderComposer(draft, {
@@ -784,13 +786,14 @@ export class Screen {
       width: inner + 4,
     });
     const rows: Row[] = boxed ? [border("╭", "╮")] : [];
-    if (view.confirm) {
+    const panel = view.confirm ?? (!view.secret && typeof view.panel === "function" ? view.panel(width, this.rowCount()) : undefined);
+    if (panel) {
       const fit = (s: string): string => {
         const t = truncateToWidth(s, inner);
         return `${t}${" ".repeat(Math.max(0, inner - displayWidth(t)))}`;
       };
-      const body = [view.confirm.title, ...view.confirm.lines.map((l) => `  ${l}`), "", ...view.confirm.choices];
-      const firstChoice = body.length - view.confirm.choices.length;
+      const body = [panel.title, ...panel.lines.map((l) => `  ${l}`), "", ...panel.choices];
+      const firstChoice = body.length - panel.choices.length;
       for (const [i, l] of body.entries()) {
         const painted =
           i === 0
@@ -804,8 +807,8 @@ export class Screen {
       }
       if (boxed) rows.push(border("╰", "╯"));
       // The cursor rests on the selected choice; there is nothing to type.
-      const selectedLine = view.confirm.choices.findIndex((c) => c.startsWith("❯"));
-      return { rows, cursorRow: Number(boxed) + firstChoice + Math.max(0, selectedLine), cursorCol: edge };
+      const selectedLine = panel.choices.findIndex((c) => c.startsWith("❯"));
+      return { rows, cursorRow: Number(boxed) + firstChoice + Math.max(0, selectedLine), cursorCol: edge, ...("hint" in panel ? { hint: panel.hint as string } : {}) };
     }
     let header = 0;
     if (view.secret) {
@@ -863,8 +866,9 @@ export class Screen {
    * the right. The right side goes first when the two do not fit, and the
    * hint is clipped only when it cannot fit by itself.
    */
-  private hintRows(width: number): Row[] {
-    const left = this.hint === "" ? "? for shortcuts" : this.hint;
+  private hintRows(width: number, override?: string): Row[] {
+    const hint = override ?? this.hint;
+    const left = hint === "" ? "? for shortcuts" : hint;
     const parts = compactReadings(this.state.instruments);
     const rightPlain = [this.label, ...parts.map((r) => `${r.label} ${r.value}`)].filter(Boolean).join(" · ");
     const rightPainted = NO_COLOR

@@ -1,0 +1,19 @@
+{
+  "name": "@motifcode/mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "MCP connections and a bounded tool interface for Motif-3",
+  "main": "./src/index.ts",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@modelcontextprotocol/client": "2.1.0",
+    "ajv": "8.17.1",
+    "ajv-formats": "3.0.1",
+    "smol-toml": "1.6.0"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/server": "2.1.0",
+    "@modelcontextprotocol/sdk": "1.30.1"
+  }
+}

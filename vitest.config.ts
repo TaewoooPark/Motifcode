@@ -9,6 +9,7 @@ export default defineConfig({
   // so there is exactly one place to look when a workspace import fails.
   resolve: {
     alias: {
+      "@motifcode/mcp": pkg("mcp"),
       "@motifcode/protocol": pkg("protocol"),
       "@motifcode/tools": pkg("tools"),
       "@motifcode/core": pkg("core"),

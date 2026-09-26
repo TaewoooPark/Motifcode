@@ -83,7 +83,13 @@ function paramFindings(name: string, params: JsonSchema | undefined): Finding[] 
       out.push({ tool: name, rule: "param-type", message: `parameter "${k}" has no type` });
       continue;
     }
-    if (schema.type === "object") {
+    // MCP alone carries a remote schema's arguments. The host validates those
+    // against the original JSON Schema before dispatch. Motif-3 trials found
+    // extra escaping failures when this object was wrapped in a JSON string.
+    const mcpArguments = name === "mcp" && k === "args"
+      && keys.length === 3 && keys.includes("server") && keys.includes("method")
+      && props.server?.type === "string" && props.method?.type === "string";
+    if (schema.type === "object" && !mcpArguments) {
       out.push({
         tool: name,
         rule: "no-nested-objects",

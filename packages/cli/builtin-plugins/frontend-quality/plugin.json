@@ -1,0 +1,6 @@
+{
+  "name": "frontend-quality",
+  "description": "Build coherent, accessible interfaces and maintainable React components, then verify them in the browser.",
+  "version": "1.0.0",
+  "mcpPresets": ["context7", "playwright"]
+}

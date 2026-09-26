@@ -24,7 +24,7 @@ describe("plugins", () => {
     const cwd = mkdtempSync(join(tmpdir(), "motif-cwd-"));
     plugin(home, "mine", { skill: true });
     plugin(cwd, "theirs", { agent: true });
-    const loaded = loadPlugins({ cwd, home });
+    const loaded = loadPlugins({ cwd, home, builtinDirectory: false });
     expect(loaded.plugins.map((p) => [p.name, p.source])).toEqual([["mine", "user"], ["theirs", "project"]]);
     expect(loaded.skills.map((s) => s.name)).toEqual(["deploy"]);
     expect(loaded.agents.map((a) => a.name)).toEqual(["auditor"]);
@@ -39,7 +39,7 @@ describe("plugins", () => {
     const home = mkdtempSync(join(tmpdir(), "motif-home-"));
     const cwd = mkdtempSync(join(tmpdir(), "motif-cwd-"));
     plugin(cwd, "broken", { badManifest: true });
-    const loaded = loadPlugins({ cwd, home });
+    const loaded = loadPlugins({ cwd, home, builtinDirectory: false });
     expect(loaded.plugins).toEqual([]);
     expect(loaded.problems[0]).toContain("needs a name");
     const lines = describePlugins(loaded);
@@ -48,7 +48,7 @@ describe("plugins", () => {
   });
 
   it("says so when there are none", () => {
-    const loaded = loadPlugins({ cwd: mkdtempSync(join(tmpdir(), "a-")), home: mkdtempSync(join(tmpdir(), "b-")) });
+    const loaded = loadPlugins({ cwd: mkdtempSync(join(tmpdir(), "a-")), home: mkdtempSync(join(tmpdir(), "b-")), builtinDirectory: false });
     expect(describePlugins(loaded)[0]).toContain("no plugins");
   });
 });

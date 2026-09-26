@@ -65,6 +65,8 @@ export interface ChannelParse {
    * the two want different repair prompts.
    */
   invalidArguments?: string[];
+  /** Native wire calls, for faithful serialization of MCP's nested arguments. */
+  structuredCalls?: ToolCall[];
 }
 
 export interface Channel {
@@ -136,6 +138,7 @@ function actionsFromToolCalls(structured: ToolCall[], text: string): ChannelPars
   }
   return {
     actions,
+    structuredCalls: structured,
     content: text.trim(),
     unrecoverable: [],
     truncated: false,

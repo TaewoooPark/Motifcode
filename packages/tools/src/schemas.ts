@@ -142,7 +142,10 @@ export const CORE_TOOLS: readonly Tool[] = Object.freeze([
         "Load a skill's full instructions by name. Skills extend what you can do without adding tools — which is deliberate, because the tool list is frozen for the session.",
       parameters: {
         type: "object",
-        properties: { name: { type: "string", description: "Skill name from the index." } },
+        properties: {
+          name: { type: "string", description: "Skill name from the index." },
+          arguments: { type: "string", description: "Optional task arguments. Quoted values stay together for positional placeholders." },
+        },
         required: ["name"],
         additionalProperties: false,
       },
@@ -170,15 +173,15 @@ export const CORE_TOOLS: readonly Tool[] = Object.freeze([
     function: {
       name: "mcp",
       description:
-        "Call a method on a connected MCP server. One proxy tool rather than one tool per server method, so the whole MCP ecosystem is reachable without the tool list — and therefore the prompt prefix — changing.",
+        "Call an MCP tool using its exact server, tool name and argument schema. Use server __motif_host__ for search, describe, read_result or find_result. Remote tool schemas arrive in the MCP context or search results; do not guess them.",
       parameters: {
         type: "object",
         properties: {
-          server: { type: "string", description: "Server name from the connected list." },
-          method: { type: "string", description: "Method to call." },
-          args: { type: "string", description: "JSON object of arguments, as a string." },
+          server: { type: "string", description: "Configured server ID, or __motif_host__ for local discovery and saved results." },
+          method: { type: "string", description: "Exact tool name from its schema, not a JSON-RPC method." },
+          args: { type: "object", description: "Arguments as an object matching the selected tool's original JSON Schema. Use {} for no arguments." },
         },
-        required: ["server", "method"],
+        required: ["server", "method", "args"],
         additionalProperties: false,
       },
     },

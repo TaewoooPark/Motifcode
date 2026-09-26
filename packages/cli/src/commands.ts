@@ -72,6 +72,8 @@ export interface CommandContext {
   notes(): string[];
   /** Configured hooks and whether the project's are trusted. */
   hooks(): string[];
+  /** Inspect or control configured MCP connections for this session. */
+  mcp(args: string): Promise<CommandOutput>;
   /** Forget the transcript and start again; the reason is shown. */
   newConversation(reason: string): void;
   /** Change the working directory; returns what happened. */
@@ -337,6 +339,12 @@ export const COMMANDS: readonly SlashCommand[] = [
     name: "hooks",
     description: "show the hooks that run around tools, and whether the project's are trusted",
     run: (ctx) => ok("/hooks", ctx.hooks()),
+  },
+  {
+    name: "mcp",
+    description: "browse built-in MCPs, set up connections and sign in",
+    usage: "[list|install PRESET|connect NAME|disconnect NAME|reconnect NAME|login NAME|logout NAME]",
+    run: (ctx, args) => ctx.mcp(args),
   },
   {
     name: "compact-at",

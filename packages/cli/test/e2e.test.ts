@@ -11,9 +11,9 @@
  * about request bodies, not about anything the harness reports of itself.
  */
 
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -38,8 +38,14 @@ class MockServer {
   readonly urls: string[] = [];
   readonly headers: Record<string, string | string[] | undefined>[] = [];
   port = 0;
+  /** Called when a held turn arrives; that request stays unanswered, like a model still thinking. */
+  onHold?: () => void;
+  private readonly held: ServerResponse[] = [];
 
-  constructor(private readonly script: (turn: number, body: ChatBody) => string) {}
+  constructor(
+    private readonly script: (turn: number, body: ChatBody) => string,
+    private readonly hold: (turn: number) => boolean = () => false,
+  ) {}
 
   async start(): Promise<void> {
     this.server = createServer((req: IncomingMessage, res: ServerResponse) => {
@@ -56,6 +62,7 @@ class MockServer {
           /* recorded as empty; the assertions will say so */
         }
         this.bodies.push(body);
+        if (this.hold(this.bodies.length)) { this.held.push(res); this.onHold?.(); return; }
         const content = this.script(this.bodies.length, body);
         res.writeHead(200, { "content-type": "application/json" });
         res.end(
@@ -72,6 +79,7 @@ class MockServer {
   }
 
   async stop(): Promise<void> {
+    for (const res of this.held) res.destroy();
     await new Promise<void>((r) => this.server.close(() => r()));
   }
 
@@ -90,7 +98,7 @@ interface RunResult {
   stderr: string;
 }
 
-function runCli(argv: string[], cwd: string, env: Record<string, string> = {}): Promise<RunResult> {
+function runCli(argv: string[], cwd: string, env: Record<string, string> = {}, onSpawn?: (child: ChildProcess) => void): Promise<RunResult> {
   // The key is stripped from the inherited environment, and HOME points at an
   // empty directory, so neither a developer's own MOTIF_API_KEY nor their
   // ~/.motif/.env can make the unauthenticated cases pass by accident.
@@ -103,6 +111,7 @@ function runCli(argv: string[], cwd: string, env: Record<string, string> = {}): 
       [join(REPO, "node_modules/tsx/dist/cli.mjs"), MAIN, ...argv],
       { cwd, env: { ...inherited, HOME: home, NO_COLOR: "1", ...env }, stdio: ["ignore", "pipe", "pipe"] },
     );
+    onSpawn?.(child);
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (c: Buffer) => (stdout += c.toString()));
@@ -277,6 +286,218 @@ describe("cli process end to end", () => {
     expect(messages.filter((m) => m.role === "user" && m.content === "continue the task")).toHaveLength(1);
     expect(messages[2]!.tool_calls).toMatchObject([{ function: { name: "read" } }]);
     expect(messages[3]!.content).toContain("RESUME_MARKER");
+  }, 30_000);
+
+  it("keeps a run stopped by a signal resumable, as a killed process was", async () => {
+    if (process.platform === "win32") return;
+    writeFileSync(join(dir, "resume-marker.txt"), "RESUME_MARKER");
+    server = new MockServer(
+      (turn) => (turn === 1 ? toolCall("read", { path: "resume-marker.txt" }) : "</think>Resumed after the signal."),
+      (turn) => turn === 2,
+    );
+    await server.start();
+    let child: ChildProcess | undefined;
+    server.onHold = () => child?.kill("SIGINT");
+    const stopped = await runCli(["continue the task", "--endpoint", server.endpoint, "--no-hero"], dir, {}, (c) => (child = c));
+    expect(stopped.code, `${stopped.stdout}\n${stopped.stderr}`).toBe(130);
+
+    const sessions = join(dir, ".motif", "sessions");
+    const journal = join(sessions, readdirSync(sessions)[0]!);
+    const resumed = await runCli(["resume", journal, "--print", "--endpoint", server.endpoint], dir);
+    expect(resumed.code, `${resumed.stdout}\n${resumed.stderr}`).toBe(0);
+    expect(resumed.stdout).toBe("Resumed after the signal.\n");
+    const messages = server.bodies[2]!.messages;
+    expect(messages.map((m) => m.role)).toEqual(["system", "user", "assistant", "tool"]);
+    expect(messages[3]!.content).toContain("RESUME_MARKER");
+  }, 30_000);
+
+  it("still refuses to resume a run whose command a signal cut off", async () => {
+    if (process.platform === "win32") return;
+    let child: ChildProcess | undefined;
+    server = new MockServer(() => {
+      // Signal while the command runs, after its in-flight checkpoint is written.
+      setTimeout(() => child?.kill("SIGINT"), 2_000);
+      return toolCall("bash", { command: "sleep 20" });
+    });
+    await server.start();
+    const stopped = await runCli(["run the command", "--endpoint", server.endpoint, "--no-hero"], dir, {}, (c) => (child = c));
+    expect(stopped.code, `${stopped.stdout}\n${stopped.stderr}`).toBe(130);
+
+    const sessions = join(dir, ".motif", "sessions");
+    const journal = join(sessions, readdirSync(sessions)[0]!);
+    const resumed = await runCli(["resume", journal, "--print", "--endpoint", server.endpoint], dir);
+    expect(resumed.code, `${resumed.stdout}\n${resumed.stderr}`).toBe(2);
+    expect(resumed.stderr).toContain("the run stopped while `bash`");
+    expect(server.bodies).toHaveLength(1);
+  }, 30_000);
+
+  it("resumes with the tools and prompt it was recorded with after an MCP server is added", async () => {
+    writeFileSync(join(dir, "resume-marker.txt"), "RESUME_MARKER");
+    server = new MockServer((turn) => (turn === 1 ? toolCall("read", { path: "resume-marker.txt" }) : "</think>Resumed without MCP."));
+    await server.start();
+    expect((await runCli(["continue the task", "--max-turns", "1", "--endpoint", server.endpoint, "--no-hero"], dir)).code).toBe(1);
+    const sessions = join(dir, ".motif", "sessions");
+    const journal = join(sessions, readdirSync(sessions)[0]!);
+    writeFileSync(journal, readFileSync(journal, "utf8").trimEnd().split("\n").filter((line) => JSON.parse(line).record?.t !== "scope_end").join("\n") + "\n");
+    // Enabled after the run, and named like a preset that gates a bundled workflow skill.
+    const home = mkdtempSync(join(tmpdir(), "motif-home-"));
+    mkdirSync(join(home, ".motif"));
+    writeFileSync(join(home, ".motif", "mcp.json"), JSON.stringify({ version: 1, servers: { playwright: { enabled: true, transport: "stdio",
+      command: process.execPath, args: [join(REPO, "packages/mcp/test/fixtures/client-legacy.mjs"), join(home, "lab.ndjson")] } } }));
+
+    const resumed = await runCli(["resume", journal, "--print", "--endpoint", server.endpoint], dir, { HOME: home });
+    expect(resumed.code, `${resumed.stdout}\n${resumed.stderr}`).toBe(0);
+    expect(resumed.stdout).toBe("Resumed without MCP.\n");
+    const [recorded, continued] = [server.bodies[0]!, server.bodies[1]!];
+    expect(continued.tools?.map((tool) => tool.function?.name)).toEqual(recorded.tools?.map((tool) => tool.function?.name));
+    expect(continued.tools?.map((tool) => tool.function?.name)).not.toContain("mcp");
+    expect(continued.messages[0]!.content).toBe(recorded.messages[0]!.content);
+    expect(continued.messages.map((m) => m.role)).toEqual(["system", "user", "assistant", "tool"]);
+  }, 30_000);
+
+  it.each([true, false])("attaches the current MCP setup skill in the actual CLI before its first request (print=%s)", async print => {
+    const skillDir = join(dir, ".motif", "skills", "mcp-setup"); mkdirSync(skillDir, { recursive: true });
+    writeFileSync(join(skillDir, "SKILL.md"), "---\nname: mcp-setup\ndescription: local setup\nbudget: 30\n---\nLOCAL-MCP-SETUP-POLICY");
+    server = new MockServer(turn => toolCall("done", { summary: "Setup guidance received.", ...(turn > 1 ? { confirm: true } : {}) })); await server.start();
+    const task = "https://example.test/mcp MCP 연결하고 연결되는지 확인해줘";
+    const result = await runCli([task, ...(print ? ["--print"] : []), "--endpoint", server.endpoint, "--no-hero"], dir);
+    expect(result.code, result.stderr).toBe(0);
+    const first = server.bodies[0]!;
+    expect(first.messages[1]!.content).toContain(`${task}\n\n<skill name="mcp-setup">`);
+    expect(first.messages[1]!.content).toContain("Skill directory:");
+    expect(first.messages[1]!.content).toContain("LOCAL-MCP-SETUP-POLICY\n</skill>");
+    expect(first.messages[0]!.content).not.toContain("LOCAL-MCP-SETUP-POLICY");
+    expect(first.messages[0]!.content).not.toContain("first call the `skill` tool");
+    expect(first.tools?.some(tool => tool.function?.name === "mcp")).toBe(false);
+    for (const body of server.bodies) {
+      expect(body.tools).toEqual(first.tools);
+      expect(body.messages[0]).toEqual(first.messages[0]);
+    }
+  }, 30_000);
+
+  it.each([true, false])("routes a linked skill installation on the actual CLI wire (print=%s)", async print => {
+    const skillDir = join(dir, ".motif/skills/skill-setup"); mkdirSync(skillDir, { recursive: true });
+    writeFileSync(join(skillDir, "SKILL.md"), "---\nname: skill-setup\ndescription: project setup policy\nbudget: 30\n---\nCLI-SKILL-INSTALL-POLICY");
+    server = new MockServer(turn => toolCall("done", { summary: "Instructions received.", ...(turn > 1 ? { confirm: true } : {}) })); await server.start();
+    const task = "https://github.com/anthropics/skills/tree/main/skills/mcp-builder 이 MCP 스킬을 이 프로젝트에 설치해줘. 설치 결과를 확인해서 알려줘.";
+    const result = await runCli([task, ...(print ? ["--print"] : []), "--endpoint", server.endpoint, "--no-hero"], dir);
+    expect(result.code, result.stderr).toBe(0);
+    const first = server.bodies[0]!;
+    expect(first.messages[1]!.content).toContain(`${task}\n\n<skill name="skill-setup">`);
+    expect(first.messages[1]!.content).toContain("CLI-SKILL-INSTALL-POLICY\n</skill>");
+    expect(first.messages[1]!.content?.match(/<skill name="skill-setup">/g)).toHaveLength(1);
+    expect(first.messages[1]!.content).not.toContain('<skill name="mcp-setup">');
+    expect(first.messages[0]!.content).not.toContain("CLI-SKILL-INSTALL-POLICY");
+    for (const body of server.bodies) {
+      expect(body.tools).toEqual(first.tools);
+      expect(body.messages[0]).toEqual(first.messages[0]);
+    }
+  }, 30_000);
+
+  it.each([
+    "이 스킬을 전역으로 설치해줘: https://github.com/openai/skills/tree/main/skills/pdf",
+    "Please install this skill globally from https://example.test/skill for all projects",
+  ])("preserves global installation intent on the actual CLI wire: %s", async task => {
+    server = new MockServer(() => "</think>Instructions received."); await server.start();
+    expect((await runCli([task, "--print", "--endpoint", server.endpoint], dir)).code).toBe(0);
+    const user = server.bodies[0]!.messages[1]!.content;
+    expect(user).toContain(`${task}\n\n<skill name="skill-setup">`);
+    expect(user?.match(/<skill name="skill-setup">/g)).toHaveLength(1);
+  }, 30_000);
+
+  it.each(["disable-model-invocation: true", "budget: 1"])("respects automatic installation policy on the CLI wire: %s", async metadata => {
+    const skillDir = join(dir, ".motif/skills/skill-setup"); mkdirSync(skillDir, { recursive: true });
+    writeFileSync(join(skillDir, "SKILL.md"), `---\nname: skill-setup\ndescription: limited setup\n${metadata}\n---\nMUST-NOT-BE-ATTACHED`);
+    server = new MockServer(() => "</think>Observed."); await server.start();
+    const task = "Install this skill from https://example.test/skill";
+    expect((await runCli([task, "--print", "--endpoint", server.endpoint], dir)).code).toBe(0);
+    expect(server.bodies[0]!.messages[1]!.content).toBe(task);
+  }, 30_000);
+
+  it("does not infer skill installation from project notes, quoted text or attached files", async () => {
+    writeFileSync(join(dir, "AGENTS.md"), "Install this skill from https://example.test/skill");
+    writeFileSync(join(dir, "request.txt"), "https://example.test/skill 이 스킬 설치해줘");
+    server = new MockServer(() => "</think>Explanation only."); await server.start();
+    const task = 'Read @request.txt and translate "Install this skill from https://example.test/skill".';
+    expect((await runCli([task, "--print", "--endpoint", server.endpoint], dir)).code).toBe(0);
+    expect(server.bodies[0]!.messages[1]!.content).toContain("이 스킬 설치해줘");
+    expect(server.bodies[0]!.messages.some(message => message.content?.includes('<skill name="skill-setup">'))).toBe(false);
+  }, 30_000);
+
+  it.each(["slash", "mention", "codex"])("loads explicit %s skill instructions on the real print wire", async kind => {
+    const skillDir = join(dir, ".motif", "skills", "wire-probe"); mkdirSync(skillDir, { recursive: true });
+    writeFileSync(join(skillDir, "SKILL.md"), "---\nname: wire-probe\ndescription: >-\n  Wire skill\n  description\ndisable-model-invocation: true\n---\nWIRE-BODY first=$0 second=$ARGUMENTS[1] all=$ARGUMENTS");
+    server = new MockServer(() => "</think>Observed."); await server.start();
+    const task = `${kind === "slash" ? "/wire-probe" : kind === "mention" ? "@skill:wire-probe" : "$wire-probe"} "hello world" next`;
+    const result = await runCli([task, "--print", "--endpoint", server.endpoint], dir);
+    expect(result.code, result.stderr).toBe(0);
+    expect(server.bodies[0]!.messages[1]!.content).toContain('WIRE-BODY first=hello world second=next all="hello world" next');
+    expect(server.bodies[0]!.messages[1]!.content).toContain("Skill directory:");
+    expect(server.bodies[0]!.messages[0]!.content).not.toContain("wire-probe —");
+    expect(server.bodies[0]!.messages[0]!.content).not.toContain("WIRE-BODY");
+  }, 30_000);
+
+  it("keeps the complete long skill in the next real HTTP request without changing the prefix", async () => {
+    const skillDir = join(dir, ".motif", "skills", "long-wire"); mkdirSync(skillDir, { recursive: true });
+    const body = "START-SENTINEL\n" + "a".repeat(16000) + "\nMIDDLE-SENTINEL\n" + "b".repeat(16000) + "\nEND-SENTINEL";
+    writeFileSync(join(skillDir,"SKILL.md"), `---\nname: long-wire\ndescription: long instructions\n---\n${body}`);
+    server = new MockServer(turn => turn === 1 ? toolCall("skill",{name:"long-wire"}) : "</think>Loaded."); await server.start();
+    expect((await runCli(["Use long-wire", "--print", "--endpoint",server.endpoint],dir)).code).toBe(0);
+    expect(server.bodies).toHaveLength(2);
+    const tool = server.bodies[1]!.messages.find(m=>m.role === "tool");
+    expect(tool?.content).toContain(body);
+    expect(server.bodies[1]!.tools).toEqual(server.bodies[0]!.tools);
+    expect(server.bodies[1]!.messages[0]).toEqual(server.bodies[0]!.messages[0]);
+  }, 30_000);
+
+  it("rejects explicit non-user-invocable skills before sending any HTTP request", async () => {
+    const skillDir=join(dir,".motif/skills/hidden");mkdirSync(skillDir,{recursive:true});
+    writeFileSync(join(skillDir,"SKILL.md"),"---\nname: hidden\ndescription: background\nuser-invocable: false\n---\nHIDDEN-BODY");
+    server=new MockServer(()=>"</think>Must not run");await server.start();
+    const result=await runCli(["/hidden", "--print", "--endpoint",server.endpoint],dir);
+    expect(result.code).toBe(2);expect(result.stderr).toContain("user-invocable: false");expect(server.bodies).toHaveLength(0);
+  },30_000);
+
+  it("restores a manually invoked user skill's resource access when resuming a real CLI process", async () => {
+    const home = mkdtempSync(join(tmpdir(), "motif-skill-resume-home-"));
+    const skillDir=join(home,".motif/skills/resume-skill");mkdirSync(skillDir,{recursive:true});
+    writeFileSync(join(skillDir,"SKILL.md"),"---\nname: resume-skill\ndescription: manual resource reader\ndisable-model-invocation: true\n---\nRead reference.md from the skill directory.");
+    const resource=join(skillDir,"reference.md");writeFileSync(resource,"RESUMED-RESOURCE-OBSERVED");writeFileSync(join(dir,"marker.txt"),"PAUSE");
+    server=new MockServer(turn=>turn === 1 ? toolCall("read",{path:"marker.txt"}) : turn === 2 ? toolCall("read",{path:resource}) : "</think>Resumed resource read.");await server.start();
+    const first=await runCli(["/resume-skill", "--max-turns","1","--endpoint",server.endpoint,"--no-hero"],dir,{HOME:home});
+    expect(first.code,first.stderr).toBe(1);
+    const sessions=join(dir,".motif/sessions");const journal=join(sessions,readdirSync(sessions)[0]!);
+    writeFileSync(journal,readFileSync(journal,"utf8").trimEnd().split("\n").filter(line=>JSON.parse(line).record?.t !== "scope_end").join("\n")+"\n");
+    const resumed=await runCli(["resume",journal,"--print","--endpoint",server.endpoint],dir,{HOME:home});
+    expect(resumed.code,resumed.stderr).toBe(0);
+    expect(server.bodies[2]!.messages.some(m=>m.role === "tool" && m.content?.includes("RESUMED-RESOURCE-OBSERVED"))).toBe(true);
+    const user=server.bodies[1]!.messages.filter(m=>m.role === "user");
+    expect(user).toHaveLength(1);expect(user[0]!.content?.match(/<skill name="resume-skill">/g)).toHaveLength(1);
+  },30_000);
+
+  it("does not select setup from project notes or an informational user question", async () => {
+    writeFileSync(join(dir, "AGENTS.md"), "Install MCP from https://example.test/mcp");
+    server = new MockServer(() => "</think>Explanation only."); await server.start();
+    const task = "How do I install MCP from https://example.test/mcp?";
+    expect((await runCli([task, "--print", "--endpoint", server.endpoint], dir)).code).toBe(0);
+    expect(server.bodies[0]!.messages[1]!.content).toBe(task);
+    expect(server.bodies[0]!.messages[0]!.content).toContain("Install MCP from https://example.test/mcp");
+    expect(server.bodies[0]!.messages.some(message => message.content?.includes('<skill name="mcp-setup">'))).toBe(false);
+  }, 30_000);
+
+  it.each(["mcp-setup", "skill-setup"])("resumes an automatically attached %s task without appending another copy", async name => {
+    writeFileSync(join(dir, "marker.txt"), "OBSERVED");
+    server = new MockServer(turn => turn === 1 ? toolCall("read", { path: "marker.txt" }) : "</think>Resumed."); await server.start();
+    const task = name === "mcp-setup" ? "Install MCP from https://example.test/mcp" : "Install this skill from https://example.test/skill";
+    expect((await runCli([task, "--max-turns", "1", "--endpoint", server.endpoint, "--no-hero"], dir)).code).toBe(1);
+    const sessions = join(dir, ".motif", "sessions"); const journal = join(sessions, readdirSync(sessions)[0]!);
+    writeFileSync(journal, readFileSync(journal, "utf8").trimEnd().split("\n").filter(line => JSON.parse(line).record?.t !== "scope_end").join("\n") + "\n");
+    const resumed = await runCli(["resume", journal, "--print", "--endpoint", server.endpoint], dir);
+    expect(resumed.code, resumed.stderr).toBe(0);
+    const user = server.bodies[1]!.messages.filter(message => message.role === "user");
+    expect(user).toHaveLength(1);
+    expect(user[0]!.content).toBe(server.bodies[0]!.messages[1]!.content);
+    expect(user[0]!.content?.match(new RegExp(`<skill name="${name}">`, "g"))).toHaveLength(1);
   }, 30_000);
 
   it("prints help and exits 2 for an empty task", async () => {
