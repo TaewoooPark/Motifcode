@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { closeSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, type Stats } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { configHash, defaultMcpConfigPath, parseMcpConfig, type McpConfig, type McpServerConfig } from "../../mcp/src/config.js";
 
 export interface McpConfigEditOptions { cwd?: string; home?: string; path?: string; trustHash?: string }
@@ -19,6 +20,40 @@ function snapshot(path: string): { text: string; stat: Stats } | undefined {
 }
 function same(before: ReturnType<typeof snapshot>, after: ReturnType<typeof snapshot>): boolean {
   return before === undefined ? after === undefined : after !== undefined && before.stat.dev === after.stat.dev && before.stat.ino === after.stat.ino && before.text === after.text;
+}
+
+type Entry = Record<string, unknown>;
+/**
+ * Write the edit into the document as authored: keep its servers shape (array
+ * or object) and version, copy untouched entries verbatim, and apply only the
+ * fields that actually changed. Parsing adds defaults and resolves relative
+ * cwd values; those normalizations must not be written back.
+ */
+function authoredDocument(text: string | undefined, before: McpServerConfig[], after: McpServerConfig[]): unknown {
+  if (text === undefined) return { version: 1, servers: after };
+  const document = JSON.parse(text) as { version?: unknown; servers: Entry[] | Record<string, Entry> };
+  const objectForm = !Array.isArray(document.servers);
+  const raw = new Map<string, Entry>(objectForm
+    ? Object.entries(document.servers as Record<string, Entry>)
+    : (document.servers as Entry[]).map((entry) => [String(entry.id), entry]));
+  const original = new Map(before.map((server) => [server.id, server as unknown as Entry]));
+  const entries = after.map((server): [string, Entry] => {
+    const next = server as unknown as Entry;
+    const authored = raw.get(server.id); const previous = original.get(server.id);
+    if (!authored || !previous) {
+      const { id: _id, ...rest } = next;
+      return [server.id, objectForm ? rest : next];
+    }
+    if (isDeepStrictEqual(previous, next)) return [server.id, authored];
+    const edited: Entry = structuredClone(authored);
+    for (const key of new Set([...Object.keys(previous), ...Object.keys(next)])) {
+      if (key === "id" || isDeepStrictEqual(previous[key], next[key])) continue;
+      if (next[key] === undefined) delete edited[key]; else edited[key] = structuredClone(next[key]);
+    }
+    return [server.id, edited];
+  });
+  const servers = objectForm ? Object.fromEntries(entries) : entries.map(([, entry]) => entry);
+  return { ...(document.version !== undefined ? { version: document.version } : {}), servers };
 }
 
 /** One synchronous transaction; no server startup, secret expansion, or network access. */
@@ -46,7 +81,7 @@ export function updateMcpConfig(options: McpConfigEditOptions, update: (config: 
     const parsed = before ? parseMcpConfig(before.text, path) : { servers: [], diagnostics: [] };
     if (parsed.diagnostics.some((diagnostic) => diagnostic.severity === "error")) throw new McpConfigEditError("invalid_config", "The existing MCP configuration is invalid; it was not overwritten. Repair it manually first.");
     const changed = update({ servers: structuredClone(parsed.servers) });
-    const text = JSON.stringify({ version: 1, servers: changed.servers }, null, 2) + "\n";
+    const text = JSON.stringify(authoredDocument(before?.text, parsed.servers, changed.servers), null, 2) + "\n";
     if (Buffer.byteLength(text) > LIMIT) throw new McpConfigEditError("config_too_large", "The edited configuration exceeds the 2 MiB limit.");
     const checked = parseMcpConfig(text, path);
     if (checked.diagnostics.some((diagnostic) => diagnostic.severity === "error")) throw new McpConfigEditError("invalid_server", "The server configuration is invalid. Check transport fields, URL, profile, protocol and environment/header references; no changes were saved.");

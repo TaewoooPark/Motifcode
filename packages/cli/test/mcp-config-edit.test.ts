@@ -23,6 +23,19 @@ describe("private atomic MCP configuration edits", () => {
     expect(readdirSync(join(f.home, ".motif"))).toEqual(["mcp.json"]);
   });
 
+  it("keeps an authored object-form document: untouched entries, relative cwd and omitted defaults", () => {
+    const f = fixture(); mkdirSync(join(f.home, ".motif"), { recursive: true });
+    const authored = { servers: { lab: { transport: "stdio", command: "node", args: ["lab.mjs"], cwd: "tools/lab" } } };
+    writeFileSync(f.path, JSON.stringify(authored, null, 2));
+    editMcpConfig({ kind: "add", server }, { home: f.home });
+    const written = JSON.parse(readFileSync(f.path, "utf8"));
+    expect(written.version).toBeUndefined();
+    expect(written.servers.lab).toEqual(authored.servers.lab);
+    expect(written.servers.local).toEqual({ enabled: true, transport: "stdio", command: "node", args: ["server.mjs"], env: { TOKEN: { env: "SOURCE_TOKEN" } } });
+    editMcpConfig({ kind: "disable", id: "lab" }, { home: f.home });
+    expect(JSON.parse(readFileSync(f.path, "utf8")).servers.lab).toEqual({ ...authored.servers.lab, enabled: false });
+  });
+
   it("rejects duplicate names, malformed entries and invalid existing documents without overwrite", () => {
     const f = fixture(); editMcpConfig({ kind: "add", server }, { home: f.home });
     const before = readFileSync(f.path, "utf8");
