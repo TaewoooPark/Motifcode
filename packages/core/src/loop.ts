@@ -113,6 +113,8 @@ export interface LoopOptions {
   history?: Message[];
   /** Append-only runtime data, after the task; never inserted in the system prefix. */
   context?: string;
+  /** Complete runtime data re-appended when a restart drops earlier history. Defaults to `context`. */
+  contextOnRestart?: string;
   executor: Executor;
   emit: EventSink;
   channel?: ChannelId;
@@ -355,6 +357,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
   });
   if (resume) session.restoreMessages(resume.messages);
   if (opts.context) session.append({ role: "user", content: opts.context });
+  const restartContext = opts.contextOnRestart ?? opts.context;
   const budget = resume ? BreakageBudget.restore(resume.breakage) : new BreakageBudget();
   const guard = resume ? LoopGuard.restore(resume.loopGuard) : new LoopGuard();
   const ctx = repairContext(tools);
@@ -487,7 +490,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
         ].join("\n"),
       },
     ]);
-    if (opts.context) session.append({ role: "user", content: opts.context });
+    if (restartContext) session.append({ role: "user", content: restartContext });
     budget.onChannelChange();
     guard.reset();
     pendingDone = null;
@@ -511,7 +514,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
         const turns = [...(opts.compaction.userTurns ?? [])];
         if (turns[turns.length - 1] !== opts.userTask) turns.push(opts.userTask);
         session.restart(system(channel), buildCompactedHistory(turns, summary));
-        if (opts.context) session.append({ role: "user", content: opts.context });
+        if (restartContext) session.append({ role: "user", content: restartContext });
         emit({ type: "compaction", beforeTokens: before, summaryChars: summary.length, summary });
         checkpoint();
       } catch (err) {

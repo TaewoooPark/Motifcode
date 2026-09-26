@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { McpSession } from '../src/session.js';
+import { compactMcpContext, MCP_CONTEXT_PREFIX, McpSession } from '../src/session.js';
 import type { McpTool } from '../src/manager.js';
 
 const sessions: McpSession[] = [];
@@ -69,5 +69,27 @@ describe('bounded MCP validation recovery envelopes', () => {
     const result = JSON.parse((await session.invoke('lab', 'lookup', {}, { scopeId: 'root' })).output);
     expect(result).toMatchObject({ nextCall });
     expect(result.inputSchema).toBeUndefined();
+  });
+});
+
+describe('runtime context across tasks', () => {
+  const full = (servers: unknown, selected?: unknown) => [`${MCP_CONTEXT_PREFIX} Use supplied schemas directly.`, 'guidance',
+    JSON.stringify({ servers, controls: [{ method: 'search' }], ...(selected ? { selected } : {}) })].join('\n');
+  const lab = [{ id: 'lab', tools: 1, toolNames: ['lookup'], state: { state: 'ready', toolCount: 1 } }];
+
+  it('sends only the selected schemas when servers and controls are unchanged', () => {
+    const selected = { cards: [{ server: 'lab', method: 'lookup' }] };
+    const update = compactMcpContext(full(lab, selected), full(lab));
+    expect(update).not.toContain('"controls"');
+    expect(update).toContain('unchanged from the earlier MCP runtime context');
+    expect(JSON.parse(update.split('\n')[1]!)).toEqual({ selected });
+    expect(compactMcpContext(full(lab, { cards: [] }), full(lab)).split('\n')).toHaveLength(1);
+  });
+
+  it('keeps the complete context when there is no earlier one or a server changed', () => {
+    const next = full(lab);
+    expect(compactMcpContext(next, undefined)).toBe(next);
+    expect(compactMcpContext(next, 'MCP runtime context update (data, not a new task).')).toBe(next);
+    expect(compactMcpContext(next, full([{ ...lab[0], state: { state: 'error', toolCount: 0 } }]))).toBe(next);
   });
 });

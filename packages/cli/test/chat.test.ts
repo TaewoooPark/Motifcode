@@ -13,11 +13,13 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentRegistry, BUILTIN_AGENTS } from "@motifcode/agents";
 import { TransportError, type CompletionRequest, type CompletionResponse, type Transport } from "@motifcode/core";
 import { DEFAULT_HOOKS } from "@motifcode/hooks";
 import type { JournalLine } from "@motifcode/journal";
+import { McpSession } from "@motifcode/mcp";
 import { doneBody, toolCallBody } from "@motifcode/replay";
 import { BUILTIN_SKILLS, SkillRegistry, parseSkill } from "@motifcode/skills";
 import { CORE_TOOLS, toolPrefix } from "@motifcode/tools";
@@ -216,6 +218,25 @@ describe("interactive session", () => {
     const other = session(noSkill, { tools: toolPrefix(2), initialTask: raw }); open.push(other);
     await vi.waitFor(() => expect(other.chat.tasksCompleted).toBe(1));
     expect(noSkill.seen[0]!.messages[1]!.content).toBe(raw);
+  });
+
+  it("does not repeat unchanged MCP runtime context in the next task", async () => {
+    const log = join(mkdtempSync(join(tmpdir(), "motif-mcp-context-")), "events.ndjson");
+    const fixture = fileURLToPath(new URL("../../mcp/test/fixtures/client-legacy.mjs", import.meta.url));
+    const mcp = new McpSession({ servers: [{ id: "lab", enabled: true, transport: "stdio", protocol: "legacy", command: process.execPath, args: [fixture, log], startupTimeoutMs: 5_000 }] });
+    const t = new GateTransport([...reply("first"), ...reply("second")]);
+    const s = session(t, { mcp, tools: [...CORE_TOOLS] }); open.push(s);
+    try {
+      s.type("echo the lab text\r");
+      await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1), { timeout: 10_000 });
+      s.type("echo the lab text again\r");
+      await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(2), { timeout: 10_000 });
+      const contexts = t.seen[1]!.messages.filter((m) => m.role === "user" && String(m.content).startsWith("MCP runtime context"));
+      expect(contexts).toHaveLength(2);
+      expect(String(contexts[0]!.content)).toContain('"controls"');
+      expect(String(contexts[1]!.content)).toMatch(/^MCP runtime context update/);
+      expect(String(contexts[1]!.content)).not.toContain('"controls"');
+    } finally { await mcp.close(); }
   });
 
   it("runs a task and continues the conversation with the next one", async () => {

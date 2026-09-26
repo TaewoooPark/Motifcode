@@ -70,7 +70,7 @@ import { doctor, formatChecks } from "./doctor.js";
 import { ToolExecutor } from "./executor.js";
 import { policyForAgent } from "./policy.js";
 import { buildAgentPrompt, buildSystemPrompt } from "./prompt.js";
-import type { McpSession, McpPreset, McpStatus, McpElicitationRequest, McpElicitationResponse } from "@motifcode/mcp";
+import { compactMcpContext, MCP_CONTEXT_PREFIX, type McpSession, type McpPreset, type McpStatus, type McpElicitationRequest, type McpElicitationResponse } from "@motifcode/mcp";
 import { requestMcpInteraction } from "./mcp-interaction.js";
 import { McpAuthError } from "../../mcp/src/auth.js";
 import { McpPresetError } from "../../mcp/src/presets.js";
@@ -1345,12 +1345,17 @@ export class Chat {
 
     let result: LoopResult | undefined;
     try {
+      const mcpContext = await this.prepareMcp(display ?? task, abort.signal);
+      // Earlier tasks' contexts stay in history for the cached prefix; repeat
+      // only what changed since the latest complete one.
+      const previous = this.history.findLast((m) => m.role === "user" && typeof m.content === "string" && m.content.startsWith(MCP_CONTEXT_PREFIX));
       result = await runLoop({
         transport,
         tools: this.opts.tools,
         system: (ch) => this.systemFor(ch),
         userTask: task,
-        context: await this.prepareMcp(display ?? task, abort.signal),
+        context: mcpContext && compactMcpContext(mcpContext, previous?.content as string | undefined),
+        contextOnRestart: mcpContext,
         replyRecovery: (content) => this.opts.mcp?.replyRecovery(content),
         history: this.history,
         executor: this.executor,

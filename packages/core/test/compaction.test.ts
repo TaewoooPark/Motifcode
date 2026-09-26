@@ -102,6 +102,20 @@ describe("in the loop", () => {
     expect(String(after[3]!.content)).toContain("HANDOFF SUMMARY");
   });
 
+  it("re-appends complete runtime context after compaction instead of the compact update", async () => {
+    const t = new ScriptedTransport([
+      withUsage(toolCallBody("bash", { command: "ls" }), 5000),
+      "</think>HANDOFF SUMMARY",
+      withUsage(doneBody("d"), 100),
+      withUsage(doneBody("d", { confirm: true }), 100),
+    ]);
+    await runLoop({ ...base, transport: t, context: "UPDATE ONLY", contextOnRestart: "COMPLETE CONTEXT", compaction: { limitTokens: 4000 } });
+    expect(t.seen[0]!.messages.map((m) => m.content)).toContain("UPDATE ONLY");
+    const after = t.seen[2]!.messages.map((m) => m.content);
+    expect(after).toContain("COMPLETE CONTEXT");
+    expect(after).not.toContain("UPDATE ONLY");
+  });
+
   it("carries on with the full transcript when the summary fails", async () => {
     const t = new ScriptedTransport([
       withUsage(toolCallBody("bash", { command: "ls" }), 5000),
