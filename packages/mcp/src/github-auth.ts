@@ -9,10 +9,17 @@ export interface GitHubCredentialReadOptions { signal: AbortSignal; timeoutMs: n
 export type GitHubCredentialReader = (options: GitHubCredentialReadOptions) => Promise<string>;
 export type GitHubCredentialValidator = (token: string, options: GitHubCredentialReadOptions) => Promise<boolean>;
 
-/** gh must read its durable login, never ambient GH_TOKEN/GITHUB_TOKEN overrides. */
+/**
+ * Where the person's own gh keeps its login: the config directory (gh reads
+ * GH_CONFIG_DIR, then XDG_CONFIG_HOME, then AppData on Windows) and the Linux
+ * credential store's session bus. Motif never loads these from a project .env.
+ */
+const GH_LOGIN_LOCATION = ['GH_CONFIG_DIR', 'XDG_CONFIG_HOME', 'APPDATA', 'USERPROFILE', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS'] as const;
+
+/** gh must read its durable login, never ambient GH_TOKEN/GITHUB_TOKEN overrides or another host. */
 export function githubCredentialEnvironment(environment: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
-  for (const key of BASE_ENV_ALLOWLIST) if (environment[key] !== undefined) env[key] = environment[key];
+  for (const key of [...BASE_ENV_ALLOWLIST, ...GH_LOGIN_LOCATION]) if (environment[key] !== undefined) env[key] = environment[key];
   return { ...env, GH_PROMPT_DISABLED: '1', GIT_TERMINAL_PROMPT: '0', GH_NO_UPDATE_NOTIFIER: '1', GH_NO_EXTENSION_UPDATE_NOTIFIER: '1' };
 }
 const loginRequired = () => new McpAuthError('github_login_required', 'GitHub CLI login is required. Run gh auth login --hostname github.com --git-protocol https --web, then motif mcp login for this server.');

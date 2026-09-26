@@ -151,17 +151,18 @@ describe('GitHub CLI credential delegation', () => {
     expect(custom.headers).toEqual({ Authorization: 'Bearer ${CUSTOM_GITHUB_TOKEN}' });
     expect(parseMcpConfig(JSON.stringify({ servers: [custom] })).diagnostics).toEqual([]);
   });
-  it('does not inherit ambient tokens, alternate hosts, or unreviewed credential config paths', () => {
-    const env = githubCredentialEnvironment({ PATH: '/bin', HOME: '/home/person', GH_TOKEN: 'secret', GITHUB_TOKEN: 'secret', GH_ENTERPRISE_TOKEN: 'secret', GITHUB_ENTERPRISE_TOKEN: 'secret', GH_HOST: 'evil.example', GH_CONFIG_DIR: '/tmp/other-account', XDG_CONFIG_HOME: '/tmp/other-config', PRIVATE_KEY: 'secret' });
-    expect(env).toMatchObject({ PATH: '/bin', HOME: '/home/person', GH_PROMPT_DISABLED: '1' });
-    expect(JSON.stringify(env)).not.toMatch(/secret|evil|other-account|other-config/);
+  it('does not inherit ambient tokens or alternate hosts, but keeps where gh stores its login', () => {
+    const location = { GH_CONFIG_DIR: '/home/person/.gh', XDG_CONFIG_HOME: '/home/person/.cfg', APPDATA: 'C:\\Users\\person\\AppData\\Roaming', USERPROFILE: 'C:\\Users\\person', XDG_RUNTIME_DIR: '/run/user/1000', DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus' };
+    const env = githubCredentialEnvironment({ PATH: '/bin', HOME: '/home/person', GH_TOKEN: 'secret', GITHUB_TOKEN: 'secret', GH_ENTERPRISE_TOKEN: 'secret', GITHUB_ENTERPRISE_TOKEN: 'secret', GH_HOST: 'evil.example', PRIVATE_KEY: 'secret', ...location });
+    expect(env).toMatchObject({ PATH: '/bin', HOME: '/home/person', GH_PROMPT_DISABLED: '1', ...location });
+    expect(JSON.stringify(env)).not.toMatch(/secret|evil/);
   });
-  it('invokes gh without a shell, ambient token override, or token arguments', async () => {
+  it('invokes gh without a shell, ambient token override, or token arguments, from its own config directory', async () => {
     if (process.platform === 'win32') return;
     const directory = home(); const bin = join(directory, 'bin'); mkdirSync(bin);
-    const command = join(bin, 'gh');
-    writeFileSync(command, '#!/bin/sh\nif [ "$1 $2 $3 $4" != "auth token --hostname github.com" ] || [ -n "$GH_TOKEN$GITHUB_TOKEN$GH_HOST$GH_CONFIG_DIR" ]; then exit 2; fi\nprintf "fixture-keystore-token\\n"\n'); chmodSync(command, 0o700);
-    vi.stubEnv('PATH', bin); vi.stubEnv('GH_TOKEN', 'ambient-private-token'); vi.stubEnv('GITHUB_TOKEN', 'ambient-private-token'); vi.stubEnv('GH_HOST', 'evil.example'); vi.stubEnv('GH_CONFIG_DIR', '/evil');
+    const command = join(bin, 'gh'); const config = join(directory, 'gh-config');
+    writeFileSync(command, `#!/bin/sh\nif [ "$1 $2 $3 $4" != "auth token --hostname github.com" ] || [ -n "$GH_TOKEN$GITHUB_TOKEN$GH_HOST" ]; then exit 2; fi\n[ "$GH_CONFIG_DIR" = "${config}" ] || exit 1\nprintf "fixture-keystore-token\\n"\n`); chmodSync(command, 0o700);
+    vi.stubEnv('PATH', bin); vi.stubEnv('GH_TOKEN', 'ambient-private-token'); vi.stubEnv('GITHUB_TOKEN', 'ambient-private-token'); vi.stubEnv('GH_HOST', 'evil.example'); vi.stubEnv('GH_CONFIG_DIR', config);
     const broker = createBroker({ home: directory });
     await broker.login(target);
     expect(await createBroker({ home: directory }).token(target)).toBe('fixture-keystore-token');

@@ -12,7 +12,7 @@ function fixture() {
   spawn.mockReturnValue(child);
   const controller = new AbortController();
   const progress = vi.fn(); const browser = vi.fn(async (_url: URL) => {});
-  const run = () => runGithubBrowserLogin({ signal: controller.signal, onProgress: progress, openBrowser: browser, humanInteractive: true, env: { PATH: "/usr/bin", HOME: "/tmp/home", GH_TOKEN: "private-token", GITHUB_TOKEN: "also-private", GH_HOST: "evil.example", GH_CONFIG_DIR: "/untrusted" } });
+  const run = () => runGithubBrowserLogin({ signal: controller.signal, onProgress: progress, openBrowser: browser, humanInteractive: true, env: { PATH: "/usr/bin", HOME: "/tmp/home", GH_TOKEN: "private-token", GITHUB_TOKEN: "also-private", GH_HOST: "evil.example", GH_CONFIG_DIR: "/tmp/home/.gh" } });
   return { child, controller, progress, browser, run };
 }
 describe("GitHub browser login host UI", () => {
@@ -32,8 +32,9 @@ describe("GitHub browser login host UI", () => {
     child.emit("close", 0); await pending;
     const [command, args, options] = spawn.mock.calls.at(-1)!;
     expect(command).toBe("gh"); expect(args).toContain("--clipboard=false"); expect(options.shell).toBe(false);
-    expect(options.env).toMatchObject({ HOME: "/tmp/home", GH_PROMPT_DISABLED: "1" });
-    for (const key of ["GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "GH_CONFIG_DIR"]) expect(options.env[key]).toBeUndefined();
+    // The login lands in the person's own gh config, where token reads look.
+    expect(options.env).toMatchObject({ HOME: "/tmp/home", GH_PROMPT_DISABLED: "1", GH_CONFIG_DIR: "/tmp/home/.gh" });
+    for (const key of ["GH_TOKEN", "GITHUB_TOKEN", "GH_HOST"]) expect(options.env[key]).toBeUndefined();
   });
   it("does not open an arbitrary verification URL", async () => {
     const { child, browser, progress, run } = fixture(); const pending = run();

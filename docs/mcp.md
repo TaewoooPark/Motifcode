@@ -253,8 +253,11 @@ in the human terminal panel, never in model context or session journals.
 Motif saves a private delegation grant under `~/.motif/auth`, not a token copy.
 Each new authenticated request resolves the current credential from GitHub CLI,
 so restarting Motif needs no new login. On macOS, GitHub CLI normally uses Keychain;
-its own credential storage policy applies. Ambient `GH_TOKEN`, `GITHUB_TOKEN`,
-`GH_HOST` and `GH_CONFIG_DIR` overrides are not used for this provider.
+its own credential storage policy applies. Ambient `GH_TOKEN`, `GITHUB_TOKEN` and
+`GH_HOST` overrides are not used for this provider. The variables that locate gh's
+own login still reach it: `GH_CONFIG_DIR`, `XDG_CONFIG_HOME`, `APPDATA` and
+`USERPROFILE`, and the Linux credential store's `DBUS_SESSION_BUS_ADDRESS` and
+`XDG_RUNTIME_DIR`.
 
 `motif mcp logout github` clears Motif's grant and `/mcp logout github` also closes
 the current connection. It does not run `gh auth logout` or revoke the GitHub
