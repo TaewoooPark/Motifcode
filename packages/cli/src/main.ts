@@ -877,9 +877,6 @@ async function main(): Promise<number> {
     ...(typeof args.flags["trust-mcp"] === "string" ? { trustHash: args.flags["trust-mcp"] } : {}),
   });
   for (const diagnostic of mcpConfig.diagnostics) process.stderr.write(`MCP ${diagnostic.severity}: ${diagnostic.message}\n`);
-  // Bundled MCP workflow skills reach the model's index only with their server;
-  // /mcp setup mutates this same configuration, so a new preset joins next task.
-  skills.setMcpServers(() => mcpConfig.servers.filter((server) => server.enabled).map((server) => server.id));
   const mcpAuth = new McpAuthBroker({ openBrowser: openExternalUrl });
   let interactiveChat: Chat | undefined;
   const mcp = new McpSession(mcpConfig, { exposure: flagEnum(args.flags, "mcp-mode", ["prefetch", "search", "catalog"] as const, "prefetch"), manager: { auth: mcpAuth,
@@ -894,10 +891,17 @@ async function main(): Promise<number> {
   const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
   // Reserve the ninth canonical slot for the interactive catalog even when no
   // server is registered yet; installation must never change the cached prefix.
-  const mcpConnected = mcp.enabled
-    || resumeFrom?.header.prompt.toolSchemaHash === toolSchemaHash(CORE_TOOLS)
-    || (!resumeFrom && tty && (wantsChat || !args.rest.join(" ").trim()));
-  const activeTools = mcpConnected ? [...CORE_TOOLS] : toolPrefix(CORE_TOOLS.length - 1);
+  // A resume keeps the tool set it was recorded with, whatever servers came since.
+  const recordedTools = resumeFrom?.header.prompt.toolSchemaHash;
+  const withoutMcp = toolPrefix(CORE_TOOLS.length - 1);
+  const mcpConnected = recordedTools === toolSchemaHash(CORE_TOOLS)
+    || (recordedTools !== toolSchemaHash(withoutMcp)
+      && (mcp.enabled || (!resumeFrom && tty && (wantsChat || !args.rest.join(" ").trim()))));
+  const activeTools = mcpConnected ? [...CORE_TOOLS] : withoutMcp;
+  // Bundled MCP workflow skills reach the model's index only with their server
+  // and the mcp tool; /mcp setup mutates this same configuration, so a new
+  // preset joins next task.
+  skills.setMcpServers(() => mcpConnected ? mcpConfig.servers.filter((server) => server.enabled).map((server) => server.id) : []);
   const activeToolNames = CORE_TOOL_NAMES.slice(0, activeTools.length);
   const schemaHash = toolSchemaHash(activeTools);
   const promptHash = systemPromptHash(systemFor(channel));
@@ -1052,7 +1056,7 @@ async function main(): Promise<number> {
         tools: activeTools,
         system: (ch) => buildSystemPrompt({ mode: "chat", channel: ch, tools: activeTools, skills, agents, ...(projectNotes !== undefined ? { projectNotes } : {}), cwd }),
         userTask: task,
-        context: await mcp.prepare(discoveryTask, abort.signal),
+        context: mcpConnected ? await mcp.prepare(discoveryTask, abort.signal) : undefined,
         replyRecovery: (content) => mcp.replyRecovery(content),
         signal: abort.signal,
         executor,
@@ -1255,7 +1259,7 @@ async function main(): Promise<number> {
       tools: activeTools,
       system: systemFor,
       userTask: task,
-      context: await mcp.prepare(discoveryTask, abort.signal),
+      context: mcpConnected ? await mcp.prepare(discoveryTask, abort.signal) : undefined,
       replyRecovery: (content) => mcp.replyRecovery(content),
       signal: abort.signal,
       executor,

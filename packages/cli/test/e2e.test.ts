@@ -331,6 +331,30 @@ describe("cli process end to end", () => {
     expect(server.bodies).toHaveLength(1);
   }, 30_000);
 
+  it("resumes with the tools and prompt it was recorded with after an MCP server is added", async () => {
+    writeFileSync(join(dir, "resume-marker.txt"), "RESUME_MARKER");
+    server = new MockServer((turn) => (turn === 1 ? toolCall("read", { path: "resume-marker.txt" }) : "</think>Resumed without MCP."));
+    await server.start();
+    expect((await runCli(["continue the task", "--max-turns", "1", "--endpoint", server.endpoint, "--no-hero"], dir)).code).toBe(1);
+    const sessions = join(dir, ".motif", "sessions");
+    const journal = join(sessions, readdirSync(sessions)[0]!);
+    writeFileSync(journal, readFileSync(journal, "utf8").trimEnd().split("\n").filter((line) => JSON.parse(line).record?.t !== "scope_end").join("\n") + "\n");
+    // Enabled after the run, and named like a preset that gates a bundled workflow skill.
+    const home = mkdtempSync(join(tmpdir(), "motif-home-"));
+    mkdirSync(join(home, ".motif"));
+    writeFileSync(join(home, ".motif", "mcp.json"), JSON.stringify({ version: 1, servers: { playwright: { enabled: true, transport: "stdio",
+      command: process.execPath, args: [join(REPO, "packages/mcp/test/fixtures/client-legacy.mjs"), join(home, "lab.ndjson")] } } }));
+
+    const resumed = await runCli(["resume", journal, "--print", "--endpoint", server.endpoint], dir, { HOME: home });
+    expect(resumed.code, `${resumed.stdout}\n${resumed.stderr}`).toBe(0);
+    expect(resumed.stdout).toBe("Resumed without MCP.\n");
+    const [recorded, continued] = [server.bodies[0]!, server.bodies[1]!];
+    expect(continued.tools?.map((tool) => tool.function?.name)).toEqual(recorded.tools?.map((tool) => tool.function?.name));
+    expect(continued.tools?.map((tool) => tool.function?.name)).not.toContain("mcp");
+    expect(continued.messages[0]!.content).toBe(recorded.messages[0]!.content);
+    expect(continued.messages.map((m) => m.role)).toEqual(["system", "user", "assistant", "tool"]);
+  }, 30_000);
+
   it.each([true, false])("attaches the current MCP setup skill in the actual CLI before its first request (print=%s)", async print => {
     const skillDir = join(dir, ".motif", "skills", "mcp-setup"); mkdirSync(skillDir, { recursive: true });
     writeFileSync(join(skillDir, "SKILL.md"), "---\nname: mcp-setup\ndescription: local setup\nbudget: 30\n---\nLOCAL-MCP-SETUP-POLICY");
