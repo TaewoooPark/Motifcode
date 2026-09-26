@@ -308,7 +308,14 @@ export class McpAuthBroker {
           secureUrl(url); if (signal.aborted) throw new McpAuthError('cancelled', 'MCP authorization was cancelled.');
           await options.onAuthorization?.(url);
           if (signal.aborted) throw new McpAuthError('cancelled', 'MCP authorization was cancelled.');
-          if (!options.noBrowser) await (this.options.openBrowser ?? defaultBrowser)(url);
+          if (!options.noBrowser) {
+            try { await (this.options.openBrowser ?? defaultBrowser)(url); }
+            catch {
+              // A human UI that already shows the URL can still finish sign-in
+              // (SSH, headless or no default browser); otherwise say why.
+              if (!options.onAuthorization) throw new McpAuthError('browser_open_failed', 'The browser could not be opened. Run motif mcp login in an interactive terminal to see the authorization URL, or add --no-browser there.');
+            }
+          }
         },
       };
       await abortable(auth(provider, { serverUrl: endpoint, scope, fetchFn, forceReauthorization: true }), signal);

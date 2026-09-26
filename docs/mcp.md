@@ -158,6 +158,13 @@ an authentication failure offers **Sign in**; `/mcp login NAME` works explicitly
 The provider's page handles account selection and consent. Motif does not copy
 Claude/Codex sessions or submit account consent on the user's behalf.
 
+The chat's login panel and an interactive terminal also show the authorization
+URL, so sign-in still completes when no browser can be launched. Over SSH or on a
+headless machine, `motif mcp login NAME --no-browser` prints the URL without
+trying; forward the callback port if the browser runs elsewhere. The URL is never
+printed when the command runs without a terminal, such as through the agent's
+shell.
+
 Discovery supports protected-resource metadata, authorization-server metadata,
 PKCE and servers using dynamic registration or client metadata documents. If a
 provider requires a pre-registered public client, use its supported client ID and

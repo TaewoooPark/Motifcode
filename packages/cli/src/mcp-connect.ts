@@ -18,6 +18,10 @@ export interface ConnectMcpOptions {
   fetch?: typeof fetch;
   auth?: McpAuthBroker;
   onElicitation?: McpManagerOptions["onElicitation"];
+  /** Print the authorization URL instead of launching a browser (interactive terminals only). */
+  noBrowser?: boolean;
+  /** A person reads this terminal; defaults to stdin and stderr being TTYs. */
+  humanInteractive?: boolean;
 }
 export interface McpConnectResult { mode: "connection-check"; ready: boolean; connections: McpStatus[]; }
 
@@ -39,11 +43,16 @@ export async function connectMcpServers(config: McpConfig, options: ConnectMcpOp
   const login = async (server: McpServerConfig) => {
     if (server.transport === "stdio") throw new Error("OAuth is only available for HTTP MCP servers.");
     if (Object.keys(server.headers ?? {}).some(name => name.toLowerCase() === "authorization")) throw new Error("Explicit credentials cannot be replaced by OAuth.");
+    // Only a person's terminal receives the URL; a model piping this command
+    // through its shell must not be able to open and approve consent itself.
+    const human = options.humanInteractive ?? Boolean(process.stdin.isTTY && process.stderr.isTTY);
+    if (options.noBrowser && !human) throw new McpAuthError("interactive_login_required", "--no-browser shows the authorization URL only in an interactive terminal.");
     options.onProgress?.(server.credentialProvider === "github-cli"
       ? `${server.id}: checking the saved GitHub CLI login. A browser sign-in is offered if needed.`
-      : `${server.id}: opening the browser for authorization; complete sign-in there. Cancel to stop waiting.`);
+      : `${server.id}: ${options.noBrowser ? "open the URL below to authorize" : "opening the browser for authorization"}; complete sign-in there. Cancel to stop waiting.`);
     await auth.login(resolveServerConfig(server, options.env ?? process.env), {
-      signal: options.signal, timeoutMs: options.timeoutMs,
+      signal: options.signal, timeoutMs: options.timeoutMs, noBrowser: options.noBrowser === true,
+      ...(human ? { onAuthorization: (url: URL) => { options.onProgress?.(`Authorization URL for ${server.id}${options.noBrowser ? "" : " (if the browser did not open)"}:\n${url.href}`); } } : {}),
       onGitHubLogin: ({ signal }) => runGithubBrowserLogin({ signal, onProgress: options.onProgress, openBrowser: options.openBrowser, env: options.env }),
     });
   };

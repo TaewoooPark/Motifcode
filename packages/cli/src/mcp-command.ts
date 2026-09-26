@@ -27,8 +27,8 @@ export const MCP_HELP = `Usage:
   motif mcp add NAME [--env NAME=VALUE] [--env-ref NAME[=SOURCE]] [--profile playwright] -- COMMAND [ARGS...]
   motif mcp add NAME --transport http|sse [--header NAME=VALUE] [--header-env NAME=SOURCE] URL
   motif mcp remove|enable|disable NAME
-  motif mcp connect NAME [--login]
-  motif mcp login NAME [--client-id ID] [--callback-port PORT] [--scope SCOPES]
+  motif mcp connect NAME [--login] [--no-browser]
+  motif mcp login NAME [--client-id ID] [--callback-port PORT] [--scope SCOPES] [--no-browser]
   motif mcp logout|auth-status NAME
   motif mcp doctor [--connect] [--mcp-config PATH] [--trust-mcp SHA256]
   motif mcp import codex|claude PATH [--project EXACT_PROJECT_KEY] [--write NEW_PATH]
@@ -58,6 +58,8 @@ Inline credentials are not copied; use environment references instead.
 connect starts one trusted enabled server and lists tools. --login opens browser OAuth
 if required; login always starts authorization, including upgrading anonymous access.
 Complete account approval in your browser. Ctrl-C cancels. No business tool is replayed.
+In an interactive terminal the authorization URL is also printed; --no-browser prints
+it without launching a browser (for SSH or headless machines).
 OAuth credentials are stored in private files under ~/.motif/auth, never in mcp.json.
 The github preset delegates to GitHub CLI: login reuses its saved account or offers
 browser sign-in. Subsequent processes read gh's durable credentials automatically.
@@ -68,7 +70,7 @@ logout removes Motif's local credentials; it does not revoke the provider's acco
 
 export type McpCommandFlags = Record<string, string | boolean | string[]>;
 const REPEATED_FLAGS = new Set(["env", "env-ref", "header", "header-env"]);
-const BOOLEAN_MCP_FLAGS = new Set(["help", "connect", "dry-run", "enable", "login"]);
+const BOOLEAN_MCP_FLAGS = new Set(["help", "connect", "dry-run", "enable", "login", "no-browser"]);
 const OAUTH_FLAGS = ["client-id", "client-metadata-url", "scope", "callback-port"];
 const VALUE_MCP_FLAGS = new Set(["cwd", "mcp-config", "trust-mcp", "from", "file", "project", "write", "transport", "protocol", "profile", "root", "token-env", "timeout", ...OAUTH_FLAGS, ...REPEATED_FLAGS]);
 
@@ -106,8 +108,8 @@ function allowedFlags(command: string): Set<string> {
   if (command === "presets") return new Set(["help", "cwd"]);
   if (command === "install") return new Set([...common, "root", "token-env", "enable"]);
   if (command === "import") return new Set(["help", "cwd", "from", "file", "project", "write", "dry-run"]);
-  if (command === "login") return new Set([...common, "timeout", ...OAUTH_FLAGS]);
-  if (command === "connect") return new Set([...common, "login", "timeout"]);
+  if (command === "login") return new Set([...common, "timeout", "no-browser", ...OAUTH_FLAGS]);
+  if (command === "connect") return new Set([...common, "login", "timeout", "no-browser"]);
   if (["logout", "auth-status"].includes(command)) return new Set(common);
   return new Set([...common, ...(command === "doctor" ? ["connect"] : []), ...(command === "add" ? ["transport", "profile", "protocol", ...REPEATED_FLAGS] : [])]);
 }
@@ -179,7 +181,7 @@ export async function runMcpCommand(
       process.on("SIGINT", cancel); process.on("SIGTERM", cancel); process.on("SIGHUP", cancel);
       const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
       try {
-        const result = await connectMcpServers({ servers: [server] }, { home: options.home, env: options.env, auth, fetch: options.fetch, openBrowser: options.openBrowser, signal, forceLogin: command === "login", login: flags.login === true, timeoutMs, onProgress: message => err(message + "\n") });
+        const result = await connectMcpServers({ servers: [server] }, { home: options.home, env: options.env, auth, fetch: options.fetch, openBrowser: options.openBrowser, signal, forceLogin: command === "login", login: flags.login === true, noBrowser: flags["no-browser"] === true, timeoutMs, onProgress: message => err(message + "\n") });
         emit({ ...result, sources: config.sources });
         return signal.aborted ? 130 : result.ready ? 0 : 1;
       } finally { process.removeListener("SIGINT", cancel); process.removeListener("SIGTERM", cancel); process.removeListener("SIGHUP", cancel); }

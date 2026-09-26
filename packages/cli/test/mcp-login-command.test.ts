@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createOAuthFixture } from "../../mcp/test/fixtures/oauth-server.js";
 import { configHash } from "../../mcp/src/config.js";
 import { runMcpArgv } from "../src/mcp-command.js";
+import { connectMcpServers } from "../src/mcp-connect.js";
 
 const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
@@ -23,6 +24,19 @@ async function setup() {
   return { fixture, home, path, browser, run };
 }
 describe("MCP browser login commands", () => {
+  it("shows a person the URL when the browser cannot open, but never prints it into a pipe", async () => {
+    const { fixture, home } = await setup();
+    const server = { id: "fixture", transport: "http" as const, url: fixture.mcpUrl, enabled: true };
+    const progress: string[] = [];
+    const result = await connectMcpServers({ servers: [server] }, { home, forceLogin: true, humanInteractive: true,
+      openBrowser: async () => { throw new Error("no display"); },
+      onProgress: message => { progress.push(message); const url = /(http:\/\/\S+\/authorize\S*)/.exec(message)?.[1]; if (url) void fixture.approve(new URL(url)); } });
+    expect(result.ready).toBe(true);
+    expect(progress.join("\n")).toContain("/authorize?");
+    const piped = await connectMcpServers({ servers: [server] }, { home, forceLogin: true, noBrowser: true, humanInteractive: false, onProgress: message => { progress.push(message); } });
+    expect(piped.connections[0]).toMatchObject({ state: "error", error: { code: "interactive_login_required" } });
+  });
+
   it("connect → browser login → fresh doctor → local logout", async () => {
     const { run, browser } = await setup();
     const blocked = await run(["connect", "fixture"]);

@@ -990,6 +990,8 @@ async function main(): Promise<number> {
         const server = mcpConfig.servers.find(row => row.id === id);
         if (!server?.enabled || Object.keys(server.headers ?? {}).some(name => name.toLowerCase() === "authorization")) throw new Error("OAuth login unavailable for this server.");
         await mcpAuth.login(resolveServerConfig(server), { signal,
+          // Human-only login panel: the URL never enters the transcript or journal.
+          onAuthorization: (url) => onProgress?.(`Complete sign-in for ${id} in your browser. If it did not open, visit: ${url.href}`),
           onGitHubLogin: ({ signal }) => runGithubBrowserLogin({ signal, onProgress, openBrowser: openExternalUrl, humanInteractive: true }),
         });
       },

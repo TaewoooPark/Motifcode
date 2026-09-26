@@ -265,6 +265,18 @@ describe('host OAuth broker', () => {
     const f = await fixture(); const openBrowser = vi.fn(); const broker = new McpAuthBroker({ home: home(), openBrowser });
     await broker.login(f.target, { noBrowser: true, onAuthorization: async url => { await f.authorize(url); } }); expect(openBrowser).not.toHaveBeenCalled();
   });
+  it('keeps waiting for a shown URL when the system browser cannot open', async () => {
+    const f = await fixture(); const broker = new McpAuthBroker({ home: home(), openBrowser: async () => { throw new Error('no display'); } });
+    let shown: URL | undefined;
+    const done = broker.login(f.target, { onAuthorization: url => { shown = url; } });
+    await vi.waitFor(() => expect(shown).toBeDefined());
+    await f.authorize(shown!);
+    await expect(done).resolves.toMatchObject({ state: 'authenticated' });
+  });
+  it('explains a browser launch failure when no URL can be shown', async () => {
+    const f = await fixture(); const broker = new McpAuthBroker({ home: home(), openBrowser: async () => { throw new Error('no display'); } });
+    await expect(broker.login(f.target, { timeoutMs: 5_000 })).rejects.toMatchObject({ code: 'browser_open_failed' });
+  });
   it('cancels a pending login and closes its loopback listener', async () => {
     const f = await fixture(); const controller = new AbortController(); let callback = '';
     const broker = new McpAuthBroker({ home: home(), openBrowser: url => { callback = url.searchParams.get('redirect_uri')!; controller.abort(); } });
