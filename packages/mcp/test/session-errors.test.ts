@@ -16,6 +16,26 @@ function fixture(inputSchema: Record<string, unknown>, budget = 16_000) {
 const nextCall = { server: '__motif_host__', method: 'describe', args: { server: 'lab', method: 'lookup' } };
 
 describe('bounded MCP validation recovery envelopes', () => {
+  it.each(['search', 'describe'] as const)('honors the configured byte budget for %s without clipping schemas', async method => {
+    const budget = 1_500;
+    const inputSchema = { type: 'object', properties: { text: { type: 'string', description: '한글🙂'.repeat(1_000) } } };
+    const { session, invoke } = fixture(inputSchema, budget);
+    const catalog = vi.spyOn(session.manager, 'catalog').mockResolvedValue([
+      { server: 'lab', name: 'lookup', inputSchema, requiresUserInteraction: false, schemaHash: 'fixture' },
+    ]);
+    const args = method === 'search' ? { query: 'lookup' } : { server: 'lab', method: 'lookup' };
+    const large = await session.invoke('__motif_host__', method, args, { scopeId: 'root' });
+    expect(Buffer.byteLength(large.output)).toBeLessThanOrEqual(budget);
+    expect(JSON.parse(large.output)).toMatchObject({ cards: [], abstained: true });
+
+    const smallSchema = { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] };
+    catalog.mockResolvedValue([{ server: 'lab', name: 'lookup', inputSchema: smallSchema, requiresUserInteraction: false, schemaHash: 'small' }]);
+    const small = await session.invoke('__motif_host__', method, args, { scopeId: 'root' });
+    expect(Buffer.byteLength(small.output)).toBeLessThanOrEqual(budget);
+    expect(JSON.parse(small.output)).toMatchObject({ ok: true, abstained: false, cards: [{ inputSchema: smallSchema }] });
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
   it('returns the exact small schema and missing field with a concrete describe call, without retry', async () => {
     const inputSchema = { type: 'object', required: ['names'], properties: { names: { type: 'array', items: { type: 'string' } } }, additionalProperties: false };
     const { session, invoke } = fixture(inputSchema);

@@ -72,7 +72,7 @@ export class McpSession {
     this.manager = new McpManager(config, options.manager);
     // Reserve the outer outcome envelope; the core loop must not cut this JSON.
     this.results = new ResultStore({ maxOutputBytes: (options.maxOutputBytes ?? 16_000) - 200 });
-    this.catalog = new ToolCatalog([], { maxCards: 8, maxOutputBytes: 16_000 });
+    this.catalog = new ToolCatalog([], { maxCards: 8, maxOutputBytes: options.maxOutputBytes ?? 16_000 });
   }
 
   get enabled(): boolean { return this.config.servers.some((s) => s.enabled); }
