@@ -846,6 +846,15 @@ export class Chat {
     try { return await answer; } finally { signal.removeEventListener("abort", cancel); }
   }
 
+  /** A person, not the model, decides whether an uncertain call runs again. */
+  private async confirmMcpRepeat(server: string, method: string, signal?: AbortSignal): Promise<boolean> {
+    const choice = await this.askMcpChoice(signal ?? new AbortController().signal, `Run ${server}/${method} again?`, [
+      "An identical earlier call may or may not have run; its outcome is unknown.",
+      "Check the service first. Repeating a write can apply it twice.",
+    ], ["1. Run it again", "2. Don't run it"]);
+    return choice === 0;
+  }
+
   /** SDK callback: the human, not the model, supplies remote form/URL consent. */
   async handleMcpElicitation(request: McpElicitationRequest): Promise<McpElicitationResponse> {
     if (this.mcpInteractionBusy || this.pendingChoice || this.pendingSecret || this.pendingConfirm || this.quitting) return { action: "decline" };
@@ -1546,6 +1555,7 @@ export class Chat {
       callMcp: this.opts.mcp ? (server, method, args, signal, observe) => this.opts.mcp!.invoke(server, method, args, {
         scopeId: "root", signal, observe,
         confirmInteraction: (server, method, args) => this.confirm({ id: "mcp-interaction", name: "mcp", arguments: { server, method, args }, validated: true, repaired: false }, true).then((answer) => answer === "allow"),
+        confirmRepeat: (server, method) => this.confirmMcpRepeat(server, method, signal),
       }) : undefined,
       confirm: (call) => this.confirm(call),
       onHook: (event, label, ok) => this.screen.apply({ type: "hook", event, label, ok }),
@@ -1575,6 +1585,7 @@ export class Chat {
             callMcp: this.opts.mcp ? (server, method, args, signal, observe) => this.opts.mcp!.invoke(server, method, args, {
               scopeId: childScope.scopeId, signal, observe,
               confirmInteraction: (server, method, args) => this.confirm({ id: "mcp-interaction", name: "mcp", arguments: { server, method, args }, validated: true, repaired: false }, true).then((answer) => answer === "allow"),
+              confirmRepeat: (server, method) => this.confirmMcpRepeat(server, method, signal),
             }) : undefined,
             confirm: (call) => this.confirm(call),
             policy: policyForAgent({

@@ -10,6 +10,7 @@ import { Server as LegacyServer } from '@modelcontextprotocol/sdk/server/index.j
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { ListToolsRequestSchema, CallToolRequestSchema, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { McpManager } from '../src/manager.js';
+import { McpSession } from '../src/session.js';
 import { McpAuthError } from '../src/auth.js';
 import type { McpAuthorization } from '../src/client.js';
 
@@ -25,8 +26,8 @@ afterEach(async () => {
 });
 
 async function fixture(wire: Wire, auth?: McpAuthorization, beforeResult?: () => Promise<void>) {
-  const state = { invalidSchema: false, invalidResult: false, reject: false, calls: 0 };
-  const tools = () => ({ tools: [{ name: 'write_once', inputSchema, outputSchema: state.invalidSchema
+  const state = { invalidSchema: false, invalidResult: false, reject: false, readOnly: false, calls: 0 };
+  const tools = () => ({ tools: [{ name: 'write_once', inputSchema, ...(state.readOnly ? { annotations: { readOnlyHint: true } } : {}), outputSchema: state.invalidSchema
     ? { type: 'object' as const, properties: { answer: { $ref: 'https://example.invalid/unavailable-schema' } } }
     : { type: 'object' as const, properties: { answer: { type: 'integer' } }, required: ['answer'] } }], ttlMs: 60_000 });
   const call = async () => {
@@ -71,10 +72,11 @@ async function fixture(wire: Wire, auth?: McpAuthorization, beforeResult?: () =>
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   cleanups.push(() => new Promise<void>(resolve => { http.close(() => resolve()); http.closeAllConnections(); }));
   origin = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
-  const manager = new McpManager({ servers: [{ id: 'lab', enabled: true, transport: wire === 'sse' ? 'sse' : 'http',
-    protocol: wire === 'modern' ? 'modern' : 'legacy', url: `${origin}/mcp`, startupTimeoutMs: 2_000, toolTimeoutMs: 2_000 }] }, { auth });
+  const config = { servers: [{ id: 'lab', enabled: true, transport: wire === 'sse' ? 'sse' as const : 'http' as const,
+    protocol: wire === 'modern' ? 'modern' as const : 'legacy' as const, url: `${origin}/mcp`, startupTimeoutMs: 2_000, toolTimeoutMs: 2_000 }] };
+  const manager = new McpManager(structuredClone(config), { auth });
   managers.push(manager);
-  return { state, manager };
+  return { state, manager, config };
 }
 
 describe('actual MCP tool dispatch boundary', () => {
@@ -121,6 +123,42 @@ describe('actual MCP tool dispatch boundary', () => {
     await manager.reconnect('lab');
     expect(await manager.invoke('lab', 'write_once', {}, { scopeId: 'another-scope' })).toMatchObject({ error: { code: 'previous_execution_unknown' } });
     expect(state.calls).toBe(1);
+  });
+
+  it('repeats an unknown-outcome write only with explicit approval, then treats it as known', async () => {
+    const { manager, state } = await fixture('modern');
+    state.invalidResult = true;
+    expect(await manager.invoke('lab', 'write_once', {}, scope)).toMatchObject({ execution: 'unknown' });
+    state.invalidResult = false;
+    expect(await manager.invoke('lab', 'write_once', {}, scope)).toMatchObject({ error: { code: 'previous_execution_unknown' } });
+    expect(await manager.invoke('lab', 'write_once', {}, { ...scope, repeatUnknown: true })).toMatchObject({ ok: true, execution: 'completed' });
+    expect(await manager.invoke('lab', 'write_once', {}, scope)).toMatchObject({ ok: true });
+    expect(state.calls).toBe(3);
+  });
+
+  it('calls a read-only tool again after an unknown outcome', async () => {
+    const { manager, state } = await fixture('legacy');
+    state.readOnly = true; state.invalidResult = true;
+    expect(await manager.invoke('lab', 'write_once', {}, scope)).toMatchObject({ execution: 'unknown' });
+    state.invalidResult = false;
+    expect(await manager.invoke('lab', 'write_once', {}, scope)).toMatchObject({ ok: true, execution: 'completed' });
+    expect(state.calls).toBe(2);
+  });
+
+  it('asks the person before a session repeats an unknown-outcome call', async () => {
+    const { state, config } = await fixture('modern');
+    const session = new McpSession(structuredClone(config));
+    cleanups.push(() => session.close());
+    state.invalidResult = true;
+    expect(JSON.parse((await session.invoke('lab', 'write_once', {}, { scopeId: 'root' })).output)).toMatchObject({ execution: 'unknown' });
+    state.invalidResult = false;
+    const asked: string[] = [];
+    const declined = await session.invoke('lab', 'write_once', {}, { scopeId: 'root', confirmRepeat: async (server, method) => { asked.push(`${server}/${method}`); return false; } });
+    expect(JSON.parse(declined.output)).toMatchObject({ error: { code: 'previous_execution_unknown' } });
+    const approved = await session.invoke('lab', 'write_once', {}, { scopeId: 'root', confirmRepeat: async () => true });
+    expect(JSON.parse(approved.output)).toMatchObject({ ok: true, execution: 'completed' });
+    expect(asked).toEqual(['lab/write_once']);
+    expect(state.calls).toBe(2);
   });
 
   it.each(['legacy', 'modern', 'sse'] as const)('reports a %s JSON-RPC rejection as a completed error without blocking a retry', async wire => {

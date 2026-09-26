@@ -349,7 +349,7 @@ The profile pairs supported navigation and form actions with `browser_snapshot`.
 | Explicit configuration is disabled | Review the file and pass its current hash with `--trust-mcp`. |
 | A server added from another terminal is missing from `/mcp` | Relaunch Motif. Preset setup inside `/mcp` applies immediately. |
 | A connected server has no available tools | Check its advertised tools, `allowedTools` and `deniedTools`. |
-| A write has an unknown outcome | Check the service's actual state before retrying; reconnecting does not make a repeat safe. |
+| A write has an unknown outcome | Check the service's actual state first. In an interactive session Motif asks you before running the identical call again; one-shot runs keep refusing it. Reconnecting does not make a repeat safe. Read-only tools can be called again. |
 
 Large tool results can be retrieved in portions during the same conversation. Stored result handles expire and do not survive process restart or resume. Motifcode validates tool arguments against the server's schema and does not automatically repeat remote tool calls after failures.
 

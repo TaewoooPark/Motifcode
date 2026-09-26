@@ -36,7 +36,11 @@ interface ServerRuntime {
 export type McpOutcome =
   | { ok: true; execution: 'completed'; isError: boolean; result: CallToolResult }
   | { ok: false; execution: 'not_started' | 'unknown'; error: { code: string; message: string; retryable: false }; issues?: ArgumentIssue[] };
-export interface InvokeOptions { signal?: AbortSignal; scopeId: string; approvedInteraction?: boolean; expectedSchemaHash?: string }
+export interface InvokeOptions {
+  signal?: AbortSignal; scopeId: string; approvedInteraction?: boolean; expectedSchemaHash?: string;
+  /** A person approved repeating an identical call whose earlier outcome is unknown. */
+  repeatUnknown?: boolean;
+}
 export interface McpManagerOptions {
   env?: NodeJS.ProcessEnv;
   fetch?: typeof fetch;
@@ -297,7 +301,10 @@ export class McpManager {
       digest = jsonDigest([server, method, args]);
       snapshot = structuredClone(args) as Record<string, unknown>;
     } catch { return failure('invalid_arguments', 'MCP arguments must be a finite JSON object.'); }
-    if (this.unknownCalls.has(digest)) return failure('previous_execution_unknown', 'An identical call has an unknown execution outcome in this MCP manager. Changing task scope does not permit retry; reconcile the outcome manually.');
+    // Refuse before any connection or credential work. Read-only tools are never
+    // recorded; a write repeats only with a person's explicit approval, never
+    // because the scope or connection changed.
+    if (this.unknownCalls.has(digest) && !options.repeatUnknown) return failure('previous_execution_unknown', 'An identical call has an unknown execution outcome in this MCP manager. Check the service state before repeating it; only a person can approve running it again.');
     if (this.inFlight.has(digest)) return failure('already_in_flight', 'An identical MCP call is already in flight.');
     if (this.unknownCalls.size >= 10_000) return failure('reconciliation_required', 'Too many unresolved MCP outcomes; reconcile them before further calls.');
     const runtime = this.runtimes.get(server)!;
@@ -305,13 +312,16 @@ export class McpManager {
     const invocationSignal = AbortSignal.any([this.lifetime.signal, runtime.controller.signal, ...(options.signal ? [options.signal] : [])]);
     this.inFlight.add(digest);
     let dispatched = false;
+    let readOnly = false;
     let connection: McpConnection | undefined;
     try {
       const budget = new McpOperationBudget(this.servers.get(server)!.toolTimeoutMs ?? 30_000, this.options.humanWaitTimeoutMs);
-      return await budget.run(invocationSignal, async signal => {
+      const outcome = await budget.run(invocationSignal, async signal => {
         connection = await this.connection(server, signal);
         const tool = (await connection.list({ signal })).find(t => t.name === method);
         if (!tool) return failure('tool_missing', 'The tool is not present in the current MCP catalog.');
+        // A read-only tool has nothing to duplicate, so it is never recorded.
+        readOnly = tool.annotations?.readOnlyHint === true;
         const metadata = this.describe(server, tool);
         if (options.expectedSchemaHash !== undefined && options.expectedSchemaHash !== metadata.schemaHash) return failure('schema_changed', 'The MCP tool changed after review; review the current schema before invoking it.');
         if (metadata.requiresUserInteraction && (!options.approvedInteraction || options.expectedSchemaHash !== metadata.schemaHash)) return failure('interaction_required', 'This tool requires explicit user approval bound to its current schema.');
@@ -331,13 +341,17 @@ export class McpManager {
         const result = await connection.call(tool, snapshot, signal, budget, () => { dispatched = true; });
         return { ok: true as const, execution: 'completed' as const, isError: result.isError === true, result };
       }, () => { void connection?.close(); });
+      // A completed repeat makes the identical call's state known again.
+      if (outcome.ok) this.unknownCalls.delete(digest);
+      return outcome;
     } catch (error) {
       // The server answered with a JSON-RPC error: the outcome is known and the
       // connection is healthy. Report it like an isError result.
       if (error instanceof McpToolRejectedError) {
+        this.unknownCalls.delete(digest);
         return { ok: true, execution: 'completed', isError: true, result: { isError: true, content: [{ type: 'text', text: error.message }] } };
       }
-      if (dispatched) this.unknownCalls.add(digest);
+      if (dispatched && !readOnly) this.unknownCalls.add(digest);
       const diagnostic = safeError(error);
       if (connection && this.isCurrent(server, generation, connection)) this.setState(server, 'error', 0, diagnostic);
       return failure(diagnostic.code, diagnostic.message, dispatched ? 'unknown' : 'not_started');

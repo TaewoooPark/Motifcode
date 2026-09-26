@@ -21,6 +21,8 @@ export interface McpInvocationContext {
   signal?: AbortSignal;
   /** Only a real per-call human confirmation can satisfy remote interaction metadata. */
   confirmInteraction?: (server: string, method: string, args: unknown) => Promise<boolean>;
+  /** A person decides whether to repeat an identical call whose earlier outcome is unknown. */
+  confirmRepeat?: (server: string, method: string, args: unknown) => Promise<boolean>;
   /** Fixed browser_snapshot({}) through the caller's normal policy/approval/hooks. */
   observe?: () => Promise<{ ok: boolean; output: string }>;
 }
@@ -189,12 +191,12 @@ export class McpSession {
     if (tool?.requiresUserInteraction && context.confirmInteraction) {
       approvedInteraction = await context.confirmInteraction(server, method, args);
     }
-    const outcome = await this.manager.invoke(server, method, args, {
-      scopeId: context.scopeId,
-      signal: context.signal,
-      expectedSchemaHash: tool?.schemaHash,
-      approvedInteraction,
-    });
+    const options = { scopeId: context.scopeId, signal: context.signal, expectedSchemaHash: tool?.schemaHash, approvedInteraction };
+    let outcome = await this.manager.invoke(server, method, args, options);
+    if (!outcome.ok && outcome.error.code === "previous_execution_unknown" && context.confirmRepeat && !context.signal?.aborted
+      && await context.confirmRepeat(server, method, args)) {
+      outcome = await this.manager.invoke(server, method, args, { ...options, repeatUnknown: true });
+    }
     if (outcome.ok) {
       let result: unknown = outcome.result;
       if (this.config.servers.some((entry) => entry.id === server && entry.profile === "playwright") && BROWSER_ACTIONS.has(method) && context.observe && !context.signal?.aborted) {
