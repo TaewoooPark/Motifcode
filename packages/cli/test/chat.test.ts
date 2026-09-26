@@ -239,6 +239,25 @@ describe("interactive session", () => {
     } finally { await mcp.close(); }
   });
 
+  it.each(["ask", "auto"] as const)("asks once before a server-gated MCP tool in %s mode", async mode => {
+    const dir = mkdtempSync(join(tmpdir(), "motif-mcp-gated-")); const log = join(dir, "events.ndjson");
+    const fixture = fileURLToPath(new URL("../../mcp/test/fixtures/client-legacy.mjs", import.meta.url));
+    const mcp = new McpSession({ servers: [{ id: "lab", enabled: true, transport: "stdio", protocol: "legacy", command: process.execPath, args: [fixture, log], startupTimeoutMs: 5_000 }] });
+    const t = new GateTransport([toolCallBody("mcp", { server: "lab", method: "gated", args: {} }), ...reply("done")]);
+    const s = session(t, { mcp, tools: [...CORE_TOOLS] }); open.push(s);
+    try {
+      if (mode === "ask") s.type("/permissions ask\r");
+      s.type("run the gated tool\r");
+      await vi.waitFor(() => expect(s.screen()).toContain("Call lab/gated?"), { timeout: 10_000 });
+      s.type("1");
+      // One answer is enough: an ask-mode approval is the per-call confirmation;
+      // auto mode still shows the server's required prompt, exactly once.
+      await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1), { timeout: 10_000 });
+      expect(s.screen().includes("the server requires human confirmation")).toBe(mode === "auto");
+      expect(readFileSync(log, "utf8")).toContain('"name":"gated"');
+    } finally { await mcp.close(); }
+  });
+
   it("runs a task and continues the conversation with the next one", async () => {
     const t = new GateTransport([...done("first"), ...done("second")]);
     const s = session(t);

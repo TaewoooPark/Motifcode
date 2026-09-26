@@ -67,7 +67,7 @@ import { COMMANDS, findCommand, parseSlash, runSlash, type ChatSettings, type Co
 import { MCP_USAGE, mcpCatalogEntries, mcpFailureHint, mcpListLines, mcpLoginPanelView, mcpPanelKeys, mcpPanelView, mcpStatusLabel, mcpToolCount, parseMcpRequest, type McpAction } from "./mcp-ui.js";
 import type { LoadedSettings } from "./settings.js";
 import { doctor, formatChecks } from "./doctor.js";
-import { ToolExecutor } from "./executor.js";
+import { ToolExecutor, type ExecutorOptions } from "./executor.js";
 import { policyForAgent } from "./policy.js";
 import { buildAgentPrompt, buildSystemPrompt } from "./prompt.js";
 import { compactMcpContext, MCP_CONTEXT_PREFIX, type McpSession, type McpPreset, type McpStatus, type McpElicitationRequest, type McpElicitationResponse } from "@motifcode/mcp";
@@ -217,6 +217,8 @@ export class Chat {
   private apiKeySource: string | undefined;
   /** Tools the person allowed for the rest of the session with `a`. */
   private readonly alwaysAllowed = new Set<string>();
+  /** MCP calls a person approved in the call prompt, consumed by the same call. */
+  private readonly humanApprovedMcp = new Set<string>();
   private active: ActiveTask | null = null;
   /** A finished loop can still compact history before starting a queued task. */
   private settlingTask = false;
@@ -560,6 +562,9 @@ export class Chat {
       return;
     }
     if (choice === 2 && !pending.force) this.alwaysAllowed.add(this.permissionKey(pending.call));
+    // A person just approved this exact MCP call: that is the per-call human
+    // confirmation a server-gated tool needs, so do not ask a second time.
+    if (choice !== 3 && !pending.force && pending.call.name === "mcp") this.humanApprovedMcp.add(mcpApprovalKey(pending.call.arguments.server, pending.call.arguments.method, pending.call.arguments.args));
     this.pendingConfirm = null;
     pending.resolve(choice === 3 ? "deny" : "allow");
     this.refresh();
@@ -844,6 +849,23 @@ export class Chat {
     const cancel = () => { if (pending && this.pendingChoice === pending) { this.pendingChoice = null; pending.resolve(null); this.refresh(); } };
     signal.addEventListener("abort", cancel, { once: true });
     try { return await answer; } finally { signal.removeEventListener("abort", cancel); }
+  }
+
+  /** MCP dispatch for one result scope, with the person's per-call decisions. */
+  private mcpInvoker(scopeId: string): ExecutorOptions["callMcp"] {
+    const session = this.opts.mcp;
+    if (!session) return undefined;
+    return async (server, method, args, signal, observe) => {
+      const approval = mcpApprovalKey(server, method, args);
+      try {
+        return await session.invoke(server, method, args, {
+          scopeId, signal, observe,
+          confirmInteraction: (server, method, args) => this.humanApprovedMcp.delete(approval) ? Promise.resolve(true)
+            : this.confirm({ id: "mcp-interaction", name: "mcp", arguments: { server, method, args }, validated: true, repaired: false }, true).then((answer) => answer === "allow"),
+          confirmRepeat: (server, method) => this.confirmMcpRepeat(server, method, signal),
+        });
+      } finally { this.humanApprovedMcp.delete(approval); }
+    };
   }
 
   /** A person, not the model, decides whether an uncertain call runs again. */
@@ -1562,11 +1584,7 @@ export class Chat {
       hooks: this.opts.hooks,
       skills: this.opts.skills,
       policy: policyForAgent({ root: cwd, tools: toolNames, readOnly: false }),
-      callMcp: this.opts.mcp ? (server, method, args, signal, observe) => this.opts.mcp!.invoke(server, method, args, {
-        scopeId: "root", signal, observe,
-        confirmInteraction: (server, method, args) => this.confirm({ id: "mcp-interaction", name: "mcp", arguments: { server, method, args }, validated: true, repaired: false }, true).then((answer) => answer === "allow"),
-        confirmRepeat: (server, method) => this.confirmMcpRepeat(server, method, signal),
-      }) : undefined,
+      callMcp: this.mcpInvoker("root"),
       confirm: (call) => this.confirm(call),
       onHook: (event, label, ok) => this.screen.apply({ type: "hook", event, label, ok }),
       runAgent: async (name, prompt, callId) => {
@@ -1592,11 +1610,7 @@ export class Chat {
           const childExecutor = new ToolExecutor({
             cwd: this.settings.cwd,
             skills: this.opts.skills,
-            callMcp: this.opts.mcp ? (server, method, args, signal, observe) => this.opts.mcp!.invoke(server, method, args, {
-              scopeId: childScope.scopeId, signal, observe,
-              confirmInteraction: (server, method, args) => this.confirm({ id: "mcp-interaction", name: "mcp", arguments: { server, method, args }, validated: true, repaired: false }, true).then((answer) => answer === "allow"),
-              confirmRepeat: (server, method) => this.confirmMcpRepeat(server, method, signal),
-            }) : undefined,
+            callMcp: this.mcpInvoker(childScope.scopeId),
             confirm: (call) => this.confirm(call),
             policy: policyForAgent({
               root: this.settings.cwd,
@@ -1868,6 +1882,10 @@ export class Chat {
  * one gets the input appended, labelled, so the model knows which part is
  * the person's and which the sheet's.
  */
+function mcpApprovalKey(server: unknown, method: unknown, args: unknown): string {
+  return JSON.stringify([server, method, args ?? {}]);
+}
+
 export function skillTask(rendered: string, input: string): string {
   return substituteSkillArguments(rendered, input);
 }
