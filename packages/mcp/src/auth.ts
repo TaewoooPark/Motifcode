@@ -2,7 +2,9 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { auth, discoverOAuthServerInfo, extractWWWAuthenticateParams, refreshAuthorization, OAuthError, type OAuthClientProvider, type OAuthDiscoveryState, type StoredOAuthTokens } from '@modelcontextprotocol/client';
+import type { OAuthClientProvider, OAuthDiscoveryState, StoredOAuthTokens } from '@modelcontextprotocol/client';
+/** OAuth helpers load on first use, keeping the SDK out of CLI startup. */
+const oauthSdk = () => import('@modelcontextprotocol/client');
 import { McpAuthError, McpAuthStore, authKey, type McpAuthRecord } from './auth-store.js';
 import { GitHubCliAuth, type GitHubCredentialReader, type GitHubCredentialValidator } from './github-auth.js';
 export { McpAuthError } from './auth-store.js';
@@ -169,7 +171,7 @@ export class McpAuthBroker {
         void response.body?.cancel().catch(() => {});
         if (response.status === 401 || response.status === 403) {
           if ((response.headers.get('WWW-Authenticate')?.length ?? 0) > 8192) throw failed();
-          const hint = extractWWWAuthenticateParams(response);
+          const hint = (await oauthSdk()).extractWWWAuthenticateParams(response);
           const resourceMetadataUrl = hint.resourceMetadataUrl ? secureUrl(hint.resourceMetadataUrl) : undefined;
           if (resourceMetadataUrl && resourceMetadataUrl.origin !== new URL(endpoint).origin) throw new McpAuthError('oauth_resource_mismatch', 'OAuth resource metadata must use the configured MCP origin.');
           if (hint.scope && (hint.scope.length > 2048 || /[\x00-\x1f\x7f]/.test(hint.scope))) throw failed();
@@ -218,6 +220,7 @@ export class McpAuthBroker {
     return options.signal ? abortable(pending.promise, options.signal) : pending.promise;
   }
   private async refresh(record: McpAuthRecord): Promise<string> {
+    const { refreshAuthorization, OAuthError } = await oauthSdk();
     try {
       checkDiscovery(record.discovery!, record.endpoint);
       const issuer = record.discovery!.authorizationServerMetadata!.issuer;
@@ -277,6 +280,7 @@ export class McpAuthBroker {
       stopWaiting = () => rejectCallback(new McpAuthError(timeout.aborted ? 'timeout' : 'cancelled', timeout.aborted ? 'MCP login timed out.' : 'MCP authorization was cancelled.'));
       signal.addEventListener('abort', stopWaiting, { once: true }); if (signal.aborted) stopWaiting();
       const fetchFn = this.fetch(signal);
+      const { auth, discoverOAuthServerInfo } = await oauthSdk();
       const challenge = await this.challenge(endpoint, signal);
       // A challenge supplies the default, but cannot widen a human's explicit scope.
       const scope = target.oauth?.scope ?? challenge.scope;

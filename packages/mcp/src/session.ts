@@ -2,7 +2,7 @@ import Ajv from "ajv";
 import type { McpConfig, McpServerConfig } from "./config.js";
 import { HOST_CONTROL_CARDS, HOST_SERVER_ID, ToolCatalog } from "./discovery.js";
 import { McpManager, type McpManagerOptions, type McpOutcome, type McpStatus } from "./manager.js";
-import { McpClientError } from "./client.js";
+import { McpClientError } from "./operation.js";
 import { ResultStore, isResultError, serializeResultView } from "./results.js";
 import { extractFocusTerms } from "./focus.js";
 import { boundedDiagnosticText } from "./schema.js";
@@ -95,9 +95,13 @@ export class McpSession {
   readonly results: ResultStore;
   private readonly catalog: ToolCatalog;
   private readonly focusByScope = new Map<string, string[]>();
-  private readonly controls = new Map(HOST_CONTROL_CARDS.map((card) => [
-    card.method, new Ajv({ allErrors: false, strict: false }).compile(card.inputSchema),
-  ]));
+  private controlValidators?: Map<string, ReturnType<Ajv["compile"]>>;
+  /** Compiled on first use, not when the CLI starts. */
+  private get controls(): Map<string, ReturnType<Ajv["compile"]>> {
+    return this.controlValidators ??= new Map(HOST_CONTROL_CARDS.map((card) => [
+      card.method, new Ajv({ allErrors: false, strict: false }).compile(card.inputSchema),
+    ]));
+  }
 
   constructor(private readonly config: McpConfig, private readonly options: McpSessionOptions = {}) {
     this.manager = new McpManager(config, options.manager);

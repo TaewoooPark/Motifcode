@@ -1,7 +1,7 @@
 import { McpManager, type McpManagerOptions, type McpStatus } from "../../mcp/src/manager.js";
 import { resolveServerConfig, type McpConfig, type McpServerConfig } from "../../mcp/src/config.js";
 import { McpAuthBroker, McpAuthError, type McpAuthTarget } from "../../mcp/src/auth.js";
-import { McpClientError } from "../../mcp/src/client.js";
+import { McpClientError } from "@motifcode/mcp";
 import { openExternalUrl } from "./browser-open.js";
 import { runGithubBrowserLogin } from "./github-login.js";
 

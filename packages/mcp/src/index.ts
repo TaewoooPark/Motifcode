@@ -7,4 +7,5 @@ export * from "./session.js";
 export * from "./presets.js";
 export * from "./auth.js";
 export { githubCredentialEnvironment, type GitHubCredentialReader, type GitHubCredentialValidator } from "./github-auth.js";
-export type { McpAuthorization, McpElicitationHandler, McpElicitationRequest, McpElicitationResponse } from "./client.js";
+export { McpClientError, McpToolRejectedError } from "./operation.js";
+export type { McpAuthorization, McpElicitationHandler, McpElicitationRequest, McpElicitationResponse } from "./operation.js";

@@ -2,7 +2,8 @@ import type { CallToolResult, Tool } from '@modelcontextprotocol/client';
 import { isDeepStrictEqual } from 'node:util';
 import { resolveServerConfig } from './config.js';
 import type { McpConfig, McpServerConfig } from './config.js';
-import { deadline, McpClientError, McpConnection, McpOperationBudget, McpToolRejectedError, type McpAuthorization, type McpElicitationHandler } from './client.js';
+import { deadline, McpClientError, McpOperationBudget, McpToolRejectedError, type McpAuthorization, type McpElicitationHandler } from './operation.js';
+import type { McpConnection } from './client.js';
 import { McpAuthBroker } from './auth.js';
 import { compileArguments, jsonDigest } from './schema.js';
 import type { ArgumentIssue, ArgumentValidator } from './schema.js';
@@ -162,6 +163,8 @@ export class McpManager {
         let connection: McpConnection | undefined;
         try {
           if (!this.isCurrent(server, generation)) throw new McpClientError('cancelled', 'MCP connection was cancelled.');
+          // The SDK loads with the first connection, not at CLI startup.
+          const { McpConnection } = await import('./client.js');
           connection = new McpConnection(resolveServerConfig(config, this.environment), this.options.fetch, { auth: this.auth, onElicitation: this.options.onElicitation });
           runtime.current = connection;
           await connection.open(AbortSignal.any([this.lifetime.signal, runtime.controller.signal]));
