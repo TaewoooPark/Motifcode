@@ -4,6 +4,13 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
 export type EnvValue = string | { env: string };
+/** Public OAuth client settings only. Tokens and client secrets never belong here. */
+export interface McpOAuthConfig {
+  clientId?: string;
+  clientMetadataUrl?: string;
+  scope?: string;
+  callbackPort?: number;
+}
 export interface McpServerConfig {
   id: string;
   enabled: boolean;
@@ -18,6 +25,7 @@ export interface McpServerConfig {
   env?: Record<string, EnvValue>;
   envVars?: string[];
   headers?: Record<string, EnvValue>;
+  oauth?: McpOAuthConfig;
   allowedTools?: string[];
   deniedTools?: string[];
   startupTimeoutMs?: number;
@@ -52,7 +60,7 @@ export function isSupportedHeaderName(name: string): boolean {
     && !lower.startsWith("mcp-") && !lower.startsWith("proxy-") && !lower.startsWith("sec-");
 }
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const SERVER_FIELDS = new Set(["id", "enabled", "transport", "protocol", "profile", "command", "args", "cwd", "url", "env", "envVars", "headers", "allowedTools", "deniedTools", "startupTimeoutMs", "toolTimeoutMs", "catalogTtlMs"]);
+const SERVER_FIELDS = new Set(["id", "enabled", "transport", "protocol", "profile", "command", "args", "cwd", "url", "env", "envVars", "headers", "oauth", "allowedTools", "deniedTools", "startupTimeoutMs", "toolTimeoutMs", "catalogTtlMs"]);
 export const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 export const configHash = (text: string): string => createHash("sha256").update(text).digest("hex");
 export const defaultMcpConfigPath = (home = homedir()): string => join(home, ".motif", "mcp.json");
@@ -95,6 +103,24 @@ export function parseMcpConfig(text: string, sourcePath = defaultMcpConfigPath()
     if (entry.enabled !== undefined && typeof entry.enabled !== "boolean") error("invalid_field", "enabled must be a boolean.", id, "enabled");
     if (entry.protocol !== undefined && !["legacy", "modern", "auto"].includes(String(entry.protocol))) error("invalid_field", "protocol must be legacy, modern, or auto.", id, "protocol");
     if (entry.profile !== undefined && entry.profile !== "playwright") error("invalid_field", "profile must be playwright when explicitly enabled.", id, "profile");
+    if (entry.oauth !== undefined) {
+      if (!isRecord(entry.oauth)) error("invalid_oauth", "oauth must be an object containing public client settings.", id, "oauth");
+      else {
+        for (const field of Object.keys(entry.oauth)) if (!["clientId", "clientMetadataUrl", "scope", "callbackPort"].includes(field)) error("unknown_field", "Unsupported OAuth field; store credentials through motif mcp login.", id, `oauth.${field}`);
+        for (const field of ["clientId", "clientMetadataUrl", "scope"] as const) {
+          const value = entry.oauth[field];
+          if (value !== undefined && (typeof value !== "string" || value.length === 0 || value.length > 2048 || /[\x00-\x1f\x7f]/.test(value) || hasEnvReference(value))) error("invalid_oauth", "OAuth client settings must be bounded nonempty public strings without environment expressions or control characters.", id, `oauth.${field}`);
+        }
+        if (typeof entry.oauth.clientMetadataUrl === "string") {
+          try { const url = new URL(entry.oauth.clientMetadataUrl); validateUrl(url.href); if (url.protocol !== "https:" || url.hash) throw new Error(); }
+          catch { error("invalid_oauth", "clientMetadataUrl must be an HTTPS URL without credentials, fragments or credential query parameters.", id, "oauth.clientMetadataUrl"); }
+        }
+        const port = entry.oauth.callbackPort;
+        if (port !== undefined && (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535)) error("invalid_oauth", "callbackPort must be an integer from 1 to 65535.", id, "oauth.callbackPort");
+      }
+      if (entry.transport === "stdio") error("transport_field", "OAuth settings require an HTTP transport.", id, "oauth");
+      if (isRecord(entry.headers) && Object.keys(entry.headers).some(name => name.toLowerCase() === "authorization")) error("authentication_conflict", "Choose OAuth or an explicit Authorization header, not both.", id, "oauth");
+    }
     for (const field of ["args", "envVars", "allowedTools", "deniedTools"] as const) {
       const value = entry[field];
       if (value !== undefined && (!Array.isArray(value) || !value.every((item) => typeof item === "string" && !item.includes("\0")))) error("invalid_field", "Expected a string array without NUL characters.", id, field);

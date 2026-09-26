@@ -1,13 +1,16 @@
 import Ajv from "ajv";
 import type { McpConfig } from "./config.js";
 import { HOST_CONTROL_CARDS, HOST_SERVER_ID, ToolCatalog } from "./discovery.js";
-import { McpManager, type McpOutcome, type McpStatus } from "./manager.js";
+import { McpManager, type McpManagerOptions, type McpOutcome, type McpStatus } from "./manager.js";
+import { McpClientError } from "./client.js";
 import { ResultStore, isResultError, serializeResultView } from "./results.js";
 import { extractFocusTerms } from "./focus.js";
 import { boundedDiagnosticText } from "./schema.js";
 import { mcpReplyRecovery } from "./recovery.js";
 
 export interface McpSessionOptions {
+  /** Host-owned auth and human interaction callbacks, never model tool arguments. */
+  manager?: McpManagerOptions;
   /** Comparison modes keep the native tool array identical. */
   exposure?: "prefetch" | "catalog" | "search";
   maxOutputBytes?: number;
@@ -66,7 +69,7 @@ export class McpSession {
   ]));
 
   constructor(private readonly config: McpConfig, private readonly options: McpSessionOptions = {}) {
-    this.manager = new McpManager(config);
+    this.manager = new McpManager(config, options.manager);
     // Reserve the outer outcome envelope; the core loop must not cut this JSON.
     this.results = new ResultStore({ maxOutputBytes: (options.maxOutputBytes ?? 16_000) - 200 });
     this.catalog = new ToolCatalog([], { maxCards: 8, maxOutputBytes: 16_000 });
@@ -169,8 +172,8 @@ export class McpSession {
     let tool;
     try {
       tool = await this.manager.getTool(server, method, { signal: context.signal });
-    } catch {
-      return this.failure(context.signal?.aborted ? "cancelled" : "connection_error", "MCP tool discovery failed before dispatch. Check motif mcp doctor --connect.");
+    } catch (error) {
+      return this.failure(context.signal?.aborted ? "cancelled" : error instanceof McpClientError ? error.code : "connection_error", error instanceof McpClientError ? error.message : "MCP tool discovery failed before dispatch. Check motif mcp doctor --connect.");
     }
     let approvedInteraction = false;
     if (tool?.requiresUserInteraction && context.confirmInteraction) {

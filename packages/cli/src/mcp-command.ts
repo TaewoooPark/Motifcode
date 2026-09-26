@@ -3,7 +3,10 @@ import { dirname, resolve } from "node:path";
 import { loadMcpConfig, resolveServerConfig, type ConfigDiagnostic, type EnvValue, type McpServerConfig } from "../../mcp/src/config.js";
 import { importMcpConfig, type ImportClient } from "../../mcp/src/importers.js";
 import { createMcpPresetConfig, getMcpPreset, listMcpPresets, McpPresetError } from "../../mcp/src/presets.js";
-import { editMcpConfig, McpConfigEditError, summarizeMcpServer } from "./mcp-config-edit.js";
+import { editMcpConfig, updateMcpConfig, McpConfigEditError, summarizeMcpServer } from "./mcp-config-edit.js";
+import { McpAuthBroker } from "../../mcp/src/auth.js";
+import { connectMcpServers, localMcpAuthTarget } from "./mcp-connect.js";
+import { openExternalUrl } from "./browser-open.js";
 
 export interface McpCommandOptions {
   cwd?: string;
@@ -11,6 +14,9 @@ export interface McpCommandOptions {
   env?: NodeJS.ProcessEnv;
   stdout?: (text: string) => void;
   stderr?: (text: string) => void;
+  openBrowser?: (url: URL) => Promise<void>;
+  fetch?: typeof fetch;
+  signal?: AbortSignal;
 }
 
 export const MCP_HELP = `Usage:
@@ -21,6 +27,9 @@ export const MCP_HELP = `Usage:
   motif mcp add NAME [--env NAME=VALUE] [--env-ref NAME[=SOURCE]] [--profile playwright] -- COMMAND [ARGS...]
   motif mcp add NAME --transport http|sse [--header NAME=VALUE] [--header-env NAME=SOURCE] URL
   motif mcp remove|enable|disable NAME
+  motif mcp connect NAME [--login]
+  motif mcp login NAME [--client-id ID] [--callback-port PORT] [--scope SCOPES]
+  motif mcp logout|auth-status NAME
   motif mcp doctor [--connect] [--mcp-config PATH] [--trust-mcp SHA256]
   motif mcp import codex|claude PATH [--project EXACT_PROJECT_KEY] [--write NEW_PATH]
   motif mcp import --from codex|claude --file PATH [--write NEW_PATH]
@@ -44,12 +53,19 @@ Restart an existing chat to load these edits; its live connections are managed s
 Import is a dry run unless --write names a new file; existing files are never overwritten.
 Imported entries remain disabled. Review them and set enabled:true before use.
 Inline credentials are not copied; use environment references instead.
+connect starts one trusted enabled server and lists tools. --login opens browser OAuth
+if required; login always starts authorization, including upgrading anonymous access.
+Complete account approval in your browser. Ctrl-C cancels. No business tool is replayed.
+OAuth credentials are stored in private files under ~/.motif/auth, never in mcp.json.
+--client-metadata-url supports a hosted client document; --timeout sets login milliseconds.
+logout removes Motif's local credentials; it does not revoke the provider's account grant.
 `;
 
 export type McpCommandFlags = Record<string, string | boolean | string[]>;
 const REPEATED_FLAGS = new Set(["env", "env-ref", "header", "header-env"]);
-const BOOLEAN_MCP_FLAGS = new Set(["help", "connect", "dry-run", "enable"]);
-const VALUE_MCP_FLAGS = new Set(["cwd", "mcp-config", "trust-mcp", "from", "file", "project", "write", "transport", "protocol", "profile", "root", "token-env", ...REPEATED_FLAGS]);
+const BOOLEAN_MCP_FLAGS = new Set(["help", "connect", "dry-run", "enable", "login"]);
+const OAUTH_FLAGS = ["client-id", "client-metadata-url", "scope", "callback-port"];
+const VALUE_MCP_FLAGS = new Set(["cwd", "mcp-config", "trust-mcp", "from", "file", "project", "write", "transport", "protocol", "profile", "root", "token-env", "timeout", ...OAUTH_FLAGS, ...REPEATED_FLAGS]);
 
 /** Parse before the generic CLI parser can consume child arguments or repeated flags. */
 export async function runMcpArgv(argv: string[], initialFlags: Record<string, string | boolean> = {}, options: McpCommandOptions = {}): Promise<number> {
@@ -85,6 +101,9 @@ function allowedFlags(command: string): Set<string> {
   if (command === "presets") return new Set(["help", "cwd"]);
   if (command === "install") return new Set([...common, "root", "token-env", "enable"]);
   if (command === "import") return new Set(["help", "cwd", "from", "file", "project", "write", "dry-run"]);
+  if (command === "login") return new Set([...common, "timeout", ...OAUTH_FLAGS]);
+  if (command === "connect") return new Set([...common, "login", "timeout"]);
+  if (["logout", "auth-status"].includes(command)) return new Set(common);
   return new Set([...common, ...(command === "doctor" ? ["connect"] : []), ...(command === "add" ? ["transport", "profile", "protocol", ...REPEATED_FLAGS] : [])]);
 }
 
@@ -126,6 +145,42 @@ export async function runMcpCommand(
       : typeof flag !== "string" || !flag.length) return usage("An MCP option has an invalid or missing value.");
   }
   if (command === "help" || flags.help) { out(MCP_HELP); return 0; }
+  if (["connect", "login", "logout", "auth-status"].includes(command)) {
+    if (rest.length !== 2) return usage(`${command} requires exactly one server name.`);
+    let config = loadMcpConfig({ cwd, home: options.home, path: value("mcp-config"), trustHash: value("trust-mcp") });
+    if (config.diagnostics.some(row => row.severity === "error") || config.sources.some(row => !row.trusted)) { emit({ error: { code: "untrusted_config", message: "Review and authorize a valid configuration before connecting or accessing its credentials." } }); return 1; }
+    let server = config.servers.find(row => row.id === rest[1]);
+    if (!server) return usage("The requested MCP server is not configured.");
+    if ((command === "login" || command === "connect") && !server.enabled) { emit({ error: { code: "server_not_allowed", message: "Enable the reviewed server before connecting." } }); return 1; }
+    const timeoutMs = value("timeout") === undefined ? undefined : Number(value("timeout"));
+    const callbackPort = value("callback-port") === undefined ? undefined : Number(value("callback-port"));
+    if (timeoutMs !== undefined && (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600_000)) return usage("--timeout must be 1–600000 milliseconds.");
+    if (callbackPort !== undefined && (!Number.isSafeInteger(callbackPort) || callbackPort < 1 || callbackPort > 65535)) return usage("--callback-port must be 1–65535.");
+    try {
+      if (OAUTH_FLAGS.some(key => flags[key] !== undefined)) {
+        const oauth = { ...server.oauth, ...(value("client-id") ? { clientId: value("client-id") } : {}), ...(value("client-metadata-url") ? { clientMetadataUrl: value("client-metadata-url") } : {}), ...(value("scope") ? { scope: value("scope") } : {}), ...(callbackPort ? { callbackPort } : {}) };
+        const edited = updateMcpConfig({ cwd, home: options.home, path: value("mcp-config"), trustHash: value("trust-mcp") }, current => ({ servers: current.servers.map(row => row.id === server!.id ? { ...row, oauth } : row) }));
+        config = { ...config, ...edited.config, sources: [{ path: edited.path, sha256: edited.sha256, trusted: true }] };
+        server = config.servers.find(row => row.id === rest[1])!;
+      }
+      const auth = new McpAuthBroker({ home: options.home, fetch: options.fetch, openBrowser: options.openBrowser ?? openExternalUrl });
+      if (command === "logout" || command === "auth-status") {
+        const target = localMcpAuthTarget(server, options.env ?? process.env);
+        emit(command === "logout" ? auth.logout(target) : auth.status(target)); return 0;
+      }
+      const controller = new AbortController();
+      const cancel = () => controller.abort();
+      process.on("SIGINT", cancel); process.on("SIGTERM", cancel);
+      const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
+      try {
+        const result = await connectMcpServers({ servers: [server] }, { home: options.home, env: options.env, auth, fetch: options.fetch, signal, forceLogin: command === "login", login: flags.login === true, timeoutMs, onProgress: message => err(message + "\n") });
+        emit({ ...result, sources: config.sources });
+        return signal.aborted ? 130 : result.ready ? 0 : 1;
+      } finally { process.removeListener("SIGINT", cancel); process.removeListener("SIGTERM", cancel); }
+    } catch (cause) {
+      emit({ error: { code: cause instanceof McpConfigEditError ? cause.code : "authentication_failed", message: "Could not complete the authentication command. Check OAuth configuration and provider access." } }); return 1;
+    }
+  }
   if (command === "presets") {
     if (rest.length > 2) return usage("presets accepts at most one preset ID.");
     const preset = rest[1] ? getMcpPreset(rest[1]) : undefined;
@@ -228,7 +283,7 @@ export async function runMcpCommand(
       if (config.sources.some((source) => !source.trusted)) diagnostics.push({ severity: "error", code: "untrusted_config", message: "Review and authorize the exact configuration hash before connecting." });
       else {
         const { McpManager } = await import("../../mcp/src/manager.js");
-        const manager = new McpManager(config, { env: options.env ?? process.env });
+        const manager = new McpManager(config, { env: options.env ?? process.env, auth: new McpAuthBroker({ home: options.home, fetch: options.fetch }), fetch: options.fetch });
         const controller = new AbortController();
         const handlers = ([ ["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129] ] as const).map(([signal, code]) => {
           const handler = () => {

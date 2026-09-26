@@ -10,7 +10,7 @@ import { SkillRegistry } from "@motifcode/skills";
 import { CORE_TOOLS } from "@motifcode/tools";
 import { Screen, displayWidth } from "@motifcode/tui";
 import type { Transport } from "@motifcode/core";
-import { Chat } from "../src/chat.js";
+import { Chat, type ChatOptions } from "../src/chat.js";
 import { mcpListLines, mcpPanelKeys, mcpPanelView, parseMcpRequest, type McpAction } from "../src/mcp-ui.js";
 
 const ESC = "\x1b";
@@ -49,7 +49,7 @@ function controls(initial = [status()]) {
 }
 
 const opened: { chat: Chat; type(s: string): void; finished: Promise<number> }[] = [];
-function session(mcp?: McpSession, transport?: Transport, compactAt = 0.75) {
+function session(mcp?: McpSession, transport?: Transport, compactAt = 0.75, extra: Partial<ChatOptions> = {}) {
   const output: string[] = [];
   const stdin = new FakeTTY();
   const cwd = mkdtempSync(join(tmpdir(), "motif-mcp-ui-"));
@@ -62,6 +62,7 @@ function session(mcp?: McpSession, transport?: Transport, compactAt = 0.75) {
     tools: [...CORE_TOOLS], journalDir: join(cwd, "journals"), version: "test", hero: false,
     makeTransport: () => transport ?? { endpoint: "fake", model: "test", complete },
     ...(mcp ? { mcp } : {}),
+    ...extra,
   });
   const finished = chat.run();
   const result = { chat, screen, type: (s: string) => { stdin.write(s); }, output: () => strip(output.join("")), finished, complete };
@@ -72,6 +73,81 @@ function session(mcp?: McpSession, transport?: Transport, compactAt = 0.75) {
 afterEach(async () => {
   for (const s of opened) { s.chat.stop(); await s.finished; }
   opened.length = 0;
+});
+
+describe("MCP authorization UI", () => {
+  it("routes explicit login and local logout without model requests", async () => {
+    const c = controls(); const login = vi.fn(async () => {}); const logout = vi.fn(async () => {});
+    const s = session(c.mcp, undefined, 0.75, { mcpLogin: login, mcpLogout: logout });
+    s.type("/mcp login memory\r");
+    await vi.waitFor(() => expect(login).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(c.calls).toContain("reconnect:memory"));
+    s.type("/mcp logout memory\r");
+    await vi.waitFor(() => expect(logout).toHaveBeenCalledOnce());
+    expect(c.calls).toContain("disconnect:memory"); expect(s.complete).not.toHaveBeenCalled();
+  });
+  it("offers browser login after a thrown authentication failure", async () => {
+    const errorStatus = { ...status("memory", "error"), error: { code: "authentication_required", message: "Login required" } };
+    const c = controls([errorStatus]); const login = vi.fn(async () => {});
+    c.mcp.connect = async () => { throw new Error("provider secret must not print"); };
+    const s = session(c.mcp, undefined, 0.75, { mcpLogin: login });
+    s.type("/mcp connect memory\r");
+    await vi.waitFor(() => expect(s.output()).toContain("MCP login required"));
+    s.type("1");
+    await vi.waitFor(() => expect(login).toHaveBeenCalledOnce());
+    expect(c.calls).toContain("reconnect:memory"); expect(s.output()).not.toContain("provider secret");
+  });
+  it("does not launch when browser approval is declined", async () => {
+    const s = session(); const browser = vi.fn(async () => {});
+    const withBrowser = session(undefined, undefined, 0.75, { openBrowser: browser });
+    const result = withBrowser.chat.handleMcpElicitation({ server: "fixture", mode: "url", message: "Approve login", url: "https://example.com/authorize", elicitationId: "id", signal: new AbortController().signal });
+    await vi.waitFor(() => expect(withBrowser.output()).toContain("Open browser"));
+    withBrowser.type("2");
+    expect(await result).toEqual({ action: "decline" }); expect(browser).not.toHaveBeenCalled();
+    s.chat.stop();
+  });
+  it("waits for browser completion and cancels pending UI on abort", async () => {
+    const browser = vi.fn(async () => {}); const s = session(undefined, undefined, 0.75, { openBrowser: browser });
+    const abort = new AbortController();
+    const result = s.chat.handleMcpElicitation({ server: "fixture", mode: "url", message: "Approve login", url: "https://example.com/authorize?state=hidden", elicitationId: "id", signal: abort.signal });
+    await vi.waitFor(() => expect(s.output()).toContain("Open browser")); s.type("1");
+    await vi.waitFor(() => expect(s.output()).toContain("Authorization completed"));
+    expect(browser).toHaveBeenCalledOnce(); expect(s.output()).not.toContain("state=hidden");
+    abort.abort(); expect(await result).toEqual({ action: "cancel" });
+    s.type("/mcp list\r"); await vi.waitFor(() => expect(s.output()).toContain("No MCP servers configured"));
+  });
+  it("submits empty optional form fields while keeping API key input nonempty", async () => {
+    const s = session();
+    const result = s.chat.handleMcpElicitation({ server: "fixture", mode: "form", message: "Preferences", signal: new AbortController().signal,
+      requestedSchema: { type: "object", properties: { note: { type: "string" }, count: { type: "integer" }, tags: { type: "array", items: { type: "string", enum: ["one"] } } } } });
+    await vi.waitFor(() => expect(s.output()).toContain("Continue")); s.type("1");
+    for (const field of ["note", "count", "tags"]) {
+      await vi.waitFor(() => expect(s.output()).toContain(field)); s.type("\r");
+    }
+    expect(await result).toEqual({ action: "accept", content: {} });
+    const verifyKey = vi.fn(async () => ({ ok: true as const }));
+    const login = session(undefined, undefined, 0.75, { requireKey: true, verifyKey });
+    await vi.waitFor(() => expect(login.output()).toContain("Paste your Infron API key")); login.type("\r");
+    expect(verifyKey).not.toHaveBeenCalled();
+    login.type(ESC);
+  });
+  it("clears hidden form input before stopping an active task can redraw it", async () => {
+    const c = controls();
+    const s = session(c.mcp);
+    c.mcp.prepare = async (_task, signal) => {
+      await s.chat.handleMcpElicitation({ server: "fixture", mode: "form", message: "Private response", signal: signal!,
+        requestedSchema: { type: "object", properties: { note: { type: "string" } } } });
+      return "";
+    };
+    s.type("Run fixture task\r");
+    await vi.waitFor(() => expect(s.output()).toContain("Continue")); s.type("1");
+    await vi.waitFor(() => expect(s.output()).toContain("Optional: leave empty to skip"));
+    s.type("SYNTHETIC_FORM_PRIVATE_VALUE");
+    expect(s.output()).not.toContain("SYNTHETIC_FORM_PRIVATE_VALUE");
+    s.chat.stop(); await s.finished;
+    expect(s.output()).not.toContain("SYNTHETIC_FORM_PRIVATE_VALUE");
+    expect(s.complete).not.toHaveBeenCalled();
+  });
 });
 
 describe("MCP manager presentation", () => {

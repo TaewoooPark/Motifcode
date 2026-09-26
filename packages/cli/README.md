@@ -40,6 +40,7 @@ motif mcp presets
 motif mcp install context7 --enable
 motif mcp list
 motif mcp doctor --connect
+motif mcp connect SERVER_NAME --login
 ```
 
 Built-in presets cover Context7, Playwright, Filesystem, Hugging Face, OpenAI Docs,
@@ -50,7 +51,7 @@ Register a custom local stdio server with `motif mcp add NAME -- COMMAND [ARGS..
 Inside a session, `/mcp` manages connections. The built-in `mcp-setup` skill
 also handles clear natural-language MCP setup requests containing a URL;
 `/mcp-setup <URL>` invokes it explicitly. Relaunch Motif after adding or editing
-a registration. `motif skills` lists all 17 built-in skills and any custom ones.
+a registration. `motif skills` lists all 18 built-in skills and any custom ones.
 See the [MCP guide](https://github.com/TaewoooPark/Motifcode/blob/main/docs/mcp.md)
 for credentials, configuration import and supported features.
 
@@ -69,7 +70,11 @@ inspects, selects, installs and verifies the registration. “Install globally�
 uses the user library under `~/.motif/` for all projects; “for this project”
 uses the current project's library. Restart Motif after installation. GitHub folder,
 `SKILL.md` and raw-file links retain supporting files. Marketplace imports preserve skill resources without activating
-plugin hooks, MCP servers or connectors. See the
+plugin hooks or connectors. Use `motif plugins inspect INSTALLED_NAME` then
+`motif plugins connect INSTALLED_NAME --login` to review, approve and check bundled
+MCP connections. Standard OAuth opens the provider’s browser page; private host
+connectors still require their original host. Clear plugin setup requests load
+`plugin-setup` automatically. See the
 [skills guide](https://github.com/TaewoooPark/Motifcode/blob/main/docs/skills.md)
 for selection, scope, updates and compatibility limits.
 

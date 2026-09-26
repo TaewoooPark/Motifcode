@@ -88,7 +88,8 @@ describe.each(['http', 'sse'] as const)('MCP %s authentication diagnostics', tra
     const diagnostic = JSON.stringify(m.statuses());
     expect(diagnostic).not.toContain(secret);
     expect(diagnostic).not.toContain(origin);
-    expect(diagnostic).toContain('OAuth login and refresh are not supported');
+    expect(diagnostic).toContain('not retried');
+    expect(diagnostic).not.toContain('OAuth login and refresh are not supported');
     expect(requests).toBe(1);
   });
 

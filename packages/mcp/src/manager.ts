@@ -1,7 +1,8 @@
 import type { CallToolResult, Tool } from '@modelcontextprotocol/client';
 import { resolveServerConfig } from './config.js';
 import type { McpConfig, McpServerConfig } from './config.js';
-import { deadline, McpClientError, McpConnection } from './client.js';
+import { deadline, McpClientError, McpConnection, McpOperationBudget, type McpAuthorization, type McpElicitationHandler } from './client.js';
+import { McpAuthBroker } from './auth.js';
 import { compileArguments, jsonDigest } from './schema.js';
 import type { ArgumentIssue, ArgumentValidator } from './schema.js';
 
@@ -35,7 +36,15 @@ export type McpOutcome =
   | { ok: true; execution: 'completed'; isError: boolean; result: CallToolResult }
   | { ok: false; execution: 'not_started' | 'unknown'; error: { code: string; message: string; retryable: false }; issues?: ArgumentIssue[] };
 export interface InvokeOptions { signal?: AbortSignal; scopeId: string; approvedInteraction?: boolean; expectedSchemaHash?: string }
-export interface McpManagerOptions { env?: NodeJS.ProcessEnv; fetch?: typeof fetch }
+export interface McpManagerOptions {
+  env?: NodeJS.ProcessEnv;
+  fetch?: typeof fetch;
+  home?: string;
+  auth?: McpAuthorization;
+  onElicitation?: McpElicitationHandler;
+  /** Total human UI allowance per invocation, bounded to at most three minutes. */
+  humanWaitTimeoutMs?: number;
+}
 
 const failure = (code: string, message: string, execution: 'not_started' | 'unknown' = 'not_started'): McpOutcome =>
   ({ ok: false, execution, error: { code, message, retryable: false } });
@@ -54,11 +63,13 @@ export class McpManager {
   private readonly inFlight = new Set<string>();
   private readonly lifetime = new AbortController();
   private readonly environment: NodeJS.ProcessEnv;
+  private readonly auth: McpAuthorization;
   private closed = false;
   private closePromise?: Promise<void>;
 
   constructor(config: McpConfig, private readonly options: McpManagerOptions = {}) {
     this.environment = { ...(options.env ?? process.env) };
+    this.auth = options.auth ?? new McpAuthBroker({ home: options.home, fetch: options.fetch });
     for (const original of config.servers) {
       if (this.servers.has(original.id)) throw new Error('Duplicate MCP server identity.');
       this.servers.set(original.id, structuredClone(original));
@@ -103,7 +114,7 @@ export class McpManager {
         let connection: McpConnection | undefined;
         try {
           if (!this.isCurrent(server, generation)) throw new McpClientError('cancelled', 'MCP connection was cancelled.');
-          connection = new McpConnection(resolveServerConfig(config, this.environment), this.options.fetch);
+          connection = new McpConnection(resolveServerConfig(config, this.environment), this.options.fetch, { auth: this.auth, onElicitation: this.options.onElicitation });
           runtime.current = connection;
           await connection.open(AbortSignal.any([this.lifetime.signal, runtime.controller.signal]));
           if (!this.isCurrent(server, generation, connection)) throw new McpClientError('cancelled', 'MCP connection was cancelled.');
@@ -262,7 +273,8 @@ export class McpManager {
     let dispatched = false;
     let connection: McpConnection | undefined;
     try {
-      return await deadline(this.servers.get(server)!.toolTimeoutMs ?? 30_000, invocationSignal, async signal => {
+      const budget = new McpOperationBudget(this.servers.get(server)!.toolTimeoutMs ?? 30_000, this.options.humanWaitTimeoutMs);
+      return await budget.run(invocationSignal, async signal => {
         connection = await this.connection(server, signal);
         const tool = (await connection.list({ signal })).find(t => t.name === method);
         if (!tool) return failure('tool_missing', 'The tool is not present in the current MCP catalog.');
@@ -279,9 +291,12 @@ export class McpManager {
         }
         const check = validator.check(snapshot);
         if (!check.valid) return { ...failure('invalid_arguments', 'Arguments do not satisfy the original MCP schema; no tool was executed.'), issues: check.issues };
+        // A refresh failure here proves the actual tool dispatch has not begun.
+        // HTTP 401 after dispatch is never a reason to refresh and replay it.
+        await connection.prepareAuthorization(signal);
         if (signal.aborted || !this.isCurrent(server, generation, connection)) return failure('cancelled', 'MCP invocation was cancelled before execution.');
         dispatched = true;
-        const result = await connection.call(tool, snapshot, signal);
+        const result = await connection.call(tool, snapshot, signal, budget);
         return { ok: true as const, execution: 'completed' as const, isError: result.isError === true, result };
       }, () => { void connection?.close(); });
     } catch (error) {

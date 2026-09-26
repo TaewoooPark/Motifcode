@@ -69,7 +69,9 @@ import { doctor, formatChecks } from "./doctor.js";
 import { ToolExecutor } from "./executor.js";
 import { policyForAgent } from "./policy.js";
 import { buildAgentPrompt, buildSystemPrompt } from "./prompt.js";
-import type { McpSession } from "@motifcode/mcp";
+import type { McpSession, McpElicitationRequest, McpElicitationResponse } from "@motifcode/mcp";
+import { requestMcpInteraction } from "./mcp-interaction.js";
+import { McpAuthError } from "../../mcp/src/auth.js";
 
 export interface ChatOptions {
   screen: Screen;
@@ -84,6 +86,9 @@ export interface ChatOptions {
   projectNotes?: string;
   tools: Tool[];
   mcp?: McpSession;
+  mcpLogin?: (server: string, signal: AbortSignal) => Promise<void>;
+  mcpLogout?: (server: string) => void | Promise<void>;
+  openBrowser?: (url: URL) => Promise<void>;
   /** Where each task's journal is written. */
   journalDir: string;
   version: string;
@@ -193,9 +198,11 @@ export class Chat {
   /** A question with numbered answers in place of the prompt, and which one is selected. */
   private pendingChoice: { title: string; lines: string[]; options: string[]; selected: number; resolve: (v: number | null) => void } | null = null;
   /** A secret being typed in place of the prompt — the API key at login. */
-  private pendingSecret: { title: string; lines: string[]; prompt: string; cancelHint: string; resolve: (v: string | null) => void } | null = null;
+  private pendingSecret: { title: string; lines: string[]; prompt: string; cancelHint: string; allowEmpty: boolean; resolve: (v: string | null) => void } | null = null;
   /** Connection controls never share a model task's tool-dispatch lifetime. */
   private mcpPanel: { selected: number; notice?: string } | null = null;
+  private mcpInteractionBusy = false;
+  private readonly mcpLoginOffered = new Set<string>();
   private mcpBusy: { abort: AbortController; server: string; action: McpAction } | null = null;
   private mcpRefreshTimer: NodeJS.Timeout | null = null;
   /** The credential for this session. Starts as the caller's; `/login` replaces it, `/logout` drops it. */
@@ -678,10 +685,10 @@ export class Chat {
   }
 
   /** Take over the prompt for one secret; resolves with the text, or null when given up. */
-  private askSecret(title: string, lines: string[], prompt: string, cancelHint: string): Promise<string | null> {
+  private askSecret(title: string, lines: string[], prompt: string, cancelHint: string, allowEmpty = false): Promise<string | null> {
     return new Promise((resolve) => {
       this.composer.clear();
-      this.pendingSecret = { title, lines, prompt, cancelHint, resolve };
+      this.pendingSecret = { title, lines, prompt, cancelHint, allowEmpty, resolve };
       this.refresh();
     });
   }
@@ -710,7 +717,7 @@ export class Chat {
         this.composer.insert(key.text.replace(/[\r\n]+/g, ""));
         break;
       case "enter":
-        if (this.composer.text.trim() !== "") finish(this.composer.text);
+        if (pending.allowEmpty || this.composer.text.trim() !== "") finish(this.composer.text);
         break;
       case "escape":
         finish(null);
@@ -823,6 +830,53 @@ export class Chat {
     return items;
   }
 
+  private async askMcpChoice(signal: AbortSignal, title: string, lines: string[], options: string[]): Promise<number | null> {
+    if (signal.aborted || this.quitting) return null;
+    const answer = this.askChoice(title, lines, options);
+    const pending = this.pendingChoice;
+    const cancel = () => { if (pending && this.pendingChoice === pending) { this.pendingChoice = null; pending.resolve(null); this.refresh(); } };
+    signal.addEventListener("abort", cancel, { once: true });
+    try { return await answer; } finally { signal.removeEventListener("abort", cancel); }
+  }
+
+  /** SDK callback: the human, not the model, supplies remote form/URL consent. */
+  async handleMcpElicitation(request: McpElicitationRequest): Promise<McpElicitationResponse> {
+    if (this.mcpInteractionBusy || this.pendingChoice || this.pendingSecret || this.pendingConfirm || this.quitting) return { action: "decline" };
+    this.mcpInteractionBusy = true;
+    try {
+      return await requestMcpInteraction(request, {
+        choose: (title, lines, choices) => this.askMcpChoice(request.signal, title, lines, choices),
+        input: async (title, lines, prompt) => {
+          if (request.signal.aborted) return null;
+          const answer = this.askSecret(title, lines, prompt, "enter submit · esc cancel", true);
+          const pending = this.pendingSecret;
+          const cancel = () => { if (pending && this.pendingSecret === pending) { this.pendingSecret = null; this.composer.clear(); pending.resolve(null); this.refresh(); } };
+          request.signal.addEventListener("abort", cancel, { once: true });
+          try { return await answer; } finally { request.signal.removeEventListener("abort", cancel); }
+        },
+        openBrowser: this.opts.openBrowser,
+      });
+    } finally { this.mcpInteractionBusy = false; }
+  }
+
+  private async prepareMcp(task: string, signal: AbortSignal): Promise<string | undefined> {
+    const session = this.opts.mcp;
+    if (!session) return undefined;
+    let context = await session.prepare(task, signal);
+    if (!this.opts.mcpLogin || signal.aborted) return context;
+    let changed = false;
+    for (const status of session.statuses()) {
+      if (status.error?.code !== "authentication_required" || this.mcpLoginOffered.has(status.server) || signal.aborted) continue;
+      this.mcpLoginOffered.add(status.server);
+      const answer = await this.askMcpChoice(signal, "Connect your MCP account", [`${status.server} needs browser authorization before its tools can be used.`], ["1. Sign in", "2. Continue without this connection"]);
+      if (answer !== 0 || signal.aborted) continue;
+      try { await this.opts.mcpLogin(status.server, signal); await session.reconnect(status.server, signal); changed = true; }
+      catch { this.screen.append({ kind: "notice", level: "warn", text: `${status.server}: authorization did not complete. Use /mcp login ${status.server} to try again.` }); }
+    }
+    if (changed && !signal.aborted) context = await session.prepare(task, signal);
+    return context;
+  }
+
   private async mcpCommand(args: string): Promise<CommandOutput> {
     const request = parseMcpRequest(args);
     if (!request) return { title: "/mcp", lines: [MCP_USAGE], error: true };
@@ -851,14 +905,32 @@ export class Chat {
     this.mcpBusy = { abort, action, server };
     this.refresh();
     try {
-      const after = await session[action](server, abort.signal);
+      if (action === "logout") {
+        if (!this.opts.mcpLogout) return fail("MCP logout is unavailable in this session.");
+        await this.opts.mcpLogout(server);
+        this.mcpLoginOffered.delete(server);
+        await session.disconnect(server);
+        return { title: "/mcp", lines: [`${server}: signed out locally and disconnected. Provider account grants are unchanged.`] };
+      }
+      if (action === "login") {
+        if (!this.opts.mcpLogin) return fail("MCP login is unavailable in this session.");
+        await this.opts.mcpLogin(server, abort.signal);
+      }
+      let after;
+      try { after = await session[action === "login" ? "reconnect" : action](server, abort.signal); }
+      catch (cause) { after = session.statuses().find(row => row.server === server); if (after?.state !== "error") throw cause; }
+      if (after.error?.code === "authentication_required" && action !== "login" && action !== "disconnect" && this.opts.mcpLogin) {
+        const answer = await this.askMcpChoice(abort.signal, "MCP login required", [`${server} requires authorization in your browser.`], ["1. Sign in", "2. Not now"]);
+        if (answer === 0 && !abort.signal.aborted) { await this.opts.mcpLogin(server, abort.signal); after = await session.reconnect(server, abort.signal); }
+      }
       if (after.state === "error") return fail(mcpFailureHint(after));
       return { title: "/mcp", lines: [`${server}: ${mcpStatusLabel(after)} · ${mcpToolCount(after)}`] };
-    } catch {
+    } catch (cause) {
       // Connection failures can contain credentials or stderr. Only fixed
       // guidance and the manager's public state are allowed onto the screen.
+      if (cause instanceof McpAuthError) return fail(cause.message);
       return fail(abort.signal.aborted
-        ? `Stopped waiting. The connection may still finish; /mcp disconnect ${server} stops it.`
+        ? action === "login" ? "MCP login cancelled." : `Stopped waiting. The connection may still finish; /mcp disconnect ${server} stops it.`
         : mcpFailureHint(session.statuses().find((s) => s.server === server)));
     } finally {
       this.mcpBusy = null;
@@ -884,7 +956,7 @@ export class Chat {
       const server = servers[panel.selected];
       const shortcut = key.type === "text" ? key.text.toLowerCase() : "";
       const action = key.type === "enter" ? (server?.state === "ready" || server?.state === "connecting" ? "disconnect" : "connect")
-        : shortcut === "r" ? "reconnect" : shortcut === "c" ? "connect" : shortcut === "d" ? "disconnect" : undefined;
+        : shortcut === "r" ? "reconnect" : shortcut === "c" ? "connect" : shortcut === "d" ? "disconnect" : shortcut === "l" ? "login" : undefined;
       if (action && server) {
         void this.changeMcp(action, server.server).then((out) => {
           if (this.mcpPanel === panel) panel.notice = out.lines.join(" ");
@@ -1179,7 +1251,7 @@ export class Chat {
         tools: this.opts.tools,
         system: (ch) => this.systemFor(ch),
         userTask: task,
-        context: await this.opts.mcp?.prepare(display ?? task, abort.signal),
+        context: await this.prepareMcp(display ?? task, abort.signal),
         replyRecovery: (content) => this.opts.mcp?.replyRecovery(content),
         history: this.history,
         executor: this.executor,
@@ -1335,6 +1407,8 @@ export class Chat {
     if (this.quitting) return;
     this.quitting = true;
     this.mcpBusy?.abort.abort();
+    if (this.pendingChoice) { const pending = this.pendingChoice; this.pendingChoice = null; pending.resolve(null); }
+    if (this.pendingSecret) { const pending = this.pendingSecret; this.pendingSecret = null; this.composer.clear(); pending.resolve(null); }
     if (this.mcpRefreshTimer) clearTimeout(this.mcpRefreshTimer);
     this.mcpRefreshTimer = null;
     if (this.active) {

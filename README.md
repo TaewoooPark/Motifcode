@@ -149,6 +149,8 @@ does the same without the question.
 | `motif mcp add NAME --transport http URL` | register a Streamable HTTP MCP server; use `sse` for legacy SSE |
 | `motif mcp list` · `get NAME` · `doctor --connect` | inspect MCP configuration and check server connections |
 | `motif mcp enable NAME` · `disable NAME` · `remove NAME` | change saved MCP registrations |
+| `motif mcp connect NAME --login` · `login NAME` · `logout NAME` | check a connection, sign in through the provider, or clear local OAuth credentials |
+| `motif plugins inspect NAME` · `connect NAME --login` | review and approve bundled services from an installed skill package |
 | `motif mcp import codex\|claude PATH` | preview server settings from another client; `--write NEW_PATH` saves disabled entries |
 | `motif sessions` · `motif resume <file>` | list recorded sessions; resume an interrupted one |
 | `motif skills` · `agents` · `plugins` · `config` | what is loaded, and the effective settings with their sources |
@@ -187,7 +189,9 @@ OAuth credentials. See [preset requirements](docs/mcp.md#built-in-server-presets
 Registration saves to `~/.motif/mcp.json`. `doctor --connect` starts enabled
 servers, checks their tool lists, then closes them. Inside a session, `/mcp`
 opens the connection manager; `/mcp list`, `/mcp connect NAME`,
-`/mcp disconnect NAME` and `/mcp reconnect NAME` also work directly.
+`/mcp disconnect NAME` and `/mcp reconnect NAME` also work directly. Standard
+OAuth servers offer browser sign-in on an authentication failure; use `/mcp login
+NAME` explicitly, or `motif mcp connect NAME --login` from the CLI.
 
 The built-in `mcp-setup` skill guides setup from a GitHub repository or a
 service URL. Ask, for example, “Connect this MCP to Motifcode and check it:
@@ -283,8 +287,8 @@ enter send · \ + enter newline · esc interrupt or clear · ctrl-c twice quit �
 | Permissions | A numbered prompt before a command, a write, a patch or the terminal runs; "don't ask again for this tool"; a refusal the model is told about; Shift-Tab or `/permissions auto` runs everything |
 | Conversation | Each task sees the ones before it; `--continue` and `/resume` bring a recorded conversation back; messages sent while a task runs are queued; Esc interrupts; Codex-style compaction past `compactAt` of the window — the model writes a handoff summary and your own messages are kept verbatim — and `/compact <focus>` on demand |
 | Backend | `.motif/` laid out like Claude Code's `.claude/`: user and project settings, skills, agents, plugins, notes, one journal per task, history; project hooks applied once `motif trust` approves them |
-| Skills and agents | 17 built-in skills (`explore`, `plan`, `explain`, `code-review`, `security-review`, `test-fix`, `debug`, `refactor`, `commit`, `pr-body`, `docs`, `init`, `skill-creator`, `skill-setup`, `mcp-setup`, `motif-endpoint`, `korean`); Claude/Codex skill import and marketplace skill installation; 5 built-in subagents (`explorer`, `reviewer`, `tester`, `planner`, `patcher`) |
-| MCP | stdio, Streamable HTTP and legacy SSE servers; CLI registration and Codex/Claude config import; `/mcp` connection controls; `mcp-setup` for natural-language setup; server tools follow session permissions |
+| Skills and agents | 18 built-in skills (`explore`, `plan`, `explain`, `code-review`, `security-review`, `test-fix`, `debug`, `refactor`, `commit`, `pr-body`, `docs`, `init`, `skill-creator`, `skill-setup`, `plugin-setup`, `mcp-setup`, `motif-endpoint`, `korean`); Claude/Codex skill import and marketplace skill installation; 5 built-in subagents (`explorer`, `reviewer`, `tester`, `planner`, `patcher`) |
+| MCP | stdio, Streamable HTTP and legacy SSE servers; CLI registration and Codex/Claude config import; `/mcp` connection controls; `mcp-setup` for natural-language setup; browser OAuth and human form/URL approval; server tools follow session permissions |
 | Endpoint | The key asked for once and saved to `~/.motif/.env`, withheld from every command the agent runs; a 401 that says which side of the key it is on; a 429 retried after the server's `Retry-After`; `motif doctor` reports what the server actually returns |
 | Screen | Shrinking the window mid-session leaves no stale rows; five themes (`motif`, `claude`, `mono`, `solarized`, `dracula`) swapped in place |
 | Scripts | `motif -p "question"` prints only the reply; `motif "task"` runs one task and exits |

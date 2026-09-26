@@ -52,6 +52,10 @@ motif mcp list
 motif mcp get docs
 motif mcp doctor
 motif mcp doctor --connect
+motif mcp connect docs --login
+motif mcp login docs
+motif mcp auth-status docs
+motif mcp logout docs
 motif mcp disable docs
 motif mcp enable docs
 motif mcp remove docs
@@ -83,6 +87,7 @@ Enter `/mcp` to open the connection manager. It shows each server's name, transp
 | `Enter` | Connect, or disconnect a connected/connecting server |
 | `r` | Reconnect |
 | `c` / `d` | Connect / disconnect |
+| `l` | Sign in through the browser and reconnect |
 | `Esc` | Close the manager, or stop waiting for a connection attempt |
 
 The same controls are available as commands:
@@ -92,6 +97,8 @@ The same controls are available as commands:
 /mcp connect docs
 /mcp disconnect docs
 /mcp reconnect docs
+/mcp login docs
+/mcp logout docs
 ```
 
 These controls affect the current session. Disconnecting pauses the server and removes its tools from subsequent discovery until you connect it again. Reconnecting refreshes the connection and tool catalog; it does not replay previous calls. `/mcp list` only reads local status. Finish the current task and queued work before changing connections.
@@ -140,6 +147,51 @@ motif mcp disable docs --mcp-config ./mcp.json --trust-mcp REVIEWED_SHA256
 ```
 
 Each edit prints the new hash. Review and authorize that new hash before connecting; approval of earlier contents does not carry over.
+
+## Browser login and human approval
+
+For an HTTP/SSE server supporting standard MCP OAuth, use `motif mcp connect NAME
+--login`. Motif checks the connection, opens the provider's authorization page if
+authentication is required, receives the loopback callback and checks the server
+again. `motif mcp login NAME` starts a fresh login directly. In interactive chat,
+an authentication failure offers **Sign in**; `/mcp login NAME` works explicitly.
+The provider's page handles account selection and consent. Motif does not copy
+Claude/Codex sessions or submit account consent on the user's behalf.
+
+Discovery supports protected-resource metadata, authorization-server metadata,
+PKCE and servers using dynamic registration or client metadata documents. If a
+provider requires a pre-registered public client, use its supported client ID and
+callback port:
+
+```sh
+motif mcp login service --client-id YOUR_PUBLIC_CLIENT_ID --callback-port 8765 --scope "read"
+# For a provider supporting client metadata documents:
+motif mcp login service --client-metadata-url https://your.example/client.json
+```
+
+These public OAuth options are saved in the server's `oauth` configuration. An
+explicit config edit changes its trust hash. HTTPS is required except for local
+loopback endpoints. A server with an explicit `Authorization` header continues to
+use that credential; remove that header deliberately before switching to OAuth.
+Provider allowlists and proprietary host connectors may still prevent login.
+Generic OAuth support does not supply a provider's required client registration.
+
+Tokens are stored in a private, atomic file under `~/.motif/` (mode `0600`), not
+in MCP config, model messages or a Keychain. Refresh happens before connection or
+tool dispatch, without silently opening a browser. `auth-status` reports local
+credential state; it does not verify provider access. `logout` deletes local
+credentials; `/mcp logout` also disconnects the current session. Neither revokes
+the provider's account grant. Cancelled, denied and timed-out login attempts do
+not count as successful connections.
+
+Interactive MCP elicitation can ask for non-secret form fields or present a
+provider URL. Motif asks before opening the URL and asks separately whether the
+user completed the action. Password fields and noninteractive requests are
+declined. Human interaction pauses the active network timeout, with a separate
+three-minute ceiling; the original timeout resumes afterward. Concurrent calls
+whose interaction cannot be attributed safely are declined. An elicitation
+error after a tool call does not automatically repeat that call: verify the
+service's state before retrying a potentially completed write.
 
 ## Import Codex or Claude configurations
 
@@ -260,7 +312,7 @@ The profile pairs supported navigation and form actions with `browser_snapshot`.
 | --- | --- |
 | Server stays `connecting` or times out | Run its documented installation first; check the executable path and `startupTimeoutMs`. |
 | Credential reference cannot be resolved | Export the named variable before launching Motif. |
-| `authentication_required` (HTTP 401) | Supply valid credentials through the configured environment/header reference. OAuth login and refresh are not implemented. |
+| `authentication_required` (HTTP 401) | Use `/mcp login NAME` or `motif mcp connect NAME --login` for standard OAuth, or supply the configured credential reference. |
 | `permission_denied` (HTTP 403) | Check the credential's scopes, service eligibility and API enablement. |
 | Explicit configuration is disabled | Review the file and pass its current hash with `--trust-mcp`. |
 | A newly registered server is missing from `/mcp` | Exit and relaunch the Motif process. |
@@ -275,8 +327,10 @@ Large tool results can be retrieved in portions during the same conversation. St
 | Legacy and modern protocol negotiation | Supported; legacy is the default |
 | Original JSON Schema, tool pagination and catalog changes | Supported |
 | Static environment/header credentials | Supported |
-| OAuth browser login and token refresh | Not supported |
-| Resources, prompts, roots, sampling, elicitation, tasks and MCP Apps | Not exposed |
+| OAuth browser login and token refresh | Supported for compatible HTTP/SSE providers; provider registration may be required |
+| Legacy form and URL elicitation | Interactive human approval; no automatic business-call replay |
+| Modern multi-round `input_required` | Diagnosed; automatic continuation not supported |
+| Resources, prompts, roots, sampling, tasks and MCP Apps | Not exposed |
 | Images/audio as model multimodal input | Not supported |
 
 A server requiring an unsupported capability may not work with Motifcode. Client-specific Codex and Claude extensions are separate from standard MCP tool support.

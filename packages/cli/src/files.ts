@@ -190,7 +190,7 @@ const SETUP_LINK = /\uFFFC(\d+)\uFFFC/g;
 const SETUP_ACTION = "(?:globally\\s+)?(?:add|install|import|connect|register|configure|set\\s+up)\\b";
 
 interface SetupClause { text: string; links: URL[]; }
-function setupProse(text: string): SetupClause[] | null {
+function setupProse(text: string, allowWithoutLinks = false): SetupClause[] | null {
   if (text.length > 16_384) return null;
   let prose = text
     .replace(/```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)/g, " ")
@@ -207,7 +207,7 @@ function setupProse(text: string): SetupClause[] | null {
     try { urls.push(new URL(clean)); } catch { return " "; }
     return ` \uFFFC${urls.length - 1}\uFFFC ${raw.slice(clean.length)}`;
   });
-  if (!urls.length) return null;
+  if (!urls.length && !allowWithoutLinks) return null;
   const clauses = prose.split(new RegExp(`[.!?;\\n]+|\\b(?:and|then)\\s+(?=(?:please\\s+)?${SETUP_ACTION})|그리고\\s*`, "i")).map(text => ({
     text, links: [...text.matchAll(SETUP_LINK)].flatMap(match => urls[Number(match[1])] ?? []),
   }));
@@ -291,4 +291,25 @@ export function mcpSetupMentions(text: string): string[] {
       || /(?:및|와|과)\s*mcp(?:\s*서버)?|\bmcp\s*서버(?:와|과)\s*(?:[가-힣]+\s+)?스킬|\bmcp(?:\s*서버)?(?:를|을|도)?\s*(?:연결|등록|설정)(?:해|하)/i.test(intent);
   });
   return selected ? ["skill:mcp-setup"] : [];
+}
+
+function requestsInstalledPluginConnection(intent: string): boolean {
+  if (!/\binstalled\b|(?:이미\s*)?설치(?:된|되어\s*있는|해\s*둔)/i.test(intent)) return false;
+  if (/\b(?:not|isn['’]t|aren['’]t)\s+(?:yet\s+)?installed\b|설치되지|미설치|\b(?:dependenc(?:y|ies)|prerequisites?|requirements?)\b|의존성|의존\s*패키지|필수\s*패키지/i.test(intent)) return false;
+  if (!/\b(?:connect|enable|activate|login|log\s+in)\b|연결|로그인|활성화/i.test(intent)) return false;
+  // Reuse the same imperative/refusal checks without widening skill/MCP routing.
+  return requestsSetup(intent.replace(/\b(?:enable|activate|login|log\s+in)\b/gi, "connect").replace(/로그인|활성화/g, "연결"));
+}
+
+/** Select guidance for plugin sources or explicit connection requests for an installed package. */
+export function pluginSetupMentions(text: string): string[] {
+  if (explicitlySelected(text, "plugin-setup")) return [];
+  const prose = setupProse(text, true);
+  if (!prose) return [];
+  return prose.some(clause => {
+    const intent = setupIntent(clause.text);
+    if (!/\bplugins?\b|플러그인/i.test(intent)) return false;
+    return clause.links.length > 0 && requestsSetup(intent) && !installsDependencies(intent)
+      || requestsInstalledPluginConnection(intent);
+  }) ? ["skill:plugin-setup"] : [];
 }

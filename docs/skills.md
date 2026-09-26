@@ -92,9 +92,9 @@ refuse to discard changes made inside managed snapshots.
 
 Standalone skills retain their supporting files. Skills extracted from plugin
 packages retain the package's shared scripts, references and assets. The
-managed index registers only the selected skills; bundled MCP definitions,
-hooks, agents and connectors remain inactive. Package managers and lifecycle
-scripts are not run during installation.
+managed index registers only the selected skills. Bundled services remain
+inactive until the separate connection step below. Package managers and lifecycle
+scripts are not run during installation; bundled hooks and agents stay inactive.
 
 Supported catalogs include `.claude-plugin/marketplace.json` and
 `.agents/plugins/marketplace.json`, with local, GitHub, Git URL and Git
@@ -109,6 +109,52 @@ Managed data lives in `~/.motif/skills-installed.json` and
 `~/.motif/skill-packages/`, or the equivalent project `.motif/` directories.
 Hand-authored `skills/` folders remain usable. Restart an existing session to
 load changes to the library.
+
+## Connect a skill package or plugin
+
+The built-in `plugin-setup` skill handles clear English or Korean link-based
+plugin installation and connection requests. `/plugin-setup <source or request>`
+also works explicitly. Clear requests to connect, activate or sign in to an
+already installed plugin do not need a link; Motif first looks up its managed
+registration. It installs selected skills, inspects their package's
+services, reviews the connection plan and checks approved connections. The
+`skill-setup` skill uses the same flow when a skill needs a bundled service.
+
+```sh
+motif plugins add OWNER/REPO --skill SKILL_NAME --scope user
+motif plugins inspect INSTALLED_NAME --scope user --json
+motif plugins connect INSTALLED_NAME --scope user --login
+# For a reviewed plan in a noninteractive shell:
+motif skills connect INSTALLED_NAME --scope user --server SERVER_NAME --yes --login
+```
+
+`plugins` uses the existing managed skill installer. An installed skill name or
+unambiguous plugin namespace identifies the package. `inspect` is offline and
+shows available MCP servers, unresolved environment variables and unsupported
+components. With multiple servers, select `--server NAME` or explicitly `--all`.
+`connect` asks before registration and startup; noninteractive runs require
+`--yes`. Browser sign-in requires `--login` and uses the same [MCP OAuth flow](mcp.md#browser-login-and-human-approval).
+Approval of registration is separate from provider consent and later tool use.
+
+User scope registers services in `~/.motif/mcp.json`; project scope writes
+`.motif/mcp.json` and returns the exact trust hash needed at the next launch.
+Restart an existing Motif session after adding registrations. Connection checks
+only initialize servers and list tools; they do not prove account access or call
+business tools. Missing credentials, denied login and unsupported host services
+are reported as partial or failed setup, never as successful account activation.
+
+Supported package MCP definitions are translated without changing the original
+Claude/Codex installation. Local servers run from a verified runtime copy under
+`.motif/plugin-runtimes/`, preserving the immutable installation snapshot. A
+modified original file in that runtime blocks reuse. User-edited MCP registrations
+are not overwritten. Update/remove manage skill receipts; existing MCP
+registrations and runtime copies must be maintained separately.
+
+App IDs from `.app.json` do not identify portable MCP endpoints. Most require
+their original host; the known Hugging Face public adapter is offered with an
+explicit limited-capability notice. Provider allowlists still apply. This flow
+does not activate Claude/Codex hooks, agents, commands or private host connectors,
+and MCP-only packages without skills use the direct `motif mcp` workflow.
 
 ## Author a local skill
 
@@ -162,7 +208,8 @@ are preserved.
 | `${CLAUDE_SKILL_DIR}` | Resolved to the loaded skill directory |
 | `${CLAUDE_PLUGIN_ROOT}` | Resolved only when a package root is registered |
 | Host-specific fork, model, hooks or dynamic shell preprocessing | Diagnosed as unsupported; invocation is blocked rather than approximated |
-| External tools, connectors, executables and credentials | Must be configured separately; installing instructions does not provide them |
+| Bundled MCP servers and login | Explicit `skills connect` / `plugins connect` step for supported package definitions |
+| Host-only connectors, executables and credentials | Diagnosed individually; app IDs and another client's login are not portable |
 
 Descriptions are used for discovery; instructions are loaded progressively.
 Skill bodies are checked against their declared budget and a finite maximum

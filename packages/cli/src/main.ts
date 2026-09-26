@@ -71,11 +71,15 @@ import { doctor, formatChecks, worstState } from "./doctor.js";
 import { ToolExecutor } from "./executor.js";
 import { policyForAgent } from "./policy.js";
 import { buildAgentPrompt, buildSystemPrompt } from "./prompt.js";
-import { loadMcpConfig, McpSession } from "@motifcode/mcp";
+import { loadMcpConfig, McpSession, McpAuthBroker, resolveServerConfig } from "@motifcode/mcp";
 import { runMcpArgv } from "./mcp-command.js";
+import { runPluginsArgv } from "./plugins-command.js";
+import { pluginConnectionUi } from "./plugin-connect-ui.js";
+import { openExternalUrl } from "./browser-open.js";
 import { runSkillsArgv } from "./skills-command.js";
 import { loadInstalledSkills } from "./skill-installer.js";
 import { expandSkillInput } from "./skill-input.js";
+import { localMcpAuthTarget } from "./mcp-connect.js";
 import { findCommand, parseSlash } from "./commands.js";
 
 const VERSION = "0.3.4";
@@ -132,7 +136,7 @@ function parseArgs(argv: string[]): Args {
       else flags[a.slice(2)] = true;
     } else if (command === "run" && rest.length === 0 && ["mcp", "doctor", "login", "logout", "sessions", "resume", "skills", "agents", "plugins", "config", "lint", "distil", "metrics", "trust", "redact", "corpus-spec", "corpus-render", "help", "version"].includes(a)) {
       // These commands own their argv, including repeated selections/values.
-      if (a === "mcp" || a === "skills") return { command: a, rest: argv.slice(i + 1), flags };
+      if (a === "mcp" || a === "skills" || a === "plugins") return { command: a, rest: argv.slice(i + 1), flags };
       command = a;
     } else {
       rest.push(a);
@@ -388,10 +392,14 @@ const HELP = `motif ${VERSION} — a coding agent built for Motif-3 (unofficial;
   motif agents              list available subagents
   motif config              show the effective settings and where each came from
   motif plugins             list the plugins under ~/.motif/plugins and .motif/plugins
+  motif plugins --help      install skill packages and approve bundled MCP connections
   motif mcp list            list configured MCP servers without starting them
   motif mcp presets         show built-in MCP recipes and prerequisites
   motif mcp install ID      register a built-in recipe offline (disabled by default)
   motif mcp doctor          check MCP configuration (add --connect to test servers)
+  motif mcp connect NAME    check a server (add --login for browser authentication)
+  motif mcp login NAME      sign in through the provider's browser page and reconnect
+  motif mcp auth-status NAME  inspect local OAuth state; logout NAME clears it
   motif mcp import          preview Codex TOML or Claude JSON server configuration
   motif lint                lint the tool schemas
   motif trust               approve this repository's .motif/settings.json hooks
@@ -502,9 +510,12 @@ async function main(): Promise<number> {
     withholdSecrets(process.env);
     return runMcpArgv(args.rest, args.flags);
   }
-  if (args.command === "skills") {
+  if (args.command === "skills" || (args.command === "plugins" && (args.rest.length > 0 || args.flags.help))) {
     withholdSecrets(process.env);
-    return runSkillsArgv(args.rest, args.flags, { getSkills: cwd => loadSkills(cwd).list() });
+    const abort = new AbortController(); const cancel = () => abort.abort();
+    process.on("SIGINT", cancel); process.on("SIGTERM", cancel);
+    try { return await (args.command === "skills" ? runSkillsArgv : runPluginsArgv)(args.rest, args.flags, { getSkills: cwd => loadSkills(cwd).list(), connectionOptions: pluginConnectionUi(abort.signal) }); }
+    finally { process.removeListener("SIGINT", cancel); process.removeListener("SIGTERM", cancel); }
   }
   const cwd = flagStr(args.flags, "cwd", process.cwd());
   const envFile = flagStr(args.flags, "env-file", "");
@@ -861,7 +872,11 @@ async function main(): Promise<number> {
     ...(typeof args.flags["trust-mcp"] === "string" ? { trustHash: args.flags["trust-mcp"] } : {}),
   });
   for (const diagnostic of mcpConfig.diagnostics) process.stderr.write(`MCP ${diagnostic.severity}: ${diagnostic.message}\n`);
-  const mcp = new McpSession(mcpConfig, { exposure: flagEnum(args.flags, "mcp-mode", ["prefetch", "search", "catalog"] as const, "prefetch") });
+  const mcpAuth = new McpAuthBroker({ openBrowser: openExternalUrl });
+  let interactiveChat: Chat | undefined;
+  const mcp = new McpSession(mcpConfig, { exposure: flagEnum(args.flags, "mcp-mode", ["prefetch", "search", "catalog"] as const, "prefetch"), manager: { auth: mcpAuth,
+    onElicitation: request => interactiveChat ? interactiveChat.handleMcpElicitation(request) : Promise.resolve({ action: "decline" }),
+  } });
   // The ninth canonical slot is enabled once, never changed mid-session.
   const mcpConnected = mcp.enabled;
   const activeTools = mcpConnected ? [...CORE_TOOLS] : toolPrefix(CORE_TOOLS.length - 1);
@@ -952,11 +967,18 @@ async function main(): Promise<number> {
       ...(projectNotes !== undefined ? { projectNotes } : {}),
       tools: activeTools,
       mcp,
+      mcpLogin: async (id, signal) => {
+        const server = mcpConfig.servers.find(row => row.id === id);
+        if (!server?.enabled || Object.keys(server.headers ?? {}).some(name => name.toLowerCase() === "authorization")) throw new Error("OAuth login unavailable for this server.");
+        await mcpAuth.login(resolveServerConfig(server), { signal });
+      },
+      mcpLogout: id => { const server = mcpConfig.servers.find(row => row.id === id); if (server) mcpAuth.logout(localMcpAuthTarget(server)); },
       journalDir: join(cwd, CONFIG_DIR, "sessions"),
       version: VERSION,
       hero: args.flags["no-hero"] !== true,
       ...(task ? { initialTask: task } : {}),
     });
+    interactiveChat = chat;
     stopInteractive = () => chat.stop();
     return await chat.run();
   }

@@ -1,10 +1,10 @@
 import type { McpStatus } from "@motifcode/mcp";
 import { truncateToWidth, wrapToWidth, type ComposerView } from "@motifcode/tui";
 
-export type McpAction = "connect" | "disconnect" | "reconnect";
+export type McpAction = "connect" | "disconnect" | "reconnect" | "login" | "logout";
 export type McpRequest = { action: "panel" } | { action: "list" } | { action: McpAction; server: string };
 
-export const MCP_USAGE = "/mcp [list | connect NAME | disconnect NAME | reconnect NAME]";
+export const MCP_USAGE = "/mcp [list | connect NAME | disconnect NAME | reconnect NAME | login NAME | logout NAME]";
 
 /** Server names come from validated configuration, never a command or URL. */
 function identity(server: string): string {
@@ -15,7 +15,7 @@ export function parseMcpRequest(args: string): McpRequest | undefined {
   const words = args.trim().split(/\s+/).filter(Boolean);
   if (words.length === 0) return { action: "panel" };
   if (words.length === 1 && words[0] === "list") return { action: "list" };
-  if (words.length !== 2 || !["connect", "disconnect", "reconnect"].includes(words[0]!)) return undefined;
+  if (words.length !== 2 || !["connect", "disconnect", "reconnect", "login", "logout"].includes(words[0]!)) return undefined;
   if (identity(words[1]!) !== words[1]) return undefined;
   return { action: words[0] as McpAction, server: words[1]! };
 }
@@ -34,13 +34,15 @@ export function mcpToolCount(status: McpStatus): string {
 }
 
 export function mcpPanelKeys(width: number): string {
-  return width < 68 ? "↑↓ · enter · r · d · esc" : "↑↓ select · enter toggle · r reconnect · d disconnect · esc close";
+  return width < 68 ? "↑↓ · enter · r · d · l login · esc" : "↑↓ select · enter toggle · r reconnect · d disconnect · l login · esc close";
 }
 
 /** Do not paint exception messages, server stderr, endpoint URLs or headers. */
 export function mcpFailureHint(status?: McpStatus): string {
   const code = status?.error?.code;
   if (code === "cancelled" || code === "aborted") return "Connection cancelled.";
+  if (code === "authentication_required") return "Login required. Press l in /mcp, or use /mcp login NAME.";
+  if (code === "permission_denied") return "Access denied. Check the provider account and granted permissions.";
   if (code === "missing_env") return "Required environment variable is missing. Check motif mcp doctor.";
   if (code === "server_not_allowed" || status?.state === "disabled") return "Disabled in configuration. Check motif mcp list and project trust.";
   return "Connection failed. Check configuration and credentials with motif mcp doctor.";

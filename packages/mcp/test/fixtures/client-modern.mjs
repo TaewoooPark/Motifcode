@@ -13,7 +13,9 @@ serveStdio(() => {
   ], ttlMs: 60_000, cacheScope: 'private' }));
   server.setRequestHandler('tools/call', request => {
     record('call', { name: request.params.name });
-    if (request.params.name === 'input') return { resultType: 'input_required', requestState: 'opaque-fixture-state' };
+    if (request.params.name === 'input') return { resultType: 'input_required', requestState: 'opaque-fixture-state', inputRequests: {
+      login: { method: 'elicitation/create', params: { mode: 'url', message: 'Fixture authorization', url: 'https://example.test/authorize?ticket=modern-private', elicitationId: 'modern-fixture' } },
+    } };
     return { content: [{ type: 'text', text: 'cities' }], structuredContent: ['서울', '부산'] };
   });
   return server;

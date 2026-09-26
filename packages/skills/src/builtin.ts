@@ -219,7 +219,8 @@ tags: setup mcp
    - **서비스 URL과 HTTP/SSE 방식이 주어졌다면** 저장소 탐색이나 curl 검사를 생략하고 곧바로 다음처럼 등록한다. \`motif mcp add ID --transport http URL\`. SSE로 명시됐을 때만 sse를 쓴다. 그다음 4번으로 간다.
    - **GitHub 저장소 URL이면** README, manifest/스크립트, 버전만 확인한다. URL 자체를 HTTP 서버로 등록하지 않는다. 문서의 \`npx\`·\`uvx\` 명령이 있으면 그것을 우선하며 검토한 버전을 고정한다. 예: \`motif mcp add ID -- npx -y PACKAGE_SPEC\`. 문서 인자를 그대로 보존한다. cold npx는 doctor 전에 \`npm exec --yes --package=PACKAGE_SPEC -- node -e 'process.exit(0)'\`로 검토한 정확한 패키지만 미리 설치한다(서버를 시작하지 않음). 그다음 4번으로 간다. 문서 명령이 없거나 실패했을 때만 3번의 소스 설치를 검토한다. 다른 폴더를 탐색하지 않는다.
 3. 소스 설치가 필요할 때만 \`"$HOME/.motif/mcp-servers/ID"\` 같은 영구 경로를 쓴다. HOME을 사용자 이름이나 작업 경로에서 추측하지 않는다. bash에서 실제 \`$HOME\`과 \`command -v\`로 경로를 구한다. 작업 폴더 밖 메타데이터도 bash로 읽는다. 설치 스크립트를 먼저 검토하고 \`package-lock.json\`이면 \`npm ci --ignore-scripts\`, 이어서 검토한 필수 빌드만 실행한다. 원본 소스·manifest·잠금 파일·tsconfig를 고치거나 재생성하지 말고 빌드가 지원되지 않으면 한계를 보고한다. Node 예: \`motif mcp add ID -- node "$HOME/.motif/mcp-servers/ID/dist/index.js"\`. 이 entry가 실제 문서 경로이고 존재하는지 먼저 확인한다. **.js 파일은 node의 인자이며 실행 권한도 확인하지 않고 command로 지정하면 안 된다.** Python/uv/Docker는 문서의 런타임·인자를 보존한다. 인자는 전부 \`--\` 뒤에 둔다. 임시 checkout 경로를 저장하지 않는다. 기존 임시·설치 디렉터리를 \`rm -rf\`로 지우지 말고 확인 후 재사용하거나 충돌하지 않는 새 디렉터리를 쓴다.
-4. \`motif mcp doctor --connect\`를 한 번 실행한다. 대상 서버의 상태와 진단을 확인한다. \`connecting\`이나 exit 0만으로 성공이라 하지 않는다. \`ready\`이고 도구가 0개인 서버도 정상일 수 있다. 실패하면 관찰된 원인 하나만 고친 뒤 한 번 재시도한다. 근거 없이 protocol을 modern 등으로 바꾸지 않는다. 계속 실패하면 오류를 보고한다. 다른 서버의 오류를 대상 서버 오류와 구별한다.
+4. \`motif mcp connect ID --login\`으로 대상 서버만 연결한다. 이 명령은 필요한 경우 브라우저를 열고 사용자의 공급자 로그인을 기다린 뒤 도구 목록을 다시 확인한다. bash의 \`timeout_s\`는 240으로 두어 로그인 대기를 허용한다. 로그인/연결을 요청하지 않고 등록만 요청했으면 실행하지 않는다. \`authentication_required\`가 남으면 \`motif mcp login ID\` 또는 TUI의 \`/mcp login ID\`를 안내한다. 제공자가 사전 등록 client ID를 요구하면 사용자의 Motif용 client ID를 \`--client-id\`로 지정하고, 필요하면 \`--callback-port\`와 \`--scope\`를 사용한다. Claude/Codex client ID나 토큰을 복사하지 않는다.
+5. 연결 결과의 \`ready\`·도구 수를 확인한다. \`connecting\`이나 exit 0만으로 성공이라 하지 않는다. 취소·동의 거절·권한 부족이면 그 상태로 보고하고 자동으로 재로그인하지 않는다. 성공 후에도 이미 실행한 업무 도구를 재전송하지 않는다. 로그인 없이 진단만 할 때는 \`motif mcp doctor --connect\`를 쓴다. provider 승인이 필요한 서비스와 앱 ID만 제공된 커넥터는 자동 연결을 보장할 수 없다.
 
 기존 설정은 보존한다. 같은 ID만으로 같은 서버라고 판단하지 말고 로컬에서 command/args/URL이 일치하는지 비교하되 자격증명은 출력하지 않는다(\`get\`은 값이 가려져 있다). 기존 항목 교체는 사용자가 원할 때만 한다. 이번 작업에서 직접 만든 실패 항목은 수정할 수 있다. 다른 홈·자격증명 저장소·\`.env\`를 읽거나 환경 전체를 출력하지 않는다. 토큰은 저장·출력하지 말고 \`--env-ref NAME=ENV\` 또는 \`--header-env HEADER=ENV\`로 참조한다. 모델 키를 MCP 키로 재사용하지 않는다. 별도 config 파일은 현재/변경 후 해시 신뢰 절차를 따른다.
 
@@ -495,15 +496,32 @@ tags: setup skills
    \`<작업 디렉터리>/.motif/\` 기준이며, list의 filePath는 절대 경로다.
    설치한 스킬은 현재 세션에 아직 없으므로 skill 도구로
    즉시 호출해 검증하지 않는다.
-5. 설치 이름·범위·확인 결과와 진단을 짧게 보고한다. 현재 Motif를 종료·재실행한 뒤
+5. 사용자가 동반 연결·로그인·활성화도 요청했다면 \`motif skills connect '등록 이름' --scope SCOPE --dry-run --json\`으로 실행 명령·주소·필요 환경변수·지원하지 않는 앱 ID를 확인한다. 사용자가 승인한 범위만 선택해 \`motif skills connect '등록 이름' --scope SCOPE --server SERVER --yes --login --json\`을 실행한다. 전체 연결을 요청한 경우에만 \`--all\`을 사용한다. \`--yes\`는 검토한 실행 구성의 승인을 뜻하며, 로그인 동의를 대신하지 않는다. bash \`timeout_s\`는 240을 사용한다. provider 로그인은 브라우저에서 사용자가 진행하고 토큰/인증 코드를 대화로 받지 않는다. 설치만 요청한 경우에는 이 단계를 건너뛴다.
+6. 설치 이름·범위·확인 결과와 연결별 상태를 짧게 보고한다. 현재 Motif를 종료·재실행한 뒤
    \`/<등록 이름> 작업\` 또는 \`@skill:<등록 이름> 작업\`으로 사용하도록 안내한다.
    파일 설치는 실제 업무 전체 성공의 증거가 아니다. 외부 실행 파일·MCP·커넥터·
-   인증 등 별도 의존성을 알리고, 자격 증명을 복사하거나 plugin hook을 실행하거나
+   인증 등 남은 의존성을 알리고, 자격 증명을 복사하거나 plugin hook을 실행하거나
    완전한 Claude/Codex 플러그인 환경이 설치됐다고 말하지 않는다.
 
 갱신·삭제 요청은 먼저 \`motif skills installed --scope SCOPE --json\`으로 확인하고
 같은 범위의 \`motif skills update NAME\` 또는 \`motif skills remove NAME\`을 사용한다.
 로컬 수정본 보호 오류를 우회하거나 다른 클라이언트 설치를 변경하지 않는다.`,
+
+  /* ---------------------------------------------------------------- */
+  `---
+name: plugin-setup
+description: Install Claude/Codex skill packages, approve their MCP connections and open required browser sign-in — 플러그인 설치·연결·로그인
+budget: 1200
+tags: setup plugins auth
+---
+사용자의 플러그인 설치·연결 요청을 Motif CLI로 완료한다. 설명·검토만 요청하면 변경하지 않는다.
+1. 이미 설치된 플러그인의 연결·활성화·로그인 요청이고 사용자가 등록 이름/namespace를 주면 \`motif plugins inspect 'NAME' --scope SCOPE --json\`부터 바로 실행하고 3단계의 계획 검토로 이어간다. 이름이 없거나 not_installed이면 \`motif plugins installed --scope SCOPE\`의 간단한 텍스트 목록으로 등록 이름만 확인한다. 이 목록에는 --json을 붙이거나 전체 receipt를 head/tail로 발췌하지 않는다. 원본 캐시·전체 파일시스템·CLI 설치 위치를 탐색하지 않는다. 기존 설치는 원본 SOURCE 탐색·inspect·add·재설치를 생략한다. 새 설치일 때만 \`pwd\`, \`motif plugins --help\`, \`motif skills inspect 'SOURCE' --json\`으로 후보를 확인하고 마켓플레이스 항목은 \`--plugin ENTRY\`를 지정한다. 현재 작업 폴더를 유지한다.
+2. 요청한 스킬을 \`motif plugins add 'SOURCE' --skill SELECTION --scope user --json\`으로 설치한다. 패키지 전체를 명시적으로 요청했으면 \`--all\`을 쓴다. 글로벌/전역/모든 프로젝트는 user, 현재 프로젝트만 요청하면 project다. 같은 패키지가 이미 있으면 재설치하지 말고 등록 이름을 사용한다.
+3. \`motif plugins inspect '등록 이름 또는 플러그인 namespace' --scope SCOPE --json\`을 실행한다. 명령/주소/필요 환경변수와 unsupported 진단을 확인한다. 이 단계는 실행하지 않는다. 플러그인 hook·agent·호스트 전용 앱 ID는 자동 활성화 대상이 아니므로 연결 성공과 구별한다.
+4. 사용자가 연결을 요청했고 실행 계획이 그 범위에 맞으면 \`motif plugins connect NAME --scope SCOPE --server SERVER --yes --login --json\`을 실행한다. 모든 연결이 요청됐을 때만 \`--all\`을 쓴다. bash의 \`timeout_s\`는 240으로 설정한다. \`--yes\`는 검토된 프로세스/연결 실행 승인이며 provider 로그인은 브라우저에서 사용자가 한다. 자동 승인 설정이나 다른 클라이언트의 token/client ID를 복사하지 않는다. 로그인 취소·거절이면 반복 실행하지 말고 남은 상태를 보고한다.
+5. 설치·등록·인증·실제 연결을 구별해 결과를 보고하고 끝낸다. \`ready\`는 도구 목록 확인이며 실제 업무 전체 성공이 아니다. partial/unsupported를 모두 성공했다고 바꾸지 않는다. 프로젝트 설정은 반환된 configPath/configHash의 \`--mcp-config PATH --trust-mcp HASH\`로 실행해야 한다. 새 스킬/MCP 등록을 사용하려면 Motif를 재시작한다. 기존 등록의 로그인은 TUI \`/mcp login ID\`로 현재 세션에서 이어갈 수 있다.
+
+MCP-only 패키지 전체 설치는 현재 plugins 명령이 지원하지 않는다. 이 경우 기본 mcp-setup의 명시적 서버 등록 경로를 사용한다. 앱 ID-only 커넥터는 제공자별 adapter가 없으면 원래 호스트가 필요하며, 공개 MCP 대안은 원래 커넥터의 모든 기능과 같다고 주장하지 않는다.`,
 
 ];
 
