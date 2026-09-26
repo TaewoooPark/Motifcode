@@ -15,6 +15,8 @@ export interface McpAuthRecord {
   discovery?: OAuthDiscoveryState;
   tokens?: StoredOAuthTokens;
   expiresAt?: number;
+  /** A local consent marker only; the external credential stays in its owner. */
+  externalCredential?: { provider: 'github-cli'; granted: true };
 }
 
 export class McpAuthError extends Error {

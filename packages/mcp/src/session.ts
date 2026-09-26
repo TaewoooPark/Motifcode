@@ -1,5 +1,5 @@
 import Ajv from "ajv";
-import type { McpConfig } from "./config.js";
+import type { McpConfig, McpServerConfig } from "./config.js";
 import { HOST_CONTROL_CARDS, HOST_SERVER_ID, ToolCatalog } from "./discovery.js";
 import { McpManager, type McpManagerOptions, type McpOutcome, type McpStatus } from "./manager.js";
 import { McpClientError } from "./client.js";
@@ -79,6 +79,16 @@ export class McpSession {
 
   /** Human connection controls. These are intentionally not model-facing tools. */
   statuses(): McpStatus[] { return this.manager.statuses(); }
+
+  /** Called only after a human host control approves and persists the entry. */
+  registerTrustedServer(server: McpServerConfig): McpStatus {
+    const status = this.manager.registerTrustedServer(server);
+    const index = this.config.servers.findIndex((entry) => entry.id === server.id);
+    if (index < 0) this.config.servers.push(structuredClone(server));
+    else this.config.servers[index] = structuredClone(server);
+    this.catalog.replace([]);
+    return status;
+  }
 
   async connect(server: string, signal?: AbortSignal): Promise<McpStatus> {
     this.catalog.replace([]);

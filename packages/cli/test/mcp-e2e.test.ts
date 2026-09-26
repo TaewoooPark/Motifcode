@@ -1,7 +1,7 @@
 /** The real CLI, HTTP model boundary, and a real stdio MCP process in one test. */
 import { execFile, spawn } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -62,8 +62,8 @@ function setup(allowedTools = ["echo", "business"]) {
   return { dir, log, envAudit, configPath, hash: configHash(configText), events: (): Event[] => existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as Event) : [] };
 }
 
-async function run(f: ReturnType<typeof setup>, model: MockModel, options: { print?: boolean; trust?: boolean; bundle?: string } = {}) {
-  const argv = ["echo 한글 and inspect the business result", "--endpoint", model.endpoint, "--no-hero", "--max-turns", "8", "--mcp-config", f.configPath, ...(options.trust === false ? [] : ["--trust-mcp", f.hash]), ...(options.print === false ? [] : ["--print"])];
+async function run(f: ReturnType<typeof setup>, model: MockModel, options: { print?: boolean; trust?: boolean; bundle?: string; maxTurns?: number; resume?: string } = {}) {
+  const argv = [...(options.resume ? ["resume", options.resume] : ["echo 한글 and inspect the business result"]), "--endpoint", model.endpoint, "--no-hero", "--max-turns", String(options.maxTurns ?? 8), "--mcp-config", f.configPath, ...(options.trust === false ? [] : ["--trust-mcp", f.hash]), ...(options.print === false ? [] : ["--print"])];
   return new Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }>((done, reject) => {
     const child = spawn(process.execPath, [...(options.bundle ? [options.bundle] : [join(REPO, "node_modules/tsx/dist/cli.mjs"), MAIN]), ...argv], {
       cwd: f.dir, env: { PATH: process.env.PATH, HOME: f.dir, TMPDIR: tmpdir(), NO_COLOR: "1", MOTIF_API_KEY: "synthetic-model-key", OPENAI_API_KEY: "synthetic-other-key" }, stdio: ["ignore", "pipe", "pipe"],
@@ -98,6 +98,27 @@ afterEach(async () => {
 });
 
 describe("MCP through the actual CLI process", () => {
+  it("preserves a recorded ninth slot when resuming with an empty current configuration", async () => {
+    const f = setup();
+    const model = new MockModel((turn) => turn === 1 ? mcp("echo", { text: "checkpoint" }, "before-resume") : reply("Resumed with the same nine-tool prefix."));
+    await model.start();
+    const first = await run(f, model, { print: false, maxTurns: 1 });
+    expect(first.code, first.stderr).toBe(1);
+    const journalDir = join(f.dir, ".motif", "sessions");
+    const journal = join(journalDir, readdirSync(journalDir)[0]!);
+    writeFileSync(journal, readFileSync(journal, "utf8").trimEnd().split("\n").filter(line => JSON.parse(line).record?.t !== "scope_end").join("\n") + "\n");
+    const empty = '{"version":1,"servers":[]}';
+    writeFileSync(f.configPath, empty); f.hash = configHash(empty);
+    const resumed = await run(f, model, { resume: journal });
+    expect(resumed, resumed.stderr).toMatchObject({ code: 0, timedOut: false, stdout: "Resumed with the same nine-tool prefix.\n" });
+    expect(model.bodies).toHaveLength(2);
+    expect(model.bodies[1]!.tools.map(tool => tool.function.name)).toEqual(CANONICAL);
+    expect(model.bodies[1]!.tools).toEqual(model.bodies[0]!.tools);
+    expect(f.events().filter(event => event.event === "boot")).toHaveLength(1);
+    expect(f.events().filter(event => event.event === "call")).toHaveLength(1);
+    assertClosed(f);
+  }, 25_000);
+
   it("recovers MCP arguments in prose through a new model turn and one validated dispatch", async () => {
     const f = setup(); const text = '한글 "quotes"\nC:\\temp ${literal} `backtick`';
     const printed = `먼저 호출합니다.\n\n\`\`\`json\n${JSON.stringify({ server: "lab", method: "echo", args: { text } })}\n\`\`\``;

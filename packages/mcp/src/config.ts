@@ -26,6 +26,8 @@ export interface McpServerConfig {
   envVars?: string[];
   headers?: Record<string, EnvValue>;
   oauth?: McpOAuthConfig;
+  /** Explicit host credential delegation, restricted to its verified service. */
+  credentialProvider?: "github-cli";
   allowedTools?: string[];
   deniedTools?: string[];
   startupTimeoutMs?: number;
@@ -60,7 +62,14 @@ export function isSupportedHeaderName(name: string): boolean {
     && !lower.startsWith("mcp-") && !lower.startsWith("proxy-") && !lower.startsWith("sec-");
 }
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const SERVER_FIELDS = new Set(["id", "enabled", "transport", "protocol", "profile", "command", "args", "cwd", "url", "env", "envVars", "headers", "oauth", "allowedTools", "deniedTools", "startupTimeoutMs", "toolTimeoutMs", "catalogTtlMs"]);
+const SERVER_FIELDS = new Set(["id", "enabled", "transport", "protocol", "profile", "command", "args", "cwd", "url", "env", "envVars", "headers", "oauth", "credentialProvider", "allowedTools", "deniedTools", "startupTimeoutMs", "toolTimeoutMs", "catalogTtlMs"]);
+export const GITHUB_MCP_ENDPOINT = "https://api.githubcopilot.com/mcp/";
+/** Exact matching prevents credential delegation to lookalikes or redirects. */
+export function validateCredentialProvider(server: { credentialProvider?: unknown; transport?: unknown; url?: unknown; oauth?: unknown; headers?: unknown }): void {
+  if (server.credentialProvider === undefined) return;
+  if (server.credentialProvider !== "github-cli" || server.transport !== "http" || server.url !== GITHUB_MCP_ENDPOINT) throw new Error("The GitHub CLI credential provider requires the official GitHub HTTP MCP endpoint.");
+  if (server.oauth !== undefined || isRecord(server.headers) && Object.keys(server.headers).some(name => name.toLowerCase() === "authorization")) throw new Error("Choose the GitHub CLI credential provider, OAuth, or an Authorization header, not more than one.");
+}
 export const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 export const configHash = (text: string): string => createHash("sha256").update(text).digest("hex");
 export const defaultMcpConfigPath = (home = homedir()): string => join(home, ".motif", "mcp.json");
@@ -103,6 +112,7 @@ export function parseMcpConfig(text: string, sourcePath = defaultMcpConfigPath()
     if (entry.enabled !== undefined && typeof entry.enabled !== "boolean") error("invalid_field", "enabled must be a boolean.", id, "enabled");
     if (entry.protocol !== undefined && !["legacy", "modern", "auto"].includes(String(entry.protocol))) error("invalid_field", "protocol must be legacy, modern, or auto.", id, "protocol");
     if (entry.profile !== undefined && entry.profile !== "playwright") error("invalid_field", "profile must be playwright when explicitly enabled.", id, "profile");
+    try { validateCredentialProvider(entry); } catch { error("invalid_credential_provider", "The GitHub CLI credential provider requires the exact official GitHub HTTP MCP endpoint and cannot be combined with OAuth or an Authorization header.", id, "credentialProvider"); }
     if (entry.oauth !== undefined) {
       if (!isRecord(entry.oauth)) error("invalid_oauth", "oauth must be an object containing public client settings.", id, "oauth");
       else {
@@ -211,6 +221,7 @@ function resolveValue(value: EnvValue, env: NodeJS.ProcessEnv, field: string): s
 }
 /** Credentials are resolved only at connection time and must not be logged. */
 export function resolveServerConfig(server: McpServerConfig, env: NodeJS.ProcessEnv = process.env): ResolvedMcpServerConfig {
+  validateCredentialProvider(server);
   const childEnv: Record<string, string> = Object.create(null) as Record<string, string>;
   for (const name of BASE_ENV_ALLOWLIST) if (env[name] !== undefined) childEnv[name] = env[name]!;
   for (const name of server.envVars ?? []) childEnv[name] = resolveValue({ env: name }, env, `envVars.${name}`);

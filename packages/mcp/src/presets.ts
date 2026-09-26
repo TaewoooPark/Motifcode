@@ -27,6 +27,15 @@ const PRESETS: McpPreset[] = [
     config: { id: "context7", enabled: false, transport: "http", url: "https://mcp.context7.com/mcp" },
   },
   {
+    id: "github", title: "GitHub", publisher: "official",
+    description: "GitHub repository, issue, pull request and workflow tools.",
+    sourceUrl: "https://github.com/github/github-mcp-server",
+    prerequisites: ["Network access to api.githubcopilot.com and an authorized GitHub account.", "GitHub CLI (gh) installed for browser login and durable system credential storage."],
+    authentication: "Run motif mcp login github to authorize the existing GitHub CLI account or sign in. Credentials stay in gh storage and are resolved privately on each request. Optional --token-env GITHUB_PERSONAL_ACCESS_TOKEN replaces this provider with a Bearer environment reference.",
+    options: ["token-env"],
+    config: { id: "github", enabled: false, transport: "http", url: "https://api.githubcopilot.com/mcp/", credentialProvider: "github-cli" },
+  },
+  {
     id: "hugging-face", title: "Hugging Face", publisher: "official",
     description: "Search Hugging Face models, datasets, Spaces, and papers.",
     sourceUrl: "https://huggingface.co/docs/hub/agents-mcp",
@@ -109,6 +118,6 @@ export function createMcpPresetConfig(id: string, options: McpPresetOptions = {}
     } catch { throw new McpPresetError("invalid_option", "--root must resolve to an existing directory without environment expressions."); }
     server.args!.push(root);
   }
-  if (options.tokenEnv) server.headers = { Authorization: `Bearer \${${options.tokenEnv}}` };
+  if (options.tokenEnv) { delete server.credentialProvider; server.headers = { Authorization: `Bearer \${${options.tokenEnv}}` }; }
   return server;
 }

@@ -1,0 +1,6 @@
+{
+  "name": "browser-web-testing",
+  "description": "Explore web interfaces with Playwright and turn stable flows into reproducible tests.",
+  "version": "1.0.0",
+  "mcpPresets": ["playwright"]
+}

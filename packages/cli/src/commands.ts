@@ -313,8 +313,8 @@ export const COMMANDS: readonly SlashCommand[] = [
   },
   {
     name: "mcp",
-    description: "manage MCP connections and view status",
-    usage: "[list|connect NAME|disconnect NAME|reconnect NAME|login NAME|logout NAME]",
+    description: "browse built-in MCPs, set up connections and sign in",
+    usage: "[list|install PRESET|connect NAME|disconnect NAME|reconnect NAME|login NAME|logout NAME]",
     run: (ctx, args) => ctx.mcp(args),
   },
   {

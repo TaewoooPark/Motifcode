@@ -1,0 +1,6 @@
+{
+  "name": "mcp-builder",
+  "description": "Design and implement MCP servers with bounded results, precise schemas and reproducible transport smoke checks.",
+  "version": "1.0.0",
+  "mcpPresets": []
+}

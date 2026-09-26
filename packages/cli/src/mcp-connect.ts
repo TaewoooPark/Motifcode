@@ -3,6 +3,7 @@ import { resolveServerConfig, type McpConfig, type McpServerConfig } from "../..
 import { McpAuthBroker, McpAuthError, type McpAuthTarget } from "../../mcp/src/auth.js";
 import { McpClientError } from "../../mcp/src/client.js";
 import { openExternalUrl } from "./browser-open.js";
+import { runGithubBrowserLogin } from "./github-login.js";
 
 export interface ConnectMcpOptions {
   home?: string;
@@ -22,8 +23,8 @@ export interface McpConnectResult { mode: "connection-check"; ready: boolean; co
 
 /** Local credential controls need the endpoint identity, never transport secrets. */
 export function localMcpAuthTarget(server: McpServerConfig, env: NodeJS.ProcessEnv = process.env): McpAuthTarget {
-  const { id, enabled, transport, url, oauth } = server;
-  return resolveServerConfig({ id, enabled, transport, url, oauth }, env);
+  const { id, enabled, transport, url, oauth, credentialProvider } = server;
+  return resolveServerConfig({ id, enabled, transport, url, oauth, credentialProvider }, env);
 }
 
 /** Explicit host action: authenticates once, reconnects, and lists tools. No business calls. */
@@ -38,8 +39,13 @@ export async function connectMcpServers(config: McpConfig, options: ConnectMcpOp
   const login = async (server: McpServerConfig) => {
     if (server.transport === "stdio") throw new Error("OAuth is only available for HTTP MCP servers.");
     if (Object.keys(server.headers ?? {}).some(name => name.toLowerCase() === "authorization")) throw new Error("Explicit credentials cannot be replaced by OAuth.");
-    options.onProgress?.(`${server.id}: opening the browser for authorization; complete sign-in there. Cancel to stop waiting.`);
-    await auth.login(resolveServerConfig(server, options.env ?? process.env), { signal: options.signal, timeoutMs: options.timeoutMs });
+    options.onProgress?.(server.credentialProvider === "github-cli"
+      ? `${server.id}: checking the saved GitHub CLI login. A browser sign-in is offered if needed.`
+      : `${server.id}: opening the browser for authorization; complete sign-in there. Cancel to stop waiting.`);
+    await auth.login(resolveServerConfig(server, options.env ?? process.env), {
+      signal: options.signal, timeoutMs: options.timeoutMs,
+      onGitHubLogin: ({ signal }) => runGithubBrowserLogin({ signal, onProgress: options.onProgress, openBrowser: options.openBrowser, env: options.env }),
+    });
   };
   try {
     for (const server of config.servers) {

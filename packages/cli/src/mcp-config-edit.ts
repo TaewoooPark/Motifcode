@@ -99,7 +99,7 @@ export function summarizeMcpServer(server: McpServerConfig): Record<string, unkn
   const references = (map: McpServerConfig["env"]) => map === undefined ? undefined : Object.fromEntries(Object.entries(map).map(([name, value]) => [name,
     typeof value === "object" ? { env: value.env } : { value: "[withheld]", env: [...value.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-[^}]*)?\}/g)].map((match) => match[1]) },
   ]));
-  return { id: server.id, enabled: server.enabled, transport: server.transport, protocol: server.protocol, profile: server.profile,
+  return { id: server.id, enabled: server.enabled, transport: server.transport, protocol: server.protocol, profile: server.profile, credentialProvider: server.credentialProvider,
     ...(server.command !== undefined ? { command: "[withheld]", argumentCount: server.args?.length ?? 0 } : {}),
     ...(server.cwd !== undefined ? { cwd: "[withheld]" } : {}), ...(server.url !== undefined ? { url: "[withheld]" } : {}),
     env: references(server.env), envVars: server.envVars, headers: references(server.headers), allowedTools: server.allowedTools, deniedTools: server.deniedTools,

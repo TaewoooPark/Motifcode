@@ -71,8 +71,10 @@ import { doctor, formatChecks, worstState } from "./doctor.js";
 import { ToolExecutor } from "./executor.js";
 import { policyForAgent } from "./policy.js";
 import { buildAgentPrompt, buildSystemPrompt } from "./prompt.js";
-import { loadMcpConfig, McpSession, McpAuthBroker, resolveServerConfig } from "@motifcode/mcp";
+import { loadMcpConfig, listMcpPresets, McpSession, McpAuthBroker, resolveServerConfig } from "@motifcode/mcp";
 import { runMcpArgv } from "./mcp-command.js";
+import { McpCatalogRuntime } from "./mcp-catalog-runtime.js";
+import { runGithubBrowserLogin } from "./github-login.js";
 import { runPluginsArgv } from "./plugins-command.js";
 import { pluginConnectionUi } from "./plugin-connect-ui.js";
 import { openExternalUrl } from "./browser-open.js";
@@ -391,7 +393,7 @@ const HELP = `motif ${VERSION} — a coding agent built for Motif-3 (unofficial;
   motif skills --help       inspect, add, import, update or remove skill packages
   motif agents              list available subagents
   motif config              show the effective settings and where each came from
-  motif plugins             list the plugins under ~/.motif/plugins and .motif/plugins
+  motif plugins             list bundled, user and project plugins
   motif plugins --help      install skill packages and approve bundled MCP connections
   motif mcp list            list configured MCP servers without starting them
   motif mcp presets         show built-in MCP recipes and prerequisites
@@ -510,7 +512,7 @@ async function main(): Promise<number> {
     withholdSecrets(process.env);
     return runMcpArgv(args.rest, args.flags);
   }
-  if (args.command === "skills" || (args.command === "plugins" && (args.rest.length > 0 || args.flags.help))) {
+  if (args.command === "skills" || args.command === "plugins") {
     withholdSecrets(process.env);
     const abort = new AbortController(); const cancel = () => abort.abort();
     const signals = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
@@ -878,8 +880,18 @@ async function main(): Promise<number> {
   const mcp = new McpSession(mcpConfig, { exposure: flagEnum(args.flags, "mcp-mode", ["prefetch", "search", "catalog"] as const, "prefetch"), manager: { auth: mcpAuth,
     onElicitation: request => interactiveChat ? interactiveChat.handleMcpElicitation(request) : Promise.resolve({ action: "decline" }),
   } });
-  // The ninth canonical slot is enabled once, never changed mid-session.
-  const mcpConnected = mcp.enabled;
+  const mcpCatalog = new McpCatalogRuntime(mcp, mcpConfig, {
+    cwd,
+    ...(typeof args.flags["mcp-config"] === "string" ? { path: args.flags["mcp-config"] } : {}),
+    ...(typeof args.flags["trust-mcp"] === "string" ? { trustHash: args.flags["trust-mcp"] } : {}),
+  });
+  const wantsChat = args.flags["interactive"] === true || args.flags["chat"] === true || args.flags["continue"] === true;
+  const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  // Reserve the ninth canonical slot for the interactive catalog even when no
+  // server is registered yet; installation must never change the cached prefix.
+  const mcpConnected = mcp.enabled
+    || resumeFrom?.header.prompt.toolSchemaHash === toolSchemaHash(CORE_TOOLS)
+    || (!resumeFrom && tty && (wantsChat || !args.rest.join(" ").trim()));
   const activeTools = mcpConnected ? [...CORE_TOOLS] : toolPrefix(CORE_TOOLS.length - 1);
   const activeToolNames = CORE_TOOL_NAMES.slice(0, activeTools.length);
   const schemaHash = toolSchemaHash(activeTools);
@@ -926,8 +938,6 @@ async function main(): Promise<number> {
   // No task and a terminal on both ends means a conversation, not a usage
   // error. Without a terminal the old answer stands: a pipe cannot host a
   // prompt, and printing help is the honest response to an empty command.
-  const wantsChat = args.flags["interactive"] === true || args.flags["chat"] === true || args.flags["continue"] === true;
-  const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
   if (wantsChat && !tty) {
     throw new UsageError("--interactive needs a terminal on stdin and stdout");
   }
@@ -968,10 +978,15 @@ async function main(): Promise<number> {
       ...(projectNotes !== undefined ? { projectNotes } : {}),
       tools: activeTools,
       mcp,
-      mcpLogin: async (id, signal) => {
+      mcpPresets: listMcpPresets,
+      mcpConfigLabel: mcpCatalog.configLabel,
+      mcpInstall: (id, options, signal) => mcpCatalog.install(id, options, signal),
+      mcpLogin: async (id, signal, onProgress) => {
         const server = mcpConfig.servers.find(row => row.id === id);
         if (!server?.enabled || Object.keys(server.headers ?? {}).some(name => name.toLowerCase() === "authorization")) throw new Error("OAuth login unavailable for this server.");
-        await mcpAuth.login(resolveServerConfig(server), { signal });
+        await mcpAuth.login(resolveServerConfig(server), { signal,
+          onGitHubLogin: ({ signal }) => runGithubBrowserLogin({ signal, onProgress, openBrowser: openExternalUrl, humanInteractive: true }),
+        });
       },
       mcpLogout: id => { const server = mcpConfig.servers.find(row => row.id === id); if (server) mcpAuth.logout(localMcpAuthTarget(server)); },
       journalDir: join(cwd, CONFIG_DIR, "sessions"),

@@ -2,7 +2,7 @@ import { Client, SSEClientTransport, StreamableHTTPClientTransport, UrlElicitati
 import type { CallToolResult, ElicitRequestFormParams, ElicitRequestParams, ElicitResult, Tool, Transport } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import type { McpServerConfig, ResolvedMcpServerConfig } from './config.js';
+import { GITHUB_MCP_ENDPOINT, type McpServerConfig, type ResolvedMcpServerConfig } from './config.js';
 import { McpAuthError } from './auth.js';
 import { compileArguments } from './schema.js';
 
@@ -156,6 +156,7 @@ export class McpConnection {
       const guardedFetch: typeof fetch = async (input, init) => {
         const destination = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
         if (destination.origin !== url.origin) return Promise.reject(new McpClientError('origin_changed', 'MCP request crossed the configured origin.'));
+        if (config.credentialProvider === 'github-cli' && destination.href !== GITHUB_MCP_ENDPOINT) return Promise.reject(new McpClientError('origin_changed', 'GitHub MCP credential delegation is restricted to its configured endpoint.'));
         const signals = [this.lifetime.signal, ...(init?.signal ? [init.signal] : [])];
         const signal = AbortSignal.any(signals);
         const headers = new Headers(input instanceof Request ? input.headers : undefined);

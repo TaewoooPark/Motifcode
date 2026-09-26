@@ -38,6 +38,16 @@ describe("built-in MCP presets", () => {
     for (const root of [undefined, "", "missing", "file.txt"]) expect(() => createMcpPresetConfig("filesystem", { cwd, root })).toThrow("--root");
   });
 
+  it("registers GitHub without ambient credentials and supports an explicit token reference", () => {
+    const server = createMcpPresetConfig("github");
+    expect(server).toEqual({ id: "github", enabled: false, transport: "http", url: "https://api.githubcopilot.com/mcp/", credentialProvider: "github-cli" });
+    const authenticated = createMcpPresetConfig("github", { tokenEnv: "GITHUB_PERSONAL_ACCESS_TOKEN", enabled: true });
+    expect(authenticated.headers).toEqual({ Authorization: "Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}" });
+    expect(resolveServerConfig(authenticated, { GITHUB_PERSONAL_ACCESS_TOKEN: "private-test-value" }).headers.authorization).toBe("Bearer private-test-value");
+    expect(() => resolveServerConfig(authenticated, {})).toThrow();
+    expect(parseMcpConfig(JSON.stringify({ servers: [authenticated] })).diagnostics).toEqual([]);
+  });
+
   it("rejects unsupported options and secret values instead of silently ignoring them", () => {
     expect(() => createMcpPresetConfig("unknown")).toThrow("Unknown built-in");
     expect(() => createMcpPresetConfig("gmail")).toThrow("--token-env");

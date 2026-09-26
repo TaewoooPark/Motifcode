@@ -32,6 +32,52 @@ afterEach(async () => {
 });
 
 describe('human MCP connection controls with real SDK clients', () => {
+  it('adds a host-approved server to an empty running session and preserves result scopes', async () => {
+    const f = fixture(); const session = new McpSession({ servers: [] }, { maxOutputBytes: 1600 }); sessions.push(session);
+    const saved = session.results.present('parent', { text: 'retained '.repeat(1000), marker: 'original' }) as { handle: string };
+    expect(session.enabled).toBe(false);
+    expect(await session.prepare('echo')).toBe('');
+    expect(await session.invoke('__motif_host__', 'register', { server: f.server }, scope)).toMatchObject({ ok: false });
+    session.registerTrustedServer(f.server);
+    expect(session.enabled).toBe(true);
+    expect(await session.connect('lab')).toMatchObject({ state: 'ready', toolCount: 7 });
+    expect(await session.invoke('lab', 'echo', { text: 'immediately available' }, scope)).toMatchObject({ ok: true });
+    expect(session.results.read('parent', { handle: saved.handle, pointer: '/marker' })).toMatchObject({ value: 'original' });
+    expect(session.results.read('child', { handle: saved.handle })).toMatchObject({ code: 'scope_denied' });
+  });
+
+  it('only enables an identical disabled entry and never replaces an active connection', async () => {
+    const f = fixture(); const m = manager([{ ...f.server, enabled: false }]);
+    expect(() => m.registerTrustedServer({ ...f.server, command: 'unexpected' })).toThrow(/cannot be replaced/);
+    expect(m.statuses()[0]?.enabled).toBe(false);
+    expect(m.registerTrustedServer(f.server)).toMatchObject({ enabled: true, state: 'idle' });
+    await m.connect('lab'); const pid = f.events()[0]!.pid;
+    expect(() => m.registerTrustedServer({ ...f.server, args: ['different-server.mjs'] })).toThrow(/cannot be replaced/);
+    expect(() => m.registerTrustedServer({ ...f.server, enabled: false })).toThrow(/cannot be replaced/);
+    expect(m.registerTrustedServer(f.server)).toMatchObject({ state: 'ready' });
+    expect(() => process.kill(pid, 0)).not.toThrow();
+    expect(await m.invoke('lab', 'echo', { text: 'still the same process' }, scope)).toMatchObject({ ok: true });
+    expect(f.events().filter(event => event.event === 'boot')).toHaveLength(1);
+    await m.close();
+    expect(() => m.registerTrustedServer({ ...f.server, id: 'late' })).toThrow(/closed/);
+  });
+
+  it('retains in-flight deduplication and unknown outcomes when another server is registered', async () => {
+    const a = fixture('a'), b = fixture('b'); const m = manager([a.server]);
+    await m.connect('a');
+    const pending = m.invoke('a', 'wait', {}, scope);
+    await waitFor(() => a.events().some(event => event.event === 'call' && event.name === 'wait'));
+    m.registerTrustedServer(b.server);
+    expect(await m.invoke('a', 'wait', {}, { scopeId: 'other' })).toMatchObject({ error: { code: 'already_in_flight' } });
+    await m.disconnect('a');
+    expect(await pending).toMatchObject({ execution: 'unknown' });
+    await m.connect('a');
+    m.registerTrustedServer(b.server);
+    expect(await m.invoke('a', 'wait', {}, { scopeId: 'other' })).toMatchObject({ error: { code: 'previous_execution_unknown' } });
+    expect(await m.connect('b')).toMatchObject({ state: 'ready' });
+    expect(await m.invoke('b', 'echo', { text: 'new server' }, scope)).toMatchObject({ ok: true });
+  });
+
   it('lists safe immutable configuration status and cannot enable disabled or untrusted entries', async () => {
     const f = fixture();
     const server = { ...f.server, enabled: false, profile: 'playwright' as const, env: { SECRET: 'synthetic-hidden' } };

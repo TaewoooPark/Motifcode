@@ -20,7 +20,8 @@
  */
 
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseAgent, type AgentDef } from "@motifcode/agents";
 import { loadSkill, type Skill } from "@motifcode/skills";
 
@@ -29,7 +30,8 @@ export interface PluginInfo {
   description: string;
   version?: string;
   path: string;
-  source: "user" | "project";
+  source: "builtin" | "user" | "project";
+  mcpPresets: string[];
   skills: string[];
   agents: string[];
 }
@@ -41,14 +43,16 @@ export interface LoadedPlugins {
   problems: string[];
 }
 
-function readManifest(dir: string): { name: string; description: string; version?: string } | null {
+function readManifest(dir: string): { name: string; description: string; version?: string; mcpPresets: string[] } | null {
   const file = join(dir, "plugin.json");
   if (!existsSync(file)) return null;
   const raw = JSON.parse(readFileSync(file, "utf8")) as { [key: string]: unknown };
   const name = typeof raw["name"] === "string" && raw["name"] !== "" ? raw["name"] : null;
   if (!name) throw new Error(`${file}: plugin.json needs a name`);
+  if (raw["mcpPresets"] !== undefined && (!Array.isArray(raw["mcpPresets"]) || raw["mcpPresets"].some(id => typeof id !== "string" || !/^[a-z0-9][a-z0-9-]*$/.test(id)))) throw new Error(`${file}: mcpPresets must be an array of preset IDs`);
   return {
     name,
+    mcpPresets: [...new Set((raw["mcpPresets"] ?? []) as string[])],
     description: typeof raw["description"] === "string" ? raw["description"] : "",
     ...(typeof raw["version"] === "string" ? { version: raw["version"] } : {}),
   };
@@ -56,8 +60,11 @@ function readManifest(dir: string): { name: string; description: string; version
 
 /** Load every plugin under `{root}/plugins`, in directory order. */
 export function loadPluginsFrom(root: string, source: PluginInfo["source"]): LoadedPlugins {
+  return loadPluginDirectory(join(root, "plugins"), source);
+}
+
+function loadPluginDirectory(dir: string, source: PluginInfo["source"]): LoadedPlugins {
   const out: LoadedPlugins = { plugins: [], skills: [], agents: [], problems: [] };
-  const dir = join(root, "plugins");
   if (!existsSync(dir)) return out;
   for (const name of readdirSync(dir).sort()) {
     const path = join(dir, name);
@@ -111,15 +118,22 @@ export function loadPluginsFrom(root: string, source: PluginInfo["source"]): Loa
   return out;
 }
 
-/** User plugins, then the project's; a later plugin shadows an earlier one. */
-export function loadPlugins(opts: { cwd: string; home: string }): LoadedPlugins {
+/** Distributed beside src/ and dist/; discovery never registers or starts MCP servers. */
+export const BUILTIN_PLUGINS_DIRECTORY = join(dirname(fileURLToPath(import.meta.url)), "../builtin-plugins");
+export function loadBuiltinPlugins(directory = BUILTIN_PLUGINS_DIRECTORY): LoadedPlugins {
+  return loadPluginDirectory(directory, "builtin");
+}
+
+/** Bundled, user, then project plugins; later skills/agents shadow earlier ones. */
+export function loadPlugins(opts: { cwd: string; home: string; builtinDirectory?: string | false }): LoadedPlugins {
+  const builtin = opts.builtinDirectory === false ? { plugins: [], skills: [], agents: [], problems: [] } : loadBuiltinPlugins(opts.builtinDirectory);
   const user = loadPluginsFrom(join(opts.home, ".motif"), "user");
   const project = loadPluginsFrom(join(opts.cwd, ".motif"), "project");
   return {
-    plugins: [...user.plugins, ...project.plugins],
-    skills: [...user.skills, ...project.skills],
-    agents: [...user.agents, ...project.agents],
-    problems: [...user.problems, ...project.problems],
+    plugins: [...builtin.plugins, ...user.plugins, ...project.plugins],
+    skills: [...builtin.skills, ...user.skills, ...project.skills],
+    agents: [...builtin.agents, ...user.agents, ...project.agents],
+    problems: [...builtin.problems, ...user.problems, ...project.problems],
   };
 }
 
@@ -133,7 +147,8 @@ export function describePlugins(loaded: LoadedPlugins): string[] {
     return (
       `${p.name.padEnd(16)} ${p.description}${p.version ? ` (${p.version})` : ""}  ·  ${p.source}  ·  ` +
       `${p.skills.length} skill(s)${p.skills.length ? `: ${p.skills.join(", ")}` : ""}` +
-      `${p.agents.length ? `  ·  ${p.agents.length} agent(s): ${p.agents.join(", ")}` : ""}`
+      `${p.agents.length ? `  ·  ${p.agents.length} agent(s): ${p.agents.join(", ")}` : ""}` +
+      `${p.mcpPresets.length ? `  ·  MCP presets: ${p.mcpPresets.join(", ")} (connect explicitly)` : ""}`
     );
   });
   for (const p of loaded.problems) lines.push(`! ${p}`);

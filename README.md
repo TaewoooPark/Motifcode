@@ -150,7 +150,7 @@ does the same without the question.
 | `motif mcp list` · `get NAME` · `doctor --connect` | inspect MCP configuration and check server connections |
 | `motif mcp enable NAME` · `disable NAME` · `remove NAME` | change saved MCP registrations |
 | `motif mcp connect NAME --login` · `login NAME` · `logout NAME` | check a connection, sign in through the provider, or clear local OAuth credentials |
-| `motif plugins inspect NAME` · `connect NAME --login` | review and approve bundled services from an installed skill package |
+| `motif plugins list` · `inspect NAME` · `connect NAME` | discover built-in bundles and review or connect their services; also supports installed skill packages |
 | `motif mcp import codex\|claude PATH` | preview server settings from another client; `--write NEW_PATH` saves disabled entries |
 | `motif sessions` · `motif resume <file>` | list recorded sessions; resume an interrupted one |
 | `motif skills` · `agents` · `plugins` · `config` | what is loaded, and the effective settings with their sources |
@@ -180,7 +180,7 @@ motif mcp list
 motif mcp doctor --connect
 ```
 
-The catalog includes Context7, Playwright, Filesystem, Hugging Face, OpenAI Docs,
+The catalog includes Context7, GitHub, Playwright, Filesystem, Hugging Face, OpenAI Docs,
 Tauri and Gmail. Installation saves a disabled registration unless `--enable` is
 given; local packages are downloaded on first connection. Filesystem needs an
 explicit `--root`, Tauri needs an app bridge, and Gmail needs separately supplied
@@ -188,7 +188,8 @@ OAuth credentials. See [preset requirements](docs/mcp.md#built-in-server-presets
 
 Registration saves to `~/.motif/mcp.json`. `doctor --connect` starts enabled
 servers, checks their tool lists, then closes them. Inside a session, `/mcp`
-opens the connection manager; `/mcp list`, `/mcp connect NAME`,
+shows registered servers and available built-in presets. Select a preset to review
+its prerequisites, register it and connect in the current session. `/mcp list`, `/mcp connect NAME`,
 `/mcp disconnect NAME` and `/mcp reconnect NAME` also work directly. Standard
 OAuth servers offer browser sign-in on an authentication failure; use `/mcp login
 NAME` explicitly, or `motif mcp connect NAME --login` from the CLI.
@@ -200,10 +201,41 @@ skill automatically, or use `/mcp-setup <URL>` explicitly. It reads the server's
 installation instructions, registers it and checks the connection using the
 normal execution permissions.
 
-After adding or editing a registration, exit and relaunch Motif to load the
-configuration. `/new` clears the conversation but does not reload servers.
+Changes made inside `/mcp` take effect immediately. After editing registrations
+from another terminal or file editor, relaunch Motif to load them. `/new` clears
+the conversation but does not reload external edits.
 See the [MCP guide](docs/mcp.md) for credentials, Codex/Claude configuration
 import, connection controls and supported features.
+
+### Built-in workflow bundles
+
+Five plugins ship with Motif. Their skill names are available immediately in every
+project; instructions and supporting references load only when used. User and
+project skills can override them. Listing plugins never starts a service.
+
+| Bundle | Skills | Optional service |
+|---|---|---|
+| `library-docs` | `/library-docs` | Context7 |
+| `browser-web-testing` | `/browser-testing` | Playwright |
+| `github-workflow` | `/github-workflow` | GitHub MCP or an authenticated `gh` CLI |
+| `frontend-quality` | `/frontend-quality`, `/react-composition` | Context7 and Playwright |
+| `mcp-builder` | `/mcp-builder` | The server being developed |
+
+```sh
+motif plugins list
+motif plugins inspect library-docs --json
+motif plugins connect library-docs
+motif plugins connect browser-web-testing
+```
+
+Connection is a separate, approved action; for reviewed noninteractive setup use
+`--yes`. Existing registrations are preserved. A bundle being available does not
+mean its service is authenticated. The GitHub preset reuses GitHub CLI’s saved
+account: select GitHub in `/mcp`, or run `motif mcp install github --enable` and
+`motif mcp login github`. It offers browser login when needed and stays authorized
+across restarts. Motif stores the delegation grant, while `gh` retains the token
+in its credential store. `motif mcp logout github` stops Motif access without
+logging other GitHub CLI workflows out. See [bundled workflows](docs/skills.md#built-in-workflow-bundles).
 
 ---
 
@@ -287,7 +319,7 @@ enter send · \ + enter newline · esc interrupt or clear · ctrl-c twice quit �
 | Permissions | A numbered prompt before a command, a write, a patch or the terminal runs; "don't ask again for this tool"; a refusal the model is told about; Shift-Tab or `/permissions auto` runs everything |
 | Conversation | Each task sees the ones before it; `--continue` and `/resume` bring a recorded conversation back; messages sent while a task runs are queued; Esc interrupts; Codex-style compaction past `compactAt` of the window — the model writes a handoff summary and your own messages are kept verbatim — and `/compact <focus>` on demand |
 | Backend | `.motif/` laid out like Claude Code's `.claude/`: user and project settings, skills, agents, plugins, notes, one journal per task, history; project hooks applied once `motif trust` approves them |
-| Skills and agents | 18 built-in skills (`explore`, `plan`, `explain`, `code-review`, `security-review`, `test-fix`, `debug`, `refactor`, `commit`, `pr-body`, `docs`, `init`, `skill-creator`, `skill-setup`, `plugin-setup`, `mcp-setup`, `motif-endpoint`, `korean`); Claude/Codex skill import and marketplace skill installation; 5 built-in subagents (`explorer`, `reviewer`, `tester`, `planner`, `patcher`) |
+| Skills and agents | 18 core skills (`explore`, `plan`, `explain`, `code-review`, `security-review`, `test-fix`, `debug`, `refactor`, `commit`, `pr-body`, `docs`, `init`, `skill-creator`, `skill-setup`, `plugin-setup`, `mcp-setup`, `motif-endpoint`, `korean`); 6 additional skills in five built-in workflow bundles; Claude/Codex skill import and marketplace skill installation; 5 built-in subagents (`explorer`, `reviewer`, `tester`, `planner`, `patcher`) |
 | MCP | stdio, Streamable HTTP and legacy SSE servers; CLI registration and Codex/Claude config import; `/mcp` connection controls; `mcp-setup` for natural-language setup; browser OAuth and human form/URL approval; server tools follow session permissions |
 | Endpoint | The key asked for once and saved to `~/.motif/.env`, withheld from every command the agent runs; a 401 that says which side of the key it is on; a 429 retried after the server's `Retry-After`; `motif doctor` reports what the server actually returns |
 | Screen | Shrinking the window mid-session leaves no stale rows; five themes (`motif`, `claude`, `mono`, `solarized`, `dracula`) swapped in place |

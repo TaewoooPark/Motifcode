@@ -5,13 +5,13 @@ import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentRegistry } from "@motifcode/agents";
 import { DEFAULT_HOOKS } from "@motifcode/hooks";
-import { McpSession, isResultError, type McpStatus } from "@motifcode/mcp";
+import { McpSession, isResultError, listMcpPresets, type McpStatus } from "@motifcode/mcp";
 import { SkillRegistry } from "@motifcode/skills";
 import { CORE_TOOLS } from "@motifcode/tools";
 import { Screen, displayWidth } from "@motifcode/tui";
 import type { Transport } from "@motifcode/core";
 import { Chat, type ChatOptions } from "../src/chat.js";
-import { mcpListLines, mcpPanelKeys, mcpPanelView, parseMcpRequest, type McpAction } from "../src/mcp-ui.js";
+import { mcpCatalogEntries, mcpListLines, mcpLoginPanelView, mcpPanelKeys, mcpPanelView, parseMcpRequest, type McpAction } from "../src/mcp-ui.js";
 
 const ESC = "\x1b";
 const status = (server = "memory", state: McpStatus["state"] = "idle"): McpStatus => ({ server, state, transport: "stdio", enabled: state !== "disabled", toolCount: state === "ready" ? 9 : 0 });
@@ -351,5 +351,124 @@ describe("MCP controls through real chat keystrokes", () => {
     await vi.waitFor(() => expect(isResultError(mcp.results.read("root", { handle: second }))).toBe(true));
     expect(mcp.manager).toBe(manager);
     await mcp.close();
+  });
+});
+
+
+describe("Built-in MCP catalog setup", () => {
+  it("shows all presets without connecting or duplicating configured names", async () => {
+    const presets = listMcpPresets();
+    const c = controls([status("playwright", "ready"), status("context7", "disabled")]);
+    const install = vi.fn(); const login = vi.fn();
+    const s = session(c.mcp, undefined, 0.75, { mcpPresets: () => presets, mcpInstall: install, mcpLogin: login });
+    s.type("/mcp list\r");
+    await vi.waitFor(() => expect(s.output()).toContain("github · available"));
+    for (const preset of presets) expect(s.output()).toContain(preset.id);
+    const rows = mcpCatalogEntries(c.mcp.statuses(), presets);
+    expect(rows).toHaveLength(presets.length);
+    expect(rows.filter(row => row.server === "context7")).toHaveLength(1);
+    expect(rows.find(row => row.server === "context7")?.status?.state).toBe("disabled");
+    expect(rows.find(row => row.server === "github")?.status).toBeUndefined();
+    s.type("/mcp\r");
+    await vi.waitFor(() => expect(s.output()).toContain("6 available"));
+    expect(c.calls).toEqual([]); expect(install).not.toHaveBeenCalled(); expect(login).not.toHaveBeenCalled(); expect(s.complete).not.toHaveBeenCalled();
+  });
+
+  it("requires human consent, then registers and loads a preset without restarting", async () => {
+    const c = controls([]);
+    const install = vi.fn(async (id: string) => { const row = status(id, "ready"); c.set([row]); return row; });
+    const s = session(c.mcp, undefined, 0.75, { mcpPresets: listMcpPresets, mcpInstall: install, mcpConfigLabel: "User configuration" });
+    s.type("/mcp\r"); s.type("\r");
+    await vi.waitFor(() => expect(s.output()).toContain("Set up Context7?"));
+    expect(s.output()).toContain("Save to: User configuration"); expect(install).not.toHaveBeenCalled();
+    s.type("1");
+    await vi.waitFor(() => expect(install).toHaveBeenCalledOnce());
+    expect(install).toHaveBeenCalledWith("context7", {}, expect.any(AbortSignal));
+    await vi.waitFor(() => expect(s.output()).toContain("context7: registered · connected"));
+    s.type("d"); await vi.waitFor(() => expect(c.calls).toContain("disconnect:context7"));
+    expect(s.complete).not.toHaveBeenCalled();
+  });
+
+  it("cancels setup without saving config or consuming later task text", async () => {
+    const install = vi.fn(); const s = session(controls([]).mcp, undefined, 0.75, { mcpPresets: listMcpPresets, mcpInstall: install });
+    s.type("/mcp install context7\r");
+    await vi.waitFor(() => expect(s.output()).toContain("Set up Context7?"));
+    s.type("2");
+    await vi.waitFor(() => expect(s.output()).toContain("no configuration changed"));
+    expect(install).not.toHaveBeenCalled(); expect(s.complete).not.toHaveBeenCalled();
+  });
+
+  it("enables an existing disabled preset only after consent", async () => {
+    const c = controls([status("context7", "disabled")]);
+    const install = vi.fn(async () => { const row = status("context7", "ready"); c.set([row]); return row; });
+    const s = session(c.mcp, undefined, 0.75, { mcpPresets: listMcpPresets, mcpInstall: install });
+    s.type("/mcp\r"); s.type("\r");
+    await vi.waitFor(() => expect(s.output()).toContain("Enable Context7?"));
+    expect(install).not.toHaveBeenCalled(); s.type("1");
+    await vi.waitFor(() => expect(install).toHaveBeenCalledWith("context7", {}, expect.any(AbortSignal)));
+  });
+
+  it("requires an explicitly reviewed filesystem root and supports visible path input", async () => {
+    const c = controls([]); const install = vi.fn(async () => status("filesystem", "ready"));
+    const s = session(c.mcp, undefined, 0.75, { mcpPresets: listMcpPresets, mcpInstall: install });
+    s.type("/mcp install filesystem\r");
+    await vi.waitFor(() => expect(s.output()).toContain("Choose filesystem access")); s.type("2");
+    await vi.waitFor(() => expect(s.output()).toContain("Filesystem directory"));
+    s.type("/tmp/example-project");
+    expect(s.output()).toContain("/tmp/example-project"); expect(install).not.toHaveBeenCalled(); s.type("\r");
+    await vi.waitFor(() => expect(s.output()).toContain("Read/write root: /tmp/example-project"));
+    expect(install).not.toHaveBeenCalled(); s.type("1");
+    await vi.waitFor(() => expect(install).toHaveBeenCalledWith("filesystem", { root: "/tmp/example-project" }, expect.any(AbortSignal)));
+  });
+
+  it("keeps Gmail preview prerequisites actionable without soliciting a token", async () => {
+    const install = vi.fn(); const s = session(controls([]).mcp, undefined, 0.75, { mcpPresets: listMcpPresets, mcpInstall: install });
+    s.type("/mcp install gmail\r");
+    await vi.waitFor(() => expect(s.output()).toContain("--token-env GOOGLE_ACCESS_TOKEN"));
+    expect(install).not.toHaveBeenCalled(); expect(s.complete).not.toHaveBeenCalled();
+  });
+
+  it("offers persistent GitHub login after registration and keeps device progress human-only", async () => {
+    const c = controls([]);
+    const install = vi.fn(async () => { const row = { ...status("github", "error"), error: { code: "authentication_required", message: "Missing login" } }; c.set([row]); return row; });
+    let finish!: () => void;
+    const login = vi.fn(async (_server: string, _signal: AbortSignal, progress?: (message: string) => void) => {
+      progress?.("GitHub code: ABCD-1234 · github.com/login/device"); await new Promise<void>(resolve => { finish = resolve; });
+    });
+    const s = session(c.mcp, undefined, 0.75, { mcpPresets: listMcpPresets, mcpInstall: install, mcpLogin: login });
+    s.type("/mcp connect github\r");
+    await vi.waitFor(() => expect(s.output()).toContain("Set up GitHub?")); s.type("1");
+    await vi.waitFor(() => expect(s.output()).toContain("MCP login required")); s.type("1");
+    await vi.waitFor(() => expect(s.output()).toContain("GitHub code: ABCD-1234"));
+    expect(login).toHaveBeenCalledOnce(); finish();
+    await vi.waitFor(() => expect(c.calls).toContain("reconnect:github"));
+    expect(s.complete).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(s.output()).toContain("github: registered · connected"));
+    c.set([status("github", "ready")]);
+    s.type("inspect project\r");
+    await vi.waitFor(() => expect(s.complete).toHaveBeenCalledOnce());
+    expect(JSON.stringify(s.complete.mock.calls)).not.toContain("ABCD-1234");
+  });
+
+  it("blocks preset mutation during a task but still exposes the catalog", async () => {
+    const install = vi.fn();
+    const transport: Transport = { endpoint: "fake", model: "test", complete: request => new Promise(resolve => { request.signal?.addEventListener("abort", () => resolve({ content: "", rawText: "", ms: 0 }), { once: true }); }) };
+    const s = session(controls([]).mcp, transport, 0.75, { mcpPresets: listMcpPresets, mcpInstall: install });
+    s.type("stay active\r"); await vi.waitFor(() => expect(s.chat.running).toBe(true));
+    s.type("/mcp install github\r"); await vi.waitFor(() => expect(s.output()).toContain("Wait for the running task"));
+    s.type("/mcp list\r"); await vi.waitFor(() => expect(s.output()).toContain("github · available"));
+    expect(install).not.toHaveBeenCalled(); s.type(ESC);
+  });
+
+  it("keeps preset states and browser device codes readable in small terminals", () => {
+    for (const [width, height] of [[28, 12], [40, 12], [80, 24]]) {
+      const view = mcpPanelView([], 1, width!, undefined, height!, listMcpPresets());
+      expect(view.lines.join(" ")).toContain("github");
+      expect(view.choices.join(" ")).toContain("available");
+      expect(view.lines.length + view.choices.length + 6).toBeLessThanOrEqual(height!);
+      const login = mcpLoginPanelView("GitHub code: ABCD-1234 · github.com/login/device", width!, height!);
+      expect(login.lines.join("")).toContain("ABCD-1234");
+      for (const row of [...view.lines, ...view.choices, ...login.lines, ...login.choices]) expect(displayWidth(row)).toBeLessThanOrEqual(width! - 4);
+    }
   });
 });

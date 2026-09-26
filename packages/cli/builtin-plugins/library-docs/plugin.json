@@ -1,0 +1,6 @@
+{
+  "name": "library-docs",
+  "description": "Version-aware library documentation and examples with Context7.",
+  "version": "1.0.0",
+  "mcpPresets": ["context7"]
+}

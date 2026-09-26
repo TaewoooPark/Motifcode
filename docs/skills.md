@@ -110,6 +110,39 @@ Managed data lives in `~/.motif/skills-installed.json` and
 Hand-authored `skills/` folders remain usable. Restart an existing session to
 load changes to the library.
 
+## Built-in workflow bundles
+
+Motif ships five plugin bundles alongside its core skills: `library-docs`,
+`browser-web-testing`, `github-workflow`, `frontend-quality`, and `mcp-builder`.
+They contain six skills and their focused reference files. They are available in
+user and project sessions without a marketplace download or account login.
+Only the skill index is included initially; bodies and references load on demand.
+Personal or project skills of the same name take precedence.
+
+Use `motif plugins list` or `motif plugins inspect NAME --json` to inspect the
+bundles offline. `motif plugins connect NAME --dry-run` previews service setup;
+`motif plugins connect NAME` asks before registration and connection. A reviewed
+noninteractive setup requires `--yes`. No setup runs merely because a plugin is
+listed or its skills are loaded. The MCP builder has no default external service.
+
+The browser bundle uses Playwright MCP for stateful exploration and existing
+Playwright CLI/tests for repeatable checks. Its isolated MCP browser does not
+inherit a user's logged-in browser tabs. The frontend bundle combines original
+Motif guidance on design, accessibility, React data flow and composition with
+references to upstream projects; it does not activate another host's hooks.
+
+The GitHub bundle supports the official GitHub MCP and an already authenticated
+`gh` CLI. Its default preset delegates to GitHub CLI’s saved account after
+`motif mcp login github` (also available in `/mcp`). Motif persists a delegation
+grant and resolves credentials from `gh` on later requests, including after
+restart. An explicit `--token-env` registration remains available. A missing
+credential is not a successful connection. Never expose a token to the model or
+copy one into a committed file.
+
+Built-in bundle assets belong to the Motif installation; replacing the binary
+and its packaged assets updates them together. They are not managed marketplace
+receipts. Use user/project skills to customize their behavior.
+
 ## Connect a skill package or plugin
 
 The built-in `plugin-setup` skill handles clear English or Korean link-based

@@ -10,6 +10,23 @@ afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: tru
 function capture(cwd: string) { const output: string[] = []; const errors: string[] = []; return { options: { cwd, home: cwd, env: {}, stdout: (text: string) => { output.push(text); }, stderr: (text: string) => { errors.push(text); } }, output, errors }; }
 
 describe("MCP CLI commands", () => {
+  it("lists available presets separately and preserves provider metadata without starting auth", async () => {
+    const cwd = fixture(); const io = capture(cwd);
+    expect(await runMcpCommand(["install", "github"], { enable: true }, io.options)).toBe(0);
+    io.output.length = 0;
+    expect(await runMcpCommand(["list"], {}, io.options)).toBe(0);
+    const report = JSON.parse(io.output.join(""));
+    expect(report.servers).toEqual([expect.objectContaining({ id: "github", credentialProvider: "github-cli" })]);
+    expect(report.availablePresets.map((row: {id:string}) => row.id)).toContain("filesystem");
+    expect(report.availablePresets.map((row: {id:string}) => row.id)).not.toContain("github");
+    expect(existsSync(join(cwd, ".motif/auth"))).toBe(false);
+    const path = join(cwd, ".motif/mcp.json"); const before = readFileSync(path, "utf8");
+    expect(await runMcpCommand(["login", "github"], { "client-id": "wrong-oauth-mode" }, io.options)).toBe(2);
+    expect(readFileSync(path, "utf8")).toBe(before);
+    io.output.length = 0;
+    expect(await runMcpCommand(["auth-status", "github"], {}, io.options)).toBe(0);
+    expect(JSON.parse(io.output.join(""))).toMatchObject({ state: "not_authenticated", source: "github-cli" });
+  });
   it("fails a connection check when an enabled stdio server is still starting at the deadline", async () => {
     const cwd = fixture(); const source = join(cwd, "mcp.json"); const io = capture(cwd);
     const script = join(cwd, "slow-server.mjs"); const log = join(cwd, "server.ndjson");

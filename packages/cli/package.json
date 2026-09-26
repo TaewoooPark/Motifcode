@@ -38,7 +38,8 @@
   },
   "files": [
     "dist/motif.js",
-    "dist/build-info.json"
+    "dist/build-info.json",
+    "builtin-plugins"
   ],
   "publishConfig": {
     "access": "public"

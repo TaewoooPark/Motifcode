@@ -20,7 +20,7 @@ motif mcp add local -- node /absolute/path/to/server.mjs
 
 `add` saves an enabled entry in `~/.motif/mcp.json`. It does not install or start the server. Enabled servers start when you check their connections or use them in a Motif session. Use a server's documented command, keep local installations in a durable directory and pin package versions when possible. A GitHub repository URL identifies source code; it is not an HTTP MCP endpoint.
 
-**After adding or editing servers, exit and relaunch any running Motif process.** `/new` and `/mcp` do not reload the configuration.
+**Edits made outside the running chat require a relaunch.** The `/mcp` catalog can register or enable a preset and connect it immediately in that chat. `/new` does not reload external configuration edits.
 
 ## Set up a server with the built-in skill
 
@@ -79,15 +79,15 @@ motif mcp add legacy --transport sse --header-env X-Api-Key=SERVICE_TOKEN https:
 
 ## Manage connections in the TUI
 
-Enter `/mcp` to open the connection manager. It shows each server's name, transport, connection state and discovered tool count.
+Enter `/mcp` to open the connection manager. It shows registered servers with their connection state and tool count, followed by available built-in presets. Viewing the catalog never starts services or reads credentials. Select an available preset to review prerequisites and the destination configuration, then register and connect it in the same session. Filesystem asks for an explicit directory; Gmail remains a conditional preview with setup guidance. Existing disabled preset entries offer an explicit enable action. Enable other disabled servers with `motif mcp enable NAME`, then restart the session.
 
 | Key | Action |
 | --- | --- |
 | `↑` / `↓` | Select a server |
-| `Enter` | Connect, or disconnect a connected/connecting server |
+| `Enter` | Set up an available preset, enable a disabled preset entry, or connect/disconnect a registered server |
 | `r` | Reconnect |
 | `c` / `d` | Connect / disconnect |
-| `l` | Sign in through the browser and reconnect |
+| `l` | Set up an available preset, or sign in and reconnect |
 | `Esc` | Close the manager, or stop waiting for a connection attempt |
 
 The same controls are available as commands:
@@ -103,7 +103,7 @@ The same controls are available as commands:
 
 These controls affect the current session. Disconnecting pauses the server and removes its tools from subsequent discovery until you connect it again. Reconnecting refreshes the connection and tool catalog; it does not replay previous calls. `/mcp list` only reads local status. Finish the current task and queued work before changing connections.
 
-Pressing `Esc` while connecting stops waiting, but startup may continue in the background. Use `d` or `/mcp disconnect NAME` to close the connection. A disabled entry must be enabled with `motif mcp enable NAME`, followed by a process restart. Registration changes also require a restart.
+Pressing `Esc` while connecting stops waiting, but startup may continue in the background. Use `d` or `/mcp disconnect NAME` to close the connection. The manager can enable a disabled preset entry and register a preset without restarting. Changes made from another terminal or file editor still require a restart. If another process changes the selected registration, the manager refuses to overwrite it; relaunch and review the new configuration.
 
 ## Configuration and trust
 
@@ -227,6 +227,37 @@ References accept `${VARIABLE}`, `${VARIABLE:-fallback}` or `{"env":"VARIABLE"}`
 
 Interactive `ask` mode confirms the actual server and tool. Remembered approvals apply to that pair only. Tools marked as requiring user interaction need fresh human approval, including in `auto` mode. Print and one-shot execution have no interactive approval dialog, so use configurations whose permitted tools you intend to authorize. An enabled stdio server is a local program; Motifcode does not provide an OS sandbox for it.
 
+## Persistent GitHub MCP login
+
+```sh
+motif mcp install github --enable
+motif mcp login github
+motif mcp auth-status github
+# A later process uses the same saved account:
+motif mcp connect github
+```
+
+The preset uses `credentialProvider: "github-cli"` with the exact official HTTP
+endpoint `https://api.githubcopilot.com/mcp/`. An explicit login validates the
+account already saved by GitHub CLI; if missing or revoked, Motif offers GitHub's
+browser device flow through `gh auth login`. The verification code appears only
+in the human terminal panel, never in model context or session journals.
+
+Motif saves a private delegation grant under `~/.motif/auth`, not a token copy.
+Each new authenticated request resolves the current credential from GitHub CLI,
+so restarting Motif needs no new login. On macOS, GitHub CLI normally uses Keychain;
+its own credential storage policy applies. Ambient `GH_TOKEN`, `GITHUB_TOKEN`,
+`GH_HOST` and `GH_CONFIG_DIR` overrides are not used for this provider.
+
+`motif mcp logout github` clears Motif's grant and `/mcp logout github` also closes
+the current connection. It does not run `gh auth logout` or revoke the GitHub
+account. `auth-status` reports the saved local grant; successful connection or tool
+use verifies current remote access. A revoked credential requires login again;
+failed business calls are not automatically replayed. Existing token-reference
+registrations are preserved, and `--token-env` opts out of GitHub CLI delegation.
+This provider cannot be combined with OAuth options or an Authorization header,
+and credentials cannot be delegated to an arbitrary endpoint.
+
 ## Built-in server presets
 
 Browse the included catalog without network access or credentials:
@@ -248,6 +279,7 @@ the server programs and browsers are separate installations.
 | Preset | Intended use | Prerequisites |
 | --- | --- | --- |
 | `context7` | Library documentation; recommended for general development | Public HTTP endpoint; optional API key for account limits |
+| `github` | Repository, issue, PR and workflow tools | GitHub CLI (`gh`) installed; sign in once through `/mcp` or `motif mcp login github`. Optional `--token-env` uses a supplied token instead. |
 | `playwright` | Browser navigation and inspection | Node/npm and Chrome; runs headless with an isolated browser profile |
 | `filesystem` | Filesystem MCP compatibility | An explicit existing directory via `--root`; Motifcode also has native file tools |
 | `hugging-face` | Public model, dataset and repository information | Public HTTP endpoint; optional HF token for authenticated capabilities |
@@ -273,8 +305,8 @@ the chosen directory before enabling access. Use the canonical paths reported by
 be rejected by the server. With `--mcp-config`, installation uses
 the same current-hash trust checks as `add`; each edit returns a new hash.
 
-After any registration change, exit and relaunch Motif. `/new` and `/mcp` do not
-reload configuration. A `ready` connection only proves initialization and tool
+Preset setup in `/mcp` applies immediately; CLI or file edits require relaunching
+an existing session. `/new` does not reload external edits. A `ready` connection only proves initialization and tool
 discovery: Gmail may advertise tools before rejecting an unauthenticated call, and
 the Tauri server can be ready without an application bridge. Neither means that
 account access or application control has been verified. Codex/Claude login sessions
@@ -315,7 +347,7 @@ The profile pairs supported navigation and form actions with `browser_snapshot`.
 | `authentication_required` (HTTP 401) | Use `/mcp login NAME` or `motif mcp connect NAME --login` for standard OAuth, or supply the configured credential reference. |
 | `permission_denied` (HTTP 403) | Check the credential's scopes, service eligibility and API enablement. |
 | Explicit configuration is disabled | Review the file and pass its current hash with `--trust-mcp`. |
-| A newly registered server is missing from `/mcp` | Exit and relaunch the Motif process. |
+| A server added from another terminal is missing from `/mcp` | Relaunch Motif. Preset setup inside `/mcp` applies immediately. |
 | A connected server has no available tools | Check its advertised tools, `allowedTools` and `deniedTools`. |
 | A write has an unknown outcome | Check the service's actual state before retrying; reconnecting does not make a repeat safe. |
 

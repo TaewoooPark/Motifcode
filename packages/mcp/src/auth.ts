@@ -4,18 +4,22 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { auth, discoverOAuthServerInfo, extractWWWAuthenticateParams, refreshAuthorization, OAuthError, type OAuthClientProvider, type OAuthDiscoveryState, type StoredOAuthTokens } from '@modelcontextprotocol/client';
 import { McpAuthError, McpAuthStore, authKey, type McpAuthRecord } from './auth-store.js';
+import { GitHubCliAuth, type GitHubCredentialReader, type GitHubCredentialValidator } from './github-auth.js';
 export { McpAuthError } from './auth-store.js';
 
 export interface McpAuthTarget {
   id: string;
   url?: string;
   transport?: string;
+  credentialProvider?: 'github-cli';
+  headers?: Record<string, unknown>;
   oauth?: { clientId?: string; clientMetadataUrl?: string; scope?: string; callbackPort?: number };
 }
 export interface McpAuthStatus {
   server: string;
   state: 'authenticated' | 'not_authenticated' | 'expired';
-  storage: 'file';
+  storage: 'file' | 'github-cli';
+  source?: 'github-cli';
   expiresAt?: number;
 }
 export interface McpLoginOptions {
@@ -27,12 +31,18 @@ export interface McpLoginOptions {
   noBrowser?: boolean;
   /** Human UI only: never forward the authorization URL to model context. */
   onAuthorization?: (url: URL) => void | Promise<void>;
+  /** Human UI only: run GitHub CLI browser login without forwarding its output to a model. */
+  onGitHubLogin?: (options: { signal: AbortSignal }) => void | Promise<void>;
 }
 export interface McpAuthBrokerOptions {
   home?: string;
   fetch?: typeof fetch;
   openBrowser?: (url: URL) => void | Promise<void>;
   fetchTimeoutMs?: number;
+  /** Private credential reader seam; never log or serialize its result. */
+  githubCredentialReader?: GitHubCredentialReader;
+  githubCredentialValidator?: GitHubCredentialValidator;
+  githubCredentialTimeoutMs?: number;
 }
 const required = () => new McpAuthError('authentication_required', 'MCP login is required. Use the human login controls, then retry the operation explicitly.');
 const failed = () => new McpAuthError('oauth_failed', 'MCP authorization failed. Check the provider configuration and try login again.');
@@ -96,14 +106,20 @@ export class McpAuthBroker {
   private readonly store: McpAuthStore;
   private readonly refreshing = new Map<string, { revision: string; promise: Promise<string> }>();
   private readonly activeLogins = new Map<string, AbortController>();
-  constructor(private readonly options: McpAuthBrokerOptions = {}) { this.store = new McpAuthStore(options.home); }
+  private readonly github: GitHubCliAuth;
+  constructor(private readonly options: McpAuthBrokerOptions = {}) {
+    this.store = new McpAuthStore(options.home);
+    this.github = new GitHubCliAuth({ home: options.home, reader: options.githubCredentialReader, validator: options.githubCredentialValidator, timeoutMs: options.githubCredentialTimeoutMs });
+  }
   status(server: McpAuthTarget): McpAuthStatus {
+    if (server.credentialProvider) return this.github.status(server);
     if (!server.oauth) { try { identity(server); } catch { return { server: server.id, state: 'not_authenticated', storage: 'file' }; } }
     const { key } = identity(server); const saved = this.store.read(key);
     return { server: server.id, state: !saved?.tokens ? 'not_authenticated' : saved.expiresAt !== undefined && saved.expiresAt <= Date.now() ? 'expired' : 'authenticated',
       storage: 'file', ...(saved?.expiresAt !== undefined ? { expiresAt: saved.expiresAt } : {}) };
   }
   logout(server: McpAuthTarget): McpAuthStatus {
+    if (server.credentialProvider) return this.github.logout(server);
     const { key } = identity(server); this.activeLogins.get(key)?.abort(); this.store.remove(key);
     return { server: server.id, state: 'not_authenticated', storage: 'file' };
   }
@@ -177,6 +193,7 @@ export class McpAuthBroker {
   }
   /** Return a token only before dispatch. Never opens a browser or retries a tool. */
   async token(server: McpAuthTarget, options: { signal?: AbortSignal } = {}): Promise<string | undefined> {
+    if (server.credentialProvider) return this.github.token(server, options);
     // Existing anonymous HTTP servers do not opt into OAuth's HTTPS requirement.
     if (!server.oauth) { try { identity(server); } catch { return undefined; } }
     const { key, endpoint } = identity(server); const saved = this.store.read(key);
@@ -221,6 +238,7 @@ export class McpAuthBroker {
     }
   }
   async login(server: McpAuthTarget, options: McpLoginOptions = {}): Promise<McpAuthStatus> {
+    if (server.credentialProvider) return this.github.login(server, options);
     const target = { ...server, oauth: { ...server.oauth, ...(options.clientId ? { clientId: options.clientId } : {}),
       ...(options.clientMetadataUrl ? { clientMetadataUrl: options.clientMetadataUrl } : {}), ...(options.scope ? { scope: options.scope } : {}) } };
     const { endpoint, key } = identity(target);

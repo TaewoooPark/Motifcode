@@ -1,4 +1,5 @@
 import type { CallToolResult, Tool } from '@modelcontextprotocol/client';
+import { isDeepStrictEqual } from 'node:util';
 import { resolveServerConfig } from './config.js';
 import type { McpConfig, McpServerConfig } from './config.js';
 import { deadline, McpClientError, McpConnection, McpOperationBudget, type McpAuthorization, type McpElicitationHandler } from './client.js';
@@ -52,7 +53,7 @@ const safeError = (error: unknown): { code: string; message: string } => error i
   ? { code: error.code, message: error.message }
   : { code: 'connection_error', message: 'The MCP connection or response failed. Server diagnostics are withheld.' };
 
-/** Config is a trusted immutable snapshot; model input can select only configured tools. */
+/** Model input can select only trusted tools; registration is a host-only control. */
 export class McpManager {
   private readonly servers = new Map<string, McpServerConfig>();
   private readonly runtimes = new Map<string, ServerRuntime>();
@@ -80,6 +81,39 @@ export class McpManager {
 
   /** Local, human-facing status only: no process arguments, URLs or resolved credentials. */
   statuses(): McpStatus[] { return structuredClone([...this.states.values()]); }
+
+  /**
+   * Admit a host-approved configuration without replacing a running manager.
+   * Existing identities may only be enabled with otherwise identical settings:
+   * changing an endpoint in place could invalidate in-flight/unknown outcomes.
+   */
+  assertCanRegisterTrustedServer(server: McpServerConfig): void {
+    if (this.closed) throw new McpClientError('manager_closed', 'MCP manager is closed.');
+    const previous = this.servers.get(server.id);
+    if (previous) {
+      if (!isDeepStrictEqual({ ...previous, enabled: true }, { ...server, enabled: true })
+        || (previous.enabled && !server.enabled)) {
+        throw new McpClientError('config_conflict', 'An existing MCP server cannot be replaced during this session. Restart after reviewing the changed configuration.');
+      }
+    }
+  }
+
+  registerTrustedServer(server: McpServerConfig): McpStatus {
+    this.assertCanRegisterTrustedServer(server);
+    const previous = this.servers.get(server.id);
+    if (previous) {
+      if (previous.enabled === server.enabled) return structuredClone(this.states.get(server.id)!);
+      // A disabled entry has never acquired a transport. Enabling it does not
+      // disturb other connections, result scopes, or execution ledgers.
+      this.servers.set(server.id, structuredClone(server));
+      this.setState(server.id, 'idle');
+    } else {
+      this.servers.set(server.id, structuredClone(server));
+      this.runtimes.set(server.id, { generation: 0, controller: new AbortController(), paused: false });
+      this.setState(server.id, server.enabled ? 'idle' : 'disabled');
+    }
+    return structuredClone(this.states.get(server.id)!);
+  }
 
   private setState(server: string, state: McpStatus['state'], toolCount = 0, error?: McpStatus['error']): void {
     const config = this.servers.get(server)!;

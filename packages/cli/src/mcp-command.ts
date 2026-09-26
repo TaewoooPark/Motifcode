@@ -36,6 +36,8 @@ export const MCP_HELP = `Usage:
 
 list and doctor are offline by default. doctor --connect starts enabled trusted servers
 and lists their tools, then closes connections; it never calls business tools.
+list also includes available built-in presets. Use /mcp inside a chat to register,
+enable, sign in and connect a preset without restarting that chat.
 The default is ~/.motif/mcp.json. Project configs are never discovered automatically.
 An explicit --mcp-config is disabled until its displayed SHA256 is passed to --trust-mcp.
 Editing an existing explicit file also requires its current hash; new files may be created.
@@ -57,6 +59,9 @@ connect starts one trusted enabled server and lists tools. --login opens browser
 if required; login always starts authorization, including upgrading anonymous access.
 Complete account approval in your browser. Ctrl-C cancels. No business tool is replayed.
 OAuth credentials are stored in private files under ~/.motif/auth, never in mcp.json.
+The github preset delegates to GitHub CLI: login reuses its saved account or offers
+browser sign-in. Subsequent processes read gh's durable credentials automatically.
+Motif stores only a delegation grant; logout stops Motif access without logging gh out.
 --client-metadata-url supports a hosted client document; --timeout sets login milliseconds.
 logout removes Motif's local credentials; it does not revoke the provider's account grant.
 `;
@@ -158,6 +163,7 @@ export async function runMcpCommand(
     if (callbackPort !== undefined && (!Number.isSafeInteger(callbackPort) || callbackPort < 1 || callbackPort > 65535)) return usage("--callback-port must be 1–65535.");
     try {
       if (OAUTH_FLAGS.some(key => flags[key] !== undefined)) {
+        if (server.credentialProvider) return usage("This server uses GitHub CLI credentials; OAuth client options do not apply.");
         const oauth = { ...server.oauth, ...(value("client-id") ? { clientId: value("client-id") } : {}), ...(value("client-metadata-url") ? { clientMetadataUrl: value("client-metadata-url") } : {}), ...(value("scope") ? { scope: value("scope") } : {}), ...(callbackPort ? { callbackPort } : {}) };
         const edited = updateMcpConfig({ cwd, home: options.home, path: value("mcp-config"), trustHash: value("trust-mcp") }, current => ({ servers: current.servers.map(row => row.id === server!.id ? { ...row, oauth } : row) }));
         config = { ...config, ...edited.config, sources: [{ path: edited.path, sha256: edited.sha256, trusted: true }] };
@@ -170,13 +176,13 @@ export async function runMcpCommand(
       }
       const controller = new AbortController();
       const cancel = () => controller.abort();
-      process.on("SIGINT", cancel); process.on("SIGTERM", cancel);
+      process.on("SIGINT", cancel); process.on("SIGTERM", cancel); process.on("SIGHUP", cancel);
       const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
       try {
-        const result = await connectMcpServers({ servers: [server] }, { home: options.home, env: options.env, auth, fetch: options.fetch, signal, forceLogin: command === "login", login: flags.login === true, timeoutMs, onProgress: message => err(message + "\n") });
+        const result = await connectMcpServers({ servers: [server] }, { home: options.home, env: options.env, auth, fetch: options.fetch, openBrowser: options.openBrowser, signal, forceLogin: command === "login", login: flags.login === true, timeoutMs, onProgress: message => err(message + "\n") });
         emit({ ...result, sources: config.sources });
         return signal.aborted ? 130 : result.ready ? 0 : 1;
-      } finally { process.removeListener("SIGINT", cancel); process.removeListener("SIGTERM", cancel); }
+      } finally { process.removeListener("SIGINT", cancel); process.removeListener("SIGTERM", cancel); process.removeListener("SIGHUP", cancel); }
     } catch (cause) {
       emit({ error: { code: cause instanceof McpConfigEditError ? cause.code : "authentication_failed", message: "Could not complete the authentication command. Check OAuth configuration and provider access." } }); return 1;
     }
@@ -313,7 +319,8 @@ export async function runMcpCommand(
         }
       }
     }
-    emit({ mode: flags.connect ? "connection-check" : "offline", sources: config.sources, servers: config.servers.map((server) => ({ id: server.id, enabled: server.enabled, transport: server.transport, protocol: server.protocol, profile: server.profile, allowedTools: server.allowedTools, deniedTools: server.deniedTools })), connections, diagnostics });
+    emit({ mode: flags.connect ? "connection-check" : "offline", sources: config.sources, servers: config.servers.map((server) => ({ id: server.id, enabled: server.enabled, transport: server.transport, protocol: server.protocol, profile: server.profile, credentialProvider: server.credentialProvider, allowedTools: server.allowedTools, deniedTools: server.deniedTools })),
+      ...(command === "list" ? { availablePresets: listMcpPresets().filter(preset => !config.servers.some(server => server.id === preset.id)) } : {}), connections, diagnostics });
     return interruptedExitCode ?? (diagnostics.some((diagnostic) => diagnostic.severity === "error") ? 1 : 0);
   }
   if (command !== "import") return usage("Unknown MCP command.");

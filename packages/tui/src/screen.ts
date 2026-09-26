@@ -97,7 +97,7 @@ export interface ComposerView {
    * A secret being typed — an API key. The title and lines sit above the
    * input, the draft is painted as one `•` per character, and no menu opens.
    */
-  secret?: { title: string; lines: string[]; prompt: string };
+  secret?: { title: string; lines: string[]; prompt: string; masked?: boolean };
   /** The menu under the input: the matching items, which is selected, and their prefix (`/` or `@`). */
   menu?: { items: MenuItem[]; selected: number; prefix?: string };
 }
@@ -650,7 +650,7 @@ export class Screen {
     const right = boxed ? ` ${side}` : "";
     const edge = boxed ? 2 : 0;
     // The box takes four columns: its edges and a space inside each.
-    const draft = view.secret
+    const draft = view.secret && view.secret.masked !== false
       ? { text: "•".repeat([...view.draft.text].length), cursor: view.draft.cursor }
       : view.draft;
     const render = renderComposer(draft, {
