@@ -190,6 +190,35 @@ describe("cli process end to end", () => {
     expect(zero.stderr).toContain("--max-output-tokens must be an integer >= 1, or off");
   }, 60_000);
 
+  it("continues a finished session from its journal with one more message", async () => {
+    // A benchmark's feedback round, and anyone's follow-up: the recorded
+    // conversation, then the new message, in one more one-shot run.
+    server = new MockServer((_turn, body) =>
+      body.messages.filter((m) => m.role === "assistant").length % 2 === 1
+        ? toolCall("done", { summary: "s", confirm: true })
+        : toolCall("done", { summary: "s" }),
+    );
+    await server.start();
+    const first = join(dir, "first.jsonl");
+    expect((await runCli(["FIRST-TASK", "--endpoint", server.endpoint, "--no-hero", "--journal", first], dir)).code).toBe(0);
+    const before = server.bodies.length;
+    const second = join(dir, "second.jsonl");
+    const r = await runCli(["SECOND-MESSAGE", "--continue-from", first, "--endpoint", server.endpoint, "--no-hero", "--journal", second], dir);
+    expect(r.code, r.stderr).toBe(0);
+    const request = server.bodies[before]!;
+    const users = request.messages.filter((m) => m.role === "user").map((m) => m.content);
+    expect(users[0]).toBe("FIRST-TASK");
+    expect(users[users.length - 1]).toBe("SECOND-MESSAGE");
+    // The first session's turns are in between, the confirmed done included.
+    expect(request.messages.filter((m) => m.role === "assistant").length).toBeGreaterThanOrEqual(2);
+    const journal = readFileSync(second, "utf8");
+    expect(journal).toContain('"t":"resume"');
+    // Without a message and without a terminal there is nothing to continue with.
+    const bare = await runCli(["--continue-from", first, "--endpoint", server.endpoint], dir);
+    expect(bare.code).toBe(2);
+    expect(bare.stderr).toContain("--continue-from needs the message to continue with");
+  }, 60_000);
+
   it("registers the full canonical tool list on the first request", async () => {
     server = new MockServer((turn) =>
       turn === 1 ? toolCall("done", { summary: "s" }) : toolCall("done", { summary: "s", confirm: true }),

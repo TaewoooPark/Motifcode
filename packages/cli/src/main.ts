@@ -9,7 +9,7 @@
 
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { AgentRegistry, AgentScheduler, BUILTIN_AGENTS, concurrencyFor, parseAgent } from "@motifcode/agents";
 import {
   DEFAULT_ENDPOINT,
@@ -450,6 +450,8 @@ Flags
   --journal <path>          write the session record here instead of .motif/sessions
   --interactive             open the prompt after the task, or with no task at all
   --continue                open the prompt with the most recent conversation here loaded
+  --continue-from <journal> continue that session: with a task, run it as the next message
+                            and exit; with --interactive, open the prompt with it loaded
   --thinking                show the model's reasoning in the transcript
   --verbose                 show full inline tool output (ctrl-o opens the output viewer)
   --theme <name>            colour theme (motif, claude, mono, solarized, dracula)
@@ -865,6 +867,13 @@ async function main(): Promise<number> {
       break;
   }
 
+  // A session to continue with a new message: `codex exec resume` and
+  // `opencode run --session`, for a conversation recorded in a journal.
+  if (args.flags["continue-from"] === true) throw new UsageError("--continue-from needs a session journal");
+  const continuePath = typeof args.flags["continue-from"] === "string" ? resolve(args.flags["continue-from"]) : undefined;
+  if (continuePath && resumeFrom) throw new UsageError("resume and --continue-from both pick a session up; use one");
+  const continueFrom = continuePath ? loadResume(continuePath) : undefined;
+
   const channel: ChannelId = flagEnum(args.flags, "channel", CHANNELS, stored.values.channel ?? "toolcall");
   const channelPolicy = flagEnum(args.flags, "channel-policy", CHANNEL_POLICIES, "fixed");
   const maxTurns = flagInt(args.flags, "max-turns", stored.values.maxTurns ?? 100, 1);
@@ -920,16 +929,18 @@ async function main(): Promise<number> {
     ...(typeof args.flags["mcp-config"] === "string" ? { path: args.flags["mcp-config"] } : {}),
     ...(typeof args.flags["trust-mcp"] === "string" ? { trustHash: args.flags["trust-mcp"] } : {}),
   });
-  const wantsChat = args.flags["interactive"] === true || args.flags["chat"] === true || args.flags["continue"] === true;
+  const wantsChat =
+    args.flags["interactive"] === true || args.flags["chat"] === true || args.flags["continue"] === true ||
+    (continuePath !== undefined && !args.rest.join(" ").trim());
   const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
   // Reserve the ninth canonical slot for the interactive catalog even when no
   // server is registered yet; installation must never change the cached prefix.
   // A resume keeps the tool set it was recorded with, whatever servers came since.
-  const recordedTools = resumeFrom?.header.prompt.toolSchemaHash;
+  const recordedTools = (resumeFrom ?? continueFrom)?.header.prompt.toolSchemaHash;
   const withoutMcp = toolPrefix(CORE_TOOLS.length - 1);
   const mcpConnected = recordedTools === toolSchemaHash(CORE_TOOLS)
     || (recordedTools !== toolSchemaHash(withoutMcp)
-      && (mcp.enabled || (!resumeFrom && tty && (wantsChat || !args.rest.join(" ").trim()))));
+      && (mcp.enabled || (!resumeFrom && !continueFrom && tty && (wantsChat || !args.rest.join(" ").trim()))));
   const activeTools = mcpConnected ? [...CORE_TOOLS] : withoutMcp;
   // Bundled MCP workflow skills reach the model's index only with their server
   // and the mcp tool; /mcp setup mutates this same configuration, so a new
@@ -976,6 +987,22 @@ async function main(): Promise<number> {
   } else {
     task = args.rest.join(" ").trim();
   }
+  // The conversation a continued task follows, system turn aside.
+  let history: Message[] | undefined;
+  if (continueFrom && task) {
+    const blocker = checkResumable(continueFrom, { systemHash: promptHash, toolSchemaHash: schemaHash, model }, { continuing: true });
+    if (blocker) {
+      process.stderr.write(`cannot continue: ${blocker}\n`);
+      return 2;
+    }
+    if (continueFrom.checkpoint!.currentChannel !== channel) {
+      throw new UsageError(`that session used the ${continueFrom.checkpoint!.currentChannel} channel; pass --channel ${continueFrom.checkpoint!.currentChannel}`);
+    }
+    skills.restoreResourceAccess(continueFrom.checkpoint!.messages);
+    history = continueFrom.checkpoint!.messages.slice(1);
+  } else if (continueFrom && !(wantsChat && tty)) {
+    throw new UsageError("--continue-from needs the message to continue with, or --interactive");
+  }
 
   // No task and a terminal on both ends means a conversation, not a usage
   // error. Without a terminal the old answer stands: a pipe cannot host a
@@ -1016,9 +1043,11 @@ async function main(): Promise<number> {
       pluginLines: describePlugins(plugins(cwd)),
       hookLines: describeHooks(cwd, hooks),
       notesPath: join(cwd, CONFIG_DIR, "NOTES.md"),
-      ...(args.flags["continue"] === true
-        ? { continueFrom: listSessions(join(cwd, CONFIG_DIR, "sessions"))[0]?.path ?? "" }
-        : {}),
+      ...(continuePath
+        ? { continueFrom: continuePath }
+        : args.flags["continue"] === true
+          ? { continueFrom: listSessions(join(cwd, CONFIG_DIR, "sessions"))[0]?.path ?? "" }
+          : {}),
       channelPolicy,
       ...(apiKey !== undefined ? { apiKey } : {}),
       ...(connection.sources.apiKey !== undefined ? { apiKeySource: connection.sources.apiKey } : {}),
@@ -1101,6 +1130,7 @@ async function main(): Promise<number> {
         tools: activeTools,
         system: (ch) => buildSystemPrompt({ mode: "chat", channel: ch, tools: activeTools, skills, agents, ...(projectNotes !== undefined ? { projectNotes } : {}), cwd }),
         userTask: task,
+        ...(history ? { history } : {}),
         context: mcpConnected ? await mcp.prepare(discoveryTask, abort.signal) : undefined,
         replyRecovery: (content) => mcp.replyRecovery(content),
         signal: abort.signal,
@@ -1163,13 +1193,14 @@ async function main(): Promise<number> {
   journal.record(rootScope, {
     t: "scope_start",
     task,
-    initialMessages: [{ role: "user", content: task }],
+    initialMessages: [...(history ?? []), { role: "user", content: task }],
   });
-  if (resumeFrom?.checkpoint) {
+  const pickedUp = resumeFrom ?? continueFrom;
+  if (pickedUp?.checkpoint) {
     journal.record(rootScope, {
       t: "resume",
-      fromSeq: resumeFrom.checkpoint.afterSeq,
-      previousRunId: resumeFrom.header.runId,
+      fromSeq: pickedUp.checkpoint.afterSeq,
+      previousRunId: pickedUp.header.runId,
     });
   }
 
@@ -1306,6 +1337,7 @@ async function main(): Promise<number> {
       tools: activeTools,
       system: systemFor,
       userTask: task,
+      ...(history ? { history } : {}),
       context: mcpConnected ? await mcp.prepare(discoveryTask, abort.signal) : undefined,
       replyRecovery: (content) => mcp.replyRecovery(content),
       signal: abort.signal,

@@ -409,11 +409,15 @@ export function loadResume(path: string): ResumeState {
 export function checkResumable(
   state: ResumeState,
   current: { systemHash: string; toolSchemaHash: string; model: string },
+  opts: { continuing?: boolean } = {},
 ): string | null {
   if (state.corruption !== undefined) {
     return `this journal is corrupt (${state.corruption}); it cannot be salvaged`;
   }
-  if (state.finished) {
+  // Continuing adds a message to a conversation, so a finished one is the
+  // usual case; resuming picks an interrupted run up where it stopped, and a
+  // finished run has nowhere to pick up from.
+  if (state.finished && !opts.continuing) {
     return "this session already ended; start a new run rather than resuming a finished one";
   }
   if (!state.checkpoint) {
