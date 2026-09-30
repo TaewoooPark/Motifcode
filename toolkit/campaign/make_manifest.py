@@ -63,9 +63,22 @@ def main() -> int:
     ap.add_argument("--channel", default="toolcall")
     ap.add_argument("--seeds", default="0")
     ap.add_argument("--max-turns", type=int, default=20)
-    ap.add_argument("--task-timeout", type=int, default=900)
+    # Seconds, or "none" for no wall-clock budget (Aider's benchmark has none);
+    # a safety cap then stands in for a wedged process.
+    ap.add_argument("--task-timeout", default="900")
+    ap.add_argument("--safety-cap", type=int, default=6 * 3600)
+    # The grader's limit on one test run; Aider's is 180 s.
+    ap.add_argument("--command-timeout", type=int, default=120)
+    ap.add_argument("--max-output-tokens", type=int, default=4096)
+    ap.add_argument("--network", default="enabled", choices=["disabled", "allowlist", "enabled"])
+    # Polyglot harness benchmark protocol v2 (docs: tracks H/V, feedback round).
+    ap.add_argument("--protocol-track", choices=["H", "V"], default=None)
+    ap.add_argument("--feedback-round", action="store_true")
+    ap.add_argument("--network-rule", default="network-v1")
+    ap.add_argument("--replicates", type=int, default=1)
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
+    task_timeout = None if str(a.task_timeout).lower() == "none" else int(a.task_timeout)
 
     instances = json.loads(Path(a.instances).read_text())
     spec = json.loads(Path(a.corpus_spec).read_text())
@@ -127,20 +140,21 @@ def main() -> int:
             "top_p": 0.95,
             "seed_policy": "paired",
             "seeds": [int(s) for s in a.seeds.split(",") if s.strip()],
-            "max_output_tokens_per_step": 4096,
+            "max_output_tokens_per_step": a.max_output_tokens,
         },
         "budgets": {
             "max_model_steps": a.max_turns * 2,
             "max_turns": a.max_turns,
             "max_repairs_per_failure": 2,
-            "command_timeout_seconds": 120,
-            "task_wall_timeout_seconds": a.task_timeout,
+            "command_timeout_seconds": a.command_timeout,
+            "task_wall_timeout_seconds": task_timeout,
+            **({"safety_cap_seconds": a.safety_cap} if task_timeout is None else {}),
             "max_total_tokens": None,
         },
         "environment": {
             # The grader runs in a git worktree the agent cannot reach; Docker
             # on this host needs root, which is not available unattended.
-            "network": "enabled",
+            "network": a.network,
             "repo_reset": "git worktree per row, removed after grading",
         },
         "design": {
@@ -153,6 +167,15 @@ def main() -> int:
             "missing_run_policy": "score_zero",
         },
     }
+    if a.protocol_track:
+        manifest["protocol"] = {
+            "name": "polyglot-harness-v2",
+            "track": a.protocol_track,
+            "feedback_round": a.feedback_round,
+            "grading_rules": ["official", "strict"],
+            "network_rule": a.network_rule,
+            "replicates": a.replicates,
+        }
 
     Path(a.out).write_text(json.dumps(manifest, indent=2) + "\n")
     print(f"wrote {a.out}")

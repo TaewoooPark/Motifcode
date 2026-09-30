@@ -3,16 +3,18 @@
 HARNESS=motifcode
 source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 # The runner reads $JOURNAL inside the row directory, which it deletes after grading; the file itself lives in LOGDIR.
-: > "$LOGDIR/session.jsonl" && ln -sf "$LOGDIR/session.jsonl" "$JOURNAL"
-run_with_deadline node "$MOTIF_JS" "$PROMPT" --cwd "$CWD" --journal "$JOURNAL" --endpoint "$ENDPOINT" --model "$MODEL" \
+: > "$LOGDIR/session$PHASE.jsonl" && ln -sf "$LOGDIR/session$PHASE.jsonl" "$JOURNAL"
+# The feedback round continues the first round's session from its journal.
+CONT=(); [ -n "$CONTINUE_FROM" ] && CONT=(--continue-from "$CONTINUE_FROM")
+run_agent node "$MOTIF_JS" "$PROMPT" "${CONT[@]}" --cwd "$CWD" --journal "$JOURNAL" --endpoint "$ENDPOINT" --model "$MODEL" \
   --channel toolcall --channel-policy fixed --max-turns "$MAX_TURNS" --max-output-tokens "$MAX_OUT" --seed "$SEED" --no-hero \
-  > "$LOGDIR/agent.log" 2> "$LOGDIR/agent.err"
+  > "$LOGDIR/agent$PHASE.log" 2> "$LOGDIR/agent$PHASE.err"
 code=$?
 reason="(journal)"
-if [ "$TIMED_OUT" = 1 ] || [ "$MEM_KILLED" = 1 ]; then
+if [ "$MEM_KILLED" = 1 ]; then
   # The loop never wrote session_end; append one so the runner reads a reason instead of an unfinished journal.
-  reason=wall_timeout; [ "$MEM_KILLED" = 1 ] && reason=memory_limit
-  printf '%s\n' "{\"v\":2,\"seq\":999999,\"at\":\"$(now)\",\"runId\":\"motifcode-$SEED\",\"scopeId\":\"root\",\"scopeKind\":\"root\",\"record\":{\"t\":\"event\",\"event\":{\"type\":\"session_end\",\"reason\":\"$reason\"}}}" >> "$LOGDIR/session.jsonl"
+  reason=memory_limit
+  printf '%s\n' "{\"v\":2,\"seq\":999999,\"at\":\"$(now)\",\"runId\":\"motifcode-$SEED\",\"scopeId\":\"root\",\"scopeKind\":\"root\",\"record\":{\"t\":\"event\",\"event\":{\"type\":\"session_end\",\"reason\":\"$reason\"}}}" >> "$LOGDIR/session$PHASE.jsonl"
 fi
 finish "$code" "$reason"
 exit $code

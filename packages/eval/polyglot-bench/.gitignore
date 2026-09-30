@@ -11,4 +11,6 @@ chunks/
 instances.json
 corpus-spec.json
 REPORT.md
+REPORT-v2.md
+artifacts/
 report.html

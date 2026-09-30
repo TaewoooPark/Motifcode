@@ -156,8 +156,12 @@ def main() -> int:
     serving = manifest.get("serving", {})
     w(f"  {serving.get('engine', '?')} on {serving.get('hardware', {}).get('name', '?')}"
       + (f"  ·  {serving['quantization']}" if serving.get("quantization") else ""))
-    w(f"  budget: {manifest['budgets']['max_turns']} turns,"
-      f" {manifest['budgets']['task_wall_timeout_seconds']}s wall"
+    wall = manifest['budgets']['task_wall_timeout_seconds']
+    # No wall-clock budget is a protocol, not a missing value: say so, and name
+    # the safety cap that stands in for it.
+    wall_text = (f"{wall}s wall" if wall is not None
+                 else f"no wall-clock budget (safety cap {manifest['budgets'].get('safety_cap_seconds', '?')}s)")
+    w(f"  budget: {manifest['budgets']['max_turns']} turns, {wall_text}"
       f"  ·  channel {manifest['harness']['initial_channel']}")
     w("=" * 72)
     w("")
