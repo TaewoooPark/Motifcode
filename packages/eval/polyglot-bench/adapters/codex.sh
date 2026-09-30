@@ -27,7 +27,7 @@ if [ -z "$CONTINUE_FROM" ]; then
     --json -o "$LOGDIR/last_message$PHASE.txt" "$PROMPT" > "$LOGDIR/agent$PHASE.log" 2>> "$LOGDIR/agent$PHASE.err"
 else
   # The first round's thread, from its own event log.
-  THREAD="$(grep -m1 -o '"thread_id":"[^"]*"' "$LOGDIR/agent.log" 2>/dev/null | cut -d'"' -f4)"
+  THREAD="$(grep -o '"thread_id":"[^"]*"' "$LOGDIR/agent.log" 2>/dev/null | head -n 1 | cut -d'"' -f4)"
   if [ -z "$THREAD" ]; then
     echo "no thread id in the first round's log; nothing to resume" >> "$LOGDIR/agent$PHASE.err"
     [ -n "$PROXY" ] && kill "$PROXY" 2>/dev/null

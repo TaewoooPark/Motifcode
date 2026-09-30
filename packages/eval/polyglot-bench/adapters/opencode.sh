@@ -29,7 +29,8 @@ PY
 if opencode run --help 2>&1 | grep -q -- '--dangerously-skip-permissions'; then APPROVE=--dangerously-skip-permissions; else APPROVE=--auto; fi
 SESSION=()
 if [ -n "$CONTINUE_FROM" ]; then
-  ID="$(grep -m1 -o '"sessionID":"[^"]*"' "$LOGDIR/agent.log" 2>/dev/null | cut -d'"' -f4)"
+  # The first round's session. Its log's lines name it more than once each (the event's and its part's).
+  ID="$(grep -o '"sessionID":"[^"]*"' "$LOGDIR/agent.log" 2>/dev/null | head -n 1 | cut -d'"' -f4)"
   if [ -n "$ID" ]; then SESSION=(--session "$ID"); else SESSION=(--continue); fi
 fi
 cd "$CWD" || exit 97
