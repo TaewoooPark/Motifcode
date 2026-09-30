@@ -89,6 +89,7 @@ export function requestDigest(req: {
   topP?: number;
   seed?: number;
   stop?: readonly string[];
+  repetitionPenalty?: number;
 }): string {
   return canonicalHash({
     messages: req.messages,
@@ -100,5 +101,7 @@ export function requestDigest(req: {
     topP: req.topP ?? null,
     seed: req.seed ?? null,
     stop: req.stop ?? null,
+    // Only a retry carries it, so every other request keeps the hash it always had.
+    ...(req.repetitionPenalty !== undefined ? { repetitionPenalty: req.repetitionPenalty } : {}),
   });
 }
