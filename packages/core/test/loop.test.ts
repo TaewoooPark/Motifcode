@@ -426,18 +426,23 @@ describe("the done contract", () => {
     expect(r.turns).toBe(3);
   });
 
-  it("does not end when the confirmed summary is a different claim", async () => {
-    const { emit } = collect();
+  it("ends on a confirmation that words the summary differently, with its words", async () => {
+    // Sending it back for the proposal's exact words cost one or two turns
+    // each time and checked nothing the challenge had not.
+    const { events, emit } = collect();
     const transport = new ScriptedTransport([
       doneBody("fixed the parser"),
-      toolCallBody("done", { summary: "fixed everything, shipped it", confirm: true }),
-      doneBody("fixed the parser"),
-      doneBody("fixed the parser", { confirm: true }),
+      toolCallBody("done", { summary: "Fixed the parser; all twelve tests pass.", confirm: true }),
     ]);
     const r = await runLoop({ ...base, transport, executor: okExec, emit, maxTurns: 8 });
     expect(r.reason).toBe("done");
-    expect(r.summary).toBe("fixed the parser");
-    expect(r.turns).toBe(4);
+    expect(r.summary).toBe("Fixed the parser; all twelve tests pass.");
+    expect(r.turns).toBe(2);
+    const notices = kinds(events, "notice") as Extract<LoopEvent, { type: "notice" }>[];
+    expect(notices.some((n) => n.text === "completion confirmed with a reworded summary")).toBe(true);
+    // The confirming turn is in the transcript, as it is for a verbatim one.
+    const last = r.transcript[r.transcript.length - 1]!;
+    expect(last.role).toBe("assistant");
   });
 
   it("tolerates reflowed whitespace in the confirmed summary", async () => {

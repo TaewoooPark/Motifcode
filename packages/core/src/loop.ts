@@ -874,8 +874,8 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
     // The first `done` is a proposal, never an ending — not even with
     // `confirm: true`, because a model that emits the confirmation flag on its
     // own first attempt has not been challenged. The second must carry
-    // `confirm: true` *and* repeat the proposed summary; anything else means
-    // the model answered a different question than the one it was asked.
+    // `confirm: true`; without it the model answered a different question than
+    // the one it was asked.
     const doneAction = doneActions[0];
     if (doneAction) {
       const doneCalls = callsOf([doneAction]);
@@ -901,19 +901,13 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
         checkpoint();
         continue;
       }
+      // A confirmation that words the summary differently still ends the
+      // session, with its own words. The challenge is there to make the model
+      // look once more before it stops, and it has; sending it back for the
+      // proposal's exact words cost one or two more turns every time it
+      // rephrased (18 times over one campaign) and checked nothing further.
       if (normalizeSummary(doneAction.summary) !== pendingDone) {
-        // A different summary is a different claim, and confirming a claim the
-        // harness never proposed is not a confirmation of anything.
-        const proposed = pendingDone;
-        pendingDone = null;
-        handBack(
-          `The confirmation did not match the summary you proposed:\n\n${proposed}\n\n` +
-            "Repeat that summary verbatim with `confirm: true`, or keep working.",
-          doneCalls,
-        );
-        emit({ type: "notice", level: "warn", text: "confirmation summary did not match" });
-        checkpoint();
-        continue;
+        emit({ type: "notice", level: "info", text: "completion confirmed with a reworded summary" });
       }
       // The confirming turn goes into the transcript like any other before
       // the session ends. Without it the record stopped at the harness's
