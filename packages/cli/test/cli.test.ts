@@ -6,7 +6,7 @@ import { AgentRegistry, BUILTIN_AGENTS } from "@motifcode/agents";
 import { renderPrompt, sharedPrefixLength } from "@motifcode/protocol";
 import { BUILTIN_SKILLS, SkillRegistry } from "@motifcode/skills";
 import { CORE_TOOLS, toolPrefix } from "@motifcode/tools";
-import { readinessMarker, readinessProbe, ToolExecutor, patchHint, patchPaths } from "../src/executor.js";
+import { AFTER_SUBAGENT_SUMMARY, readinessMarker, readinessProbe, ToolExecutor, patchHint, patchPaths } from "../src/executor.js";
 import { buildAgentPrompt, buildSystemPrompt } from "../src/prompt.js";
 import { doctor, formatChecks, worstState, type Check } from "../src/doctor.js";
 
@@ -305,9 +305,13 @@ describe("executor", () => {
     expect(r.ok).toBe(false);
     expect(r.output).toContain("turn_limit");
     expect(r.output).toContain("r7");
+    // Nothing to build on: the cue belongs to finished work only.
+    expect(r.output).not.toContain("Build on it");
   });
 
-  it("passes a finished subagent's summary through with its run id", async () => {
+  it("passes a finished subagent's summary through with its run id, and says to build on it", async () => {
+    // The system prompt says a summary is the result, and the parent still
+    // re-read what the child had covered; this says it where the result is read.
     const ex = new ToolExecutor({
       cwd,
       runAgent: async () => ({ ok: true, reason: "done", runId: "r8", summary: "found it in parse.ts" }),
@@ -315,8 +319,11 @@ describe("executor", () => {
     const r = await ex.run({ id: "1", name: "task", arguments: { agent: "explorer", prompt: "look" }, repaired: false, validated: true });
     ex.close();
     expect(r.ok).toBe(true);
-    expect(r.output).toContain("found it in parse.ts");
-    expect(r.output).toContain("r8");
+    expect(r.output).toBe(`[r8] found it in parse.ts\n\n${AFTER_SUBAGENT_SUMMARY}`);
+    const bare = new ToolExecutor({ cwd, runAgent: async () => ({ ok: true, reason: "done", runId: "r9" }) });
+    const empty = await bare.run({ id: "2", name: "task", arguments: { agent: "explorer", prompt: "look" }, repaired: false, validated: true });
+    bare.close();
+    expect(empty.output).toBe("[r9] (no summary)");
   });
 
   it("lets a PreToolUse hook veto a call", async () => {

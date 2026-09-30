@@ -394,6 +394,18 @@ function writeFile(path: string, content: string, cwd: string): ToolResult {
   }
 }
 
+/**
+ * Read by the parent right under a finished subagent's summary.
+ *
+ * The subagent index in the system prompt already says that a summary is the
+ * result, and it did not change what Motif-3 did next: after a child returned,
+ * the parent went on re-reading the `ls`, `package.json` and README the child
+ * had covered, a median of five more calls, with or without that paragraph.
+ * This puts the same contract where the model reads the result.
+ */
+export const AFTER_SUBAGENT_SUMMARY =
+  "(This summary is the subagent's finished result. Build on it: do not re-read files or rerun commands it already covered; check a detail yourself only if your next step depends on something it did not report.)";
+
 /** Files a unified diff touches, for the hook payload. */
 export function patchPaths(patch: string): string[] {
   const paths = new Set<string>();
@@ -637,7 +649,10 @@ export class ToolExecutor implements Executor {
               output: `${head}subagent did not finish (${out.reason})${out.summary ? `: ${out.summary}` : ""}`,
             };
           }
-          return { ok: true, output: `${head}${out.summary ?? "(no summary)"}` };
+          return {
+            ok: true,
+            output: out.summary ? `${head}${out.summary}\n\n${AFTER_SUBAGENT_SUMMARY}` : `${head}(no summary)`,
+          };
         } catch (err) {
           return { ok: false, output: String(err) };
         }
