@@ -54,6 +54,14 @@ const server = createServer((req, res) => {
     const headers = { ...req.headers, host: upstream.host, "content-length": String(body.length) };
     delete headers.connection;
     const basePath = upstream.pathname.replace(/\/$/, "");
+    // One line per request, whichever way it ends: Codex closes a stream as soon as it has read the response's
+    // last event, often before the upstream's own end.
+    let logged = false;
+    const done = (entry) => {
+      if (logged) return;
+      logged = true;
+      log({ path: req.url, added, ...entry });
+    };
     const up = send(
       {
         protocol: upstream.protocol,
@@ -66,16 +74,19 @@ const server = createServer((req, res) => {
       (answer) => {
         res.writeHead(answer.statusCode ?? 502, answer.headers);
         answer.pipe(res);
-        answer.on("end", () => log({ path: req.url, added, status: answer.statusCode }));
+        answer.on("end", () => done({ status: answer.statusCode }));
       },
     );
     up.on("error", (err) => {
-      log({ path: req.url, added, error: String(err) });
+      done({ error: String(err) });
       if (!res.headersSent) res.writeHead(502, { "content-type": "text/plain" });
       res.end(String(err));
     });
     // The client went away: so does the upstream request.
-    res.on("close", () => up.destroy());
+    res.on("close", () => {
+      done(res.headersSent ? { status: res.statusCode } : { error: "client closed before a response" });
+      up.destroy();
+    });
     up.end(body);
   });
 });
