@@ -20,6 +20,9 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
+# A message that starts with a dash reads as an option to all three CLIs, and a Go feedback round opens with
+# `go test`'s "--- FAIL"; a leading newline keeps it the message.
+case "$PROMPT" in -*) PROMPT=$'\n'"$PROMPT" ;; esac
 ROWDIR="$(dirname "$CWD")"
 # logs/<harness>/<configId>--<lang>/<exercise>--<seed>--<rep>/ mirrors the runner's row directory.
 REL="${ROWDIR#"$BENCH"/work/*/}"   # strips work/<any root>/, so pool schedulers with their own work roots log to the same place
