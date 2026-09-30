@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { AgentRegistry, BUILTIN_AGENTS } from "@motifcode/agents";
+import { clampOutput } from "@motifcode/core";
 import { renderPrompt, sharedPrefixLength } from "@motifcode/protocol";
 import { BUILTIN_SKILLS, SkillRegistry } from "@motifcode/skills";
 import { CORE_TOOLS, toolPrefix } from "@motifcode/tools";
@@ -139,6 +140,19 @@ describe("executor", () => {
     expect(r.output).toContain("2\tb");
     expect(r.output).toContain("3\tc");
     expect(r.output).not.toContain("1\ta");
+  });
+
+  it("keeps a whole file read of up to 32,000 bytes, not the 10,000 other tools keep", async () => {
+    // Most cut tool results over a campaign were reads of a whole file.
+    writeFileSync(join(cwd, "big.txt"), Array.from({ length: 400 }, (_, i) => `line ${i} ${"x".repeat(40)}`).join("\n"), "utf8");
+    const ex = new ToolExecutor({ cwd });
+    const r = await ex.run({ id: "1", name: "read", arguments: { path: "big.txt" }, repaired: false, validated: true });
+    const b = await ex.run({ id: "2", name: "bash", arguments: { command: "cat big.txt" }, repaired: false, validated: true });
+    ex.close();
+    expect(r.outputLimit).toBe(32_000);
+    expect(b.outputLimit).toBeUndefined();
+    expect(Buffer.byteLength(clampOutput(r.output, r.outputLimit))).toBe(Buffer.byteLength(r.output));
+    expect(clampOutput(r.output, r.outputLimit)).toContain("400\tline 399");
   });
 
   it("determines logical lines without phantom terminal newline or fabricated lines", async () => {

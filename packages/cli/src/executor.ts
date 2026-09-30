@@ -342,6 +342,17 @@ function toLogicalLines(text: string): string[] {
   return normalized.split("\n");
 }
 
+/**
+ * Bytes of a file read kept before its middle is cut; other tools keep 10,000.
+ *
+ * A read asks for the file, and the loop's head-and-tail cut, made for command
+ * output, hands back its two ends. Over one campaign 54 of 3,719 tool results
+ * were cut, and 37 of those were reads of a whole file, which the model then
+ * read again or reasoned about with the middle missing. `read` takes an offset
+ * and a limit, so a larger file is still reachable in parts.
+ */
+const READ_OUTPUT_LIMIT = 32_000;
+
 function readSlice(path: string, cwd: string, offset?: number, limit?: number): ToolResult {
   try {
     const text = readFileSync(resolve(cwd, path), "utf8");
@@ -539,7 +550,7 @@ export class ToolExecutor implements Executor {
         // onHook above reports the independent post-processing failure.
         if (result.bounded) return result;
         return {
-          ok: result.ok,
+          ...result,
           output: `${result.output}\n\n[hooks] ${failed.map((h) => `${h.label}: ${h.output}`).join("; ")}`,
         };
       }
@@ -575,7 +586,7 @@ export class ToolExecutor implements Executor {
       }
 
       case "read":
-        return readSlice(str(args, "path"), cwd, num(args, "offset"), num(args, "limit"));
+        return { ...readSlice(str(args, "path"), cwd, num(args, "offset"), num(args, "limit")), outputLimit: READ_OUTPUT_LIMIT };
 
       case "write":
         return writeFile(str(args, "path"), str(args, "content"), cwd);

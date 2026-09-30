@@ -680,6 +680,33 @@ describe("output clamping", () => {
   it("leaves short output alone", () => {
     expect(clampOutput("short", 1000)).toBe("short");
   });
+
+  it("keeps up to a result's own limit, and 10,000 bytes otherwise", async () => {
+    // A file read asks for the whole file; command output is cut sooner.
+    const file = "x".repeat(20_000);
+    const outputs = new Map<string, { ok: boolean; output: string; outputLimit?: number }>([
+      ["read", { ok: true, output: file, outputLimit: 32_000 }],
+      ["bash", { ok: true, output: file }],
+      ["write", { ok: true, output: "y".repeat(40_000), outputLimit: 32_000 }],
+    ]);
+    const executor: Executor = { run: async (call) => outputs.get(call.name)! };
+    const { events, emit } = collect();
+    const transport = new ScriptedTransport([
+      toolCallBody("read", { path: "f" }),
+      toolCallBody("bash", { command: "cat f" }),
+      toolCallBody("write", { path: "g", content: "z" }),
+      doneBody("d"),
+      doneBody("d", { confirm: true }),
+    ]);
+    const r = await runLoop({ ...base, transport, executor, emit });
+    expect(r.reason).toBe("done");
+    const ends = kinds(events, "tool_end") as Extract<LoopEvent, { type: "tool_end" }>[];
+    expect(ends[0]!.output).toBe(file);
+    expect(Buffer.byteLength(ends[1]!.output)).toBeLessThan(10_100);
+    expect(ends[1]!.output).toContain("bytes omitted");
+    expect(Buffer.byteLength(ends[2]!.output)).toBeLessThan(32_100);
+    expect(Buffer.byteLength(ends[2]!.output)).toBeGreaterThan(31_900);
+  });
 });
 
 describe("history on the native channel", () => {

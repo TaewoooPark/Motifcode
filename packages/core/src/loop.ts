@@ -65,6 +65,11 @@ export interface ToolResult {
   output: string;
   /** The producer already bounded this complete result (MCP envelope or skill instructions). */
   bounded?: boolean;
+  /**
+   * Bytes of output kept before the middle is cut, when not the default. For
+   * a tool whose whole output is what was asked for, such as a file read.
+   */
+  outputLimit?: number;
 }
 
 export interface Executor {
@@ -948,7 +953,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
       const result = await executor.run(call, signal);
       // Cutting a result envelope destroys both JSON and the handle needed to
       // recover omitted data. The MCP host enforces its own serialized budget.
-      const output = result.bounded ? result.output : clampOutput(result.output);
+      const output = result.bounded ? result.output : clampOutput(result.output, result.outputLimit);
       emit({ type: "tool_end", id: call.id, ok: result.ok, output, ms: Date.now() - started });
       session.appendAll(
         codec.serializeObservation({
