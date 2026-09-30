@@ -229,6 +229,12 @@ describe("cli process end to end", () => {
     // The child sees none of the parent's conversation — that is the whole
     // point of delegating, and the reason its summary has to stand alone.
     for (const m of childFirst!.messages) expect(String(m.content)).not.toContain(parentTask);
+    // Under the same output cap as the parent, which bounds its reasoning too.
+    expect(childFirst!.max_tokens).toBe(16384);
+    expect(childFirst!.stream).toBe(true);
+    // And the parent is told to build on what the child reported.
+    const afterChild = server.bodies.find((b) => b.messages.some((m) => m.role === "tool" && String(m.content).includes("child done")));
+    expect(String(afterChild!.messages.find((m) => m.role === "tool" && String(m.content).includes("child done"))!.content)).toContain("Build on it");
   }, 30_000);
 
   it("writes the task into the journal as well as onto the wire", async () => {
