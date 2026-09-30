@@ -139,6 +139,29 @@ describe("reading the three harnesses' logs", () => {
     expect(actionsFromLog(log)).toEqual([{ tool: "shell", command: "/bin/zsh -lc 'go test ./...'" }]);
   });
 
+  it("codex rollout: every function call as made, keystrokes into a session included", () => {
+    const call = (name: string, args: Record<string, unknown>, id: string) =>
+      JSON.stringify({ type: "response_item", payload: { type: "function_call", name, arguments: JSON.stringify(args), call_id: id } });
+    const log = [
+      JSON.stringify({ type: "session_meta", payload: { id: "t" } }),
+      call("exec_command", { cmd: "bash", yield_time_ms: 1000 }, "c1"),
+      call("write_stdin", { session_id: 1, chars: "curl -sO https://example.com/x\n" }, "c2"),
+      call("write_stdin", { session_id: 1, chars: "curl -sO https://example.com/x\n" }, "c2"),
+      call("str_replace_editor", { path: "a.py" }, "c3"),
+      JSON.stringify({ type: "response_item", payload: { type: "local_shell_call", call_id: "c4", action: { command: ["bash", "-lc", "pip install x"] } } }),
+      JSON.stringify({ type: "response_item", payload: { type: "web_search_call", id: "ws1", action: { type: "search", query: "exercism answers" } } }),
+      JSON.stringify({ type: "response_item", payload: { type: "message", role: "assistant", content: [] } }),
+    ].join("\n");
+    expect(actionsFromLog(log)).toEqual([
+      { tool: "shell", command: "bash" },
+      { tool: "shell", command: "curl -sO https://example.com/x\n" },
+      { tool: "str_replace_editor" },
+      { tool: "shell", command: "bash -lc 'pip install x'" },
+      { tool: "web_search", command: "exercism answers" },
+    ]);
+    expect(networkViolations(actionsFromLog(log)).map((v) => v.reason)).toEqual(["downloads with curl", "pip install", "web tool"]);
+  });
+
   it("opencode: tool parts, each call once", () => {
     const part = (tool: string, input: Record<string, unknown>, id: string) =>
       JSON.stringify({ type: "tool_use", part: { type: "tool", tool, callID: id, state: { status: "completed", input } } });

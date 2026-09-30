@@ -397,4 +397,19 @@ ${SESSION_END("done")}
     expect(row.invalid).toContain("downloads with curl");
     expect(passed(row)).toBe(false);
   });
+
+  it("reads the harness's session record beside the journal for the network rule", async () => {
+    // Codex's --json log leaves out keystrokes sent to a running command; its rollout has them.
+    const call = JSON.stringify({
+      type: "response_item",
+      payload: { type: "function_call", name: "write_stdin", call_id: "c2", arguments: JSON.stringify({ session_id: 1, chars: "wget https://example.com/x\n" }) },
+    });
+    const agent = fakeAgent(
+      `printf '%s\\n' '${call}' > "$journal.record.jsonl"\n` +
+        `printf 'def add(a, b):\\n    return a + b\\n' > "$cwd/calc.py"\n${SESSION_END("done")}`,
+    );
+    const row = await runRow({ ...options(agent), grader: rowGrader }, { ...planned, seed: 36 }, instance());
+    expect(row.network?.violations.map((v) => v.reason)).toEqual(["downloads with wget"]);
+    expect(passed(row)).toBe(false);
+  });
 });

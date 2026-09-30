@@ -268,6 +268,13 @@ function jsonLines(text: string): unknown[] {
 type Json = Record<string, unknown>;
 const obj = (v: unknown): Json | undefined => (typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Json) : undefined);
 const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
+/** A command as a string, or an argv array quoted back into one. */
+const shellText = (v: unknown): string | undefined =>
+  typeof v === "string"
+    ? v
+    : Array.isArray(v) && v.every((a) => typeof a === "string")
+      ? (v as string[]).map((a) => (/^[\w@%+=:,./-]+$/.test(a) ? a : `'${a.replace(/'/g, `'\\''`)}'`)).join(" ")
+      : undefined;
 
 /**
  * The actions in a log, whichever of the three harnesses wrote it: a motifcode
@@ -305,6 +312,36 @@ export function actionsFromLog(text: string): AgentAction[] {
       } else if (type === "mcp_tool_call") {
         seen.add(`codex:${id}:${type}`);
         out.push({ tool: `mcp:${str(item["tool"]) ?? "?"}` });
+      }
+      continue;
+    }
+    // codex's rollout (its session record): {type: "response_item", payload: {type: "function_call", name,
+    // arguments, call_id}} — every call as the model made it, write_stdin keystrokes included
+    const payload = obj(o["payload"]);
+    if (o["type"] === "response_item" && payload) {
+      const type = str(payload["type"]) ?? "";
+      const id = str(payload["call_id"]) ?? str(payload["id"]) ?? "";
+      if (id && seen.has(`rollout:${id}`)) continue;
+      if (type === "function_call") {
+        if (id) seen.add(`rollout:${id}`);
+        const name = str(payload["name"]) ?? "?";
+        let args: Record<string, unknown> | undefined;
+        try {
+          args = obj(JSON.parse(str(payload["arguments"]) ?? ""));
+        } catch {
+          args = undefined;
+        }
+        const command = shellText(args?.["cmd"]) ?? shellText(args?.["command"]) ?? str(args?.["chars"]);
+        const shell = name === "exec_command" || name === "write_stdin" || name === "shell" || name === "shell_command";
+        out.push({ tool: shell ? "shell" : name, ...(command !== undefined ? { command } : {}) });
+      } else if (type === "local_shell_call") {
+        if (id) seen.add(`rollout:${id}`);
+        const command = shellText(obj(payload["action"])?.["command"]);
+        out.push({ tool: "shell", ...(command !== undefined ? { command } : {}) });
+      } else if (type === "web_search_call") {
+        if (id) seen.add(`rollout:${id}`);
+        const query = str(obj(payload["action"])?.["query"]);
+        out.push({ tool: "web_search", ...(query !== undefined ? { command: query } : {}) });
       }
       continue;
     }

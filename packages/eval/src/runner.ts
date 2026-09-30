@@ -291,11 +291,14 @@ const scored = (grade: GraderResult | undefined): GraderResult | undefined =>
 
 /**
  * Everything the agent did in a session, from its journal and, for an
- * adapter-driven harness, the harness's own log beside it (`<journal>.agent.log`).
+ * adapter-driven harness, the harness's own log beside it (`<journal>.agent.log`)
+ * and its own session record when it keeps one apart from that log
+ * (`<journal>.record.jsonl`: Codex's rollout, which has the keystrokes its log
+ * leaves out).
  */
 function actionsOf(journalPath: string): AgentAction[] {
   const out: AgentAction[] = [];
-  for (const path of [journalPath, `${journalPath}.agent.log`]) {
+  for (const path of [journalPath, `${journalPath}.agent.log`, `${journalPath}.record.jsonl`]) {
     if (!existsSync(path)) continue;
     try {
       out.push(...actionsFromLog(readFileSync(path, "utf8")));
@@ -376,6 +379,7 @@ export async function runRow(
       writeFileSync(join(evidence, "grade.json"), JSON.stringify(graded, null, 2) + "\n");
       keep(evidence, "session.jsonl", journalPath);
       keep(evidence, "agent.log", `${journalPath}.agent.log`);
+      keep(evidence, "record.jsonl", `${journalPath}.record.jsonl`);
     }
 
     let feedback: CompletedRun["feedback"];
@@ -402,6 +406,7 @@ export async function runRow(
         writeFileSync(join(evidence, "grade-h2.json"), JSON.stringify(graded2, null, 2) + "\n");
         keep(evidence, "session-h2.jsonl", second);
         keep(evidence, "agent-h2.log", `${second}.agent.log`);
+        keep(evidence, "record-h2.jsonl", `${second}.record.jsonl`);
       }
     }
 
