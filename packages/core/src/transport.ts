@@ -17,9 +17,9 @@
  * whose closer never arrives — a length-capped response — can be reasoned
  * about when you have the whole body and cannot be mid-stream, because the
  * repairs are not append-only and acting on a fragment early would contradict
- * the repaired result. So the wire may stream — and does, when the caller
- * asks to see the text as it arrives — but the response handed back is the
- * assembled whole, the same object the non-streaming path returns.
+ * the repaired result. So the wire may stream — and does whenever the caller
+ * passes `onDelta`, which the loop always does — but the response handed back
+ * is the assembled whole, the same object the non-streaming path returns.
  *
  * Failure is a first-class shape here rather than an exception that escapes.
  * A hosted endpoint rate-limits, a gateway times out, a local engine falls
@@ -53,7 +53,7 @@ export interface HttpTransportOptions {
   model: string;
   apiKey?: string;
   fetchImpl?: typeof fetch;
-  /** Abandon a request that has produced nothing for this long. */
+  /** Abandon a request that has produced nothing for this long: no headers, or a stream gone silent. */
   requestTimeoutMs?: number;
 }
 
@@ -420,7 +420,7 @@ export class HttpTransport implements Transport {
     const streamed = /text\/event-stream/i.test(res.headers.get("content-type") ?? "");
     if (req.onDelta && streamed) {
       try {
-        json = await readStream(res, req.onDelta, req.signal);
+        json = await readStream(res, req.onDelta, req.signal, this.requestTimeoutMs);
       } catch (err) {
         if (TransportError.is(err)) throw err;
         if (req.signal?.aborted || isAbort(err)) throw new TransportError("request aborted", { kind: "aborted", cause: err });
@@ -536,6 +536,7 @@ async function readStream(
   res: Response,
   onDelta: (d: StreamDelta) => void,
   signal: AbortSignal | undefined,
+  idleMs: number,
 ): Promise<{ choices?: ChatChoice[]; cost?: number; cost_details?: Record<string, number>; usage?: Record<string, unknown> & { prompt_tokens_details?: { cached_tokens?: number } } }> {
   if (!res.body) throw new TransportError("server sent no body to stream", { kind: "protocol" });
   const reader = res.body.getReader();
@@ -549,6 +550,30 @@ async function readStream(
   let cost: Pick<ReportedCost, "amount" | "details"> | undefined;
   let stopped: { code: string; message: string } | undefined;
   const calls = new Map<number, { id?: string; name: string; arguments: string }>();
+
+  /**
+   * The next piece of the body, or a timeout once the stream has been silent
+   * for `idleMs`.
+   *
+   * The request deadline stops at the headers, and a stream sends its headers
+   * first. Without a limit of its own, a stream that goes quiet — a connection
+   * left half-open, a replica that stalls — is waited on for as long as the
+   * process lives. A stream that is still producing is never cut.
+   */
+  const next = async () => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const silence = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new TransportError(`the response stream sent nothing for ${idleMs}ms`, { kind: "timeout" })),
+        idleMs,
+      );
+    });
+    try {
+      return await Promise.race([reader.read(), silence]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
 
   const handle = (line: string): boolean => {
     if (!line.startsWith("data:")) return false;
@@ -610,7 +635,14 @@ async function readStream(
       await reader.cancel().catch(() => undefined);
       throw new TransportError("request aborted", { kind: "aborted" });
     }
-    const { done, value } = await reader.read();
+    let piece;
+    try {
+      piece = await next();
+    } catch (err) {
+      await reader.cancel().catch(() => undefined);
+      throw err;
+    }
+    const { done, value } = piece;
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
     let nl = buffer.indexOf("\n");
@@ -625,13 +657,22 @@ async function readStream(
     }
     if (finished) break;
   }
-  if (!finished && buffer.trim() !== "") handle(buffer.trim());
+  if (!finished && buffer.trim() !== "") finished = handle(buffer.trim());
   if (stopped) {
     await reader.cancel().catch(() => undefined);
     throw new TransportError(`the server stopped the generation: ${stopped.code}${stopped.message ? ` (${stopped.message})` : ""}`, {
       kind: "generation",
       code: stopped.code,
     });
+  }
+  // A stream that stops with neither [DONE] nor a finish_reason was cut off,
+  // not finished. Measured on the hosted endpoint: two requests for the same
+  // context ended mid-thought in the same second, 262 s in, with no error and
+  // no ending. Assembled as-is, that is a turn of half a thought — in a
+  // conversation, a turn that ends with no reply. It is retried like the
+  // dropped connection it is.
+  if (!finished && finish === undefined) {
+    throw new TransportError("the response stream ended before the response did", { kind: "network" });
   }
 
   const toolCalls = [...calls.entries()]
@@ -716,11 +757,10 @@ export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
  *
  * on three consecutive retries, each exactly five minutes apart. Nothing was
  * wrong with the server; it was still generating. Node's HTTP client gives up
- * waiting for response headers after 300 s by default, and the tool path is
- * deliberately non-streaming — see the note at the top of this file — so no
- * headers arrive until the whole completion is done. `requestTimeoutMs` is 30
- * minutes precisely because a long turn is expected, and it never got the
- * chance to apply.
+ * waiting for response headers after 300 s by default, and the tool path was
+ * not streamed then, so no headers arrived until the whole completion was
+ * done. `requestTimeoutMs` is 30 minutes precisely because a long turn is
+ * expected, and it never got the chance to apply.
  *
  * That default is a reasonable one for a hosted API answering in seconds. It is
  * the wrong one for a large model on a desk, and a harness that only works

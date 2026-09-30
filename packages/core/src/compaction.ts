@@ -115,6 +115,10 @@ export async function summarizeTranscript(opts: SummarizeOptions): Promise<strin
     tools: opts.tools,
     ...(opts.maxTokens !== undefined ? { maxTokens: opts.maxTokens } : {}),
     ...(opts.signal ? { signal: opts.signal } : {}),
+    // Streamed though nothing is shown, as every loop request is: it carries
+    // the whole transcript, and a gateway ends a request that has sent nothing
+    // back for 600 s.
+    onDelta: () => {},
   });
   // Reasoning is separated the way the loop separates it: by the server when
   // it does, and by the scrubber when the body carries the think block itself.

@@ -131,6 +131,136 @@ describe("the streaming transport", () => {
   });
 });
 
+describe("a stream cut short", () => {
+  const fetchOf = (make: () => Response) => (async () => make()) as unknown as typeof fetch;
+  const ask = (t: HttpTransport) =>
+    t.complete({ messages: [{ role: "user", content: "x" }], tools: [], onDelta: () => {} }).catch((e: unknown) => e);
+
+  it("is a retryable network error, not a response of what had arrived", async () => {
+    // Measured on the hosted endpoint: two requests ended mid-thought in the
+    // same second, with neither a finish_reason nor [DONE].
+    const t = new HttpTransport({ endpoint: "http://x", model: "m", fetchImpl: fetchOf(() => sse([chunk({ reasoning: "half a th" })])) });
+    const err = await ask(t);
+    expect(TransportError.is(err)).toBe(true);
+    expect((err as TransportError).kind).toBe("network");
+    expect((err as TransportError).retryable).toBe(true);
+  });
+
+  it("still accepts a stream that ends on a finish_reason without [DONE], or on [DONE] alone", async () => {
+    const finish = new HttpTransport({
+      endpoint: "http://x",
+      model: "m",
+      fetchImpl: fetchOf(() => sse([chunk({ content: "ok" }), { choices: [{ delta: {}, finish_reason: "stop", index: 0 }] }])),
+    });
+    const r = await finish.complete({ messages: [{ role: "user", content: "x" }], tools: [], onDelta: () => {} });
+    expect(r.content).toBe("ok");
+    expect(r.finishReason).toBe("stop");
+    // [DONE] as the very last bytes, with no newline after it.
+    const done = new HttpTransport({
+      endpoint: "http://x",
+      model: "m",
+      fetchImpl: fetchOf(
+        () =>
+          new Response(`data: ${JSON.stringify(chunk({ content: "ok" }))}\n\ndata: [DONE]`, {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          }),
+      ),
+    });
+    expect((await done.complete({ messages: [{ role: "user", content: "x" }], tools: [], onDelta: () => {} })).content).toBe("ok");
+  });
+
+  it("is abandoned as a retryable timeout once it has sent nothing for the request deadline", async () => {
+    // The request deadline stops at the headers, which a stream sends first.
+    let cancelled = false;
+    const silent = () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(chunk({ reasoning: "hm" }))}\n\n`));
+          },
+          cancel() {
+            cancelled = true;
+          },
+        }),
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      );
+    const t = new HttpTransport({ endpoint: "http://x", model: "m", requestTimeoutMs: 50, fetchImpl: fetchOf(silent) });
+    const err = await ask(t);
+    expect(TransportError.is(err)).toBe(true);
+    expect((err as TransportError).kind).toBe("timeout");
+    expect((err as TransportError).retryable).toBe(true);
+    expect(cancelled).toBe(true);
+  });
+
+  it("is never cut while it keeps producing, however long it takes in all", async () => {
+    const slow = () => {
+      const encoder = new TextEncoder();
+      const lines = [
+        ...Array.from({ length: 8 }, () => chunk({ reasoning: "." })),
+        chunk({ content: "done thinking" }),
+        { choices: [{ delta: {}, finish_reason: "stop", index: 0 }] },
+        "[DONE]",
+      ];
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            let i = 0;
+            const tick = setInterval(() => {
+              const e = lines[i++]!;
+              controller.enqueue(encoder.encode(`data: ${typeof e === "string" ? e : JSON.stringify(e)}\n\n`));
+              if (i === lines.length) {
+                clearInterval(tick);
+                controller.close();
+              }
+            }, 15);
+          },
+        }),
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      );
+    };
+    // Eleven pieces 15 ms apart: well past the 60 ms deadline in all, never
+    // silent for as long as it.
+    const t = new HttpTransport({ endpoint: "http://x", model: "m", requestTimeoutMs: 60, fetchImpl: fetchOf(slow) });
+    const r = await t.complete({ messages: [{ role: "user", content: "x" }], tools: [], onDelta: () => {} });
+    expect(r.content).toBe("done thinking");
+    expect(r.reasoningContent).toBe("........");
+  });
+
+  it("is sent again by the loop, and the retry's answer is the turn", async () => {
+    let calls = 0;
+    const t = new HttpTransport({
+      endpoint: "http://x",
+      model: "m",
+      fetchImpl: fetchOf(() =>
+        ++calls === 1
+          ? sse([chunk({ reasoning: "half a th" })])
+          : sse([
+              chunk({ reasoning: "answer briefly" }),
+              chunk({ content: "fine" }),
+              { choices: [{ delta: {}, finish_reason: "stop", index: 0 }] },
+              "[DONE]",
+            ]),
+      ),
+    });
+    const events: LoopEvent[] = [];
+    const r = await runLoop({
+      transport: t,
+      tools: [...CORE_TOOLS],
+      system: () => "sys",
+      userTask: "t",
+      executor: { run: async () => ({ ok: true, output: "" }) },
+      emit: (e) => events.push(e),
+      replyEnds: true,
+      random: () => 0,
+    });
+    expect(calls).toBe(2);
+    expect(events.some((e) => e.type === "notice" && /ended before the response did; retry 1\//.test(e.text))).toBe(true);
+    expect(r.reason).toBe("done");
+    expect(r.summary).toBe("fine");
+  });
+});
+
 describe("the loop's stream events", () => {
   it("forwards pieces as stream events before the turn's own events", async () => {
     const pieces = [{ reasoning: "r1" }, { content: "part " }, { content: "two" }];
@@ -162,5 +292,32 @@ describe("the loop's stream events", () => {
     expect(types.indexOf("content_delta")).toBeGreaterThan(types.lastIndexOf("stream"));
     const streamed = events.filter((e): e is Extract<LoopEvent, { type: "stream" }> => e.type === "stream");
     expect(streamed.map((e) => e.content ?? e.reasoning)).toEqual(["r1", "part ", "two"]);
+  });
+
+  it("streams the wire even when nobody is watching, and emits no stream events then", async () => {
+    // A gateway ends a request that has sent nothing back for 600 s; a
+    // reasoning step can take longer.
+    const requests: CompletionRequest[] = [];
+    const transport = {
+      endpoint: "fake://",
+      model: "m",
+      complete: async (req: CompletionRequest) => {
+        requests.push(req);
+        req.onDelta?.({ content: "hi" });
+        return { content: "hi", rawText: "hi", ms: 1 };
+      },
+    };
+    const events: LoopEvent[] = [];
+    await runLoop({
+      transport,
+      tools: [...CORE_TOOLS],
+      system: () => "sys",
+      userTask: "t",
+      executor: { run: async () => ({ ok: true, output: "" }) },
+      emit: (e) => events.push(e),
+      replyEnds: true,
+    });
+    expect(requests[0]!.onDelta).toBeTypeOf("function");
+    expect(events.some((e) => e.type === "stream")).toBe(false);
   });
 });

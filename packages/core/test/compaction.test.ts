@@ -49,6 +49,8 @@ describe("the summary request", () => {
     expect(req.messages.map((m) => m.role)).toEqual(["system", "user", "user"]);
     expect(req.messages[2]!.content).toBe(SUMMARIZATION_PROMPT);
     expect(req.tools).toHaveLength(CORE_TOOLS.length);
+    // Streamed like every loop request: a gateway ends a silent one at 600 s.
+    expect(req.onDelta).toBeTypeOf("function");
   });
 
   it("passes the person's focus on to the summary prompt", async () => {

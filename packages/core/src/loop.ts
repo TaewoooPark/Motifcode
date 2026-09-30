@@ -173,7 +173,8 @@ export interface LoopOptions {
    * Show the response as it arrives, as `stream` events.
    *
    * The turn is still parsed from the whole response; the stream is what
-   * the person watches while that arrives.
+   * the person watches while that arrives. The wire streams either way; this
+   * decides only whether the pieces become events.
    */
   stream?: boolean;
   /** Output cap per model step. Sent on the wire, not merely assumed. */
@@ -539,19 +540,23 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
     turn++;
     emit({ type: "turn_start", turn });
 
+    // The wire always streams, whether or not anyone is watching. A hosted
+    // gateway ends a request that has sent nothing back for 600 s (measured:
+    // HTTP 504 at exactly 600 s, which the retry policy then sends again
+    // whole), and a slow step can take longer than that; a stream is never
+    // silent that long. The response is still assembled whole before it is
+    // parsed.
     const request: CompletionRequest = {
       ...codec.buildRequest(session, tools, requestOptions),
-      ...(opts.stream
-        ? {
-            onDelta: (d) =>
-              emit({
-                type: "stream",
-                ...(d.reasoning !== undefined ? { reasoning: d.reasoning } : {}),
-                ...(d.content !== undefined ? { content: d.content } : {}),
-                ...(d.tool !== undefined ? { tool: d.tool } : {}),
-              }),
-          }
-        : {}),
+      onDelta: opts.stream
+        ? (d) =>
+            emit({
+              type: "stream",
+              ...(d.reasoning !== undefined ? { reasoning: d.reasoning } : {}),
+              ...(d.content !== undefined ? { content: d.content } : {}),
+              ...(d.tool !== undefined ? { tool: d.tool } : {}),
+            })
+        : () => {},
     };
     const { sharedChars, totalChars } = session.observePrefix(request.prompt ?? session.render());
     emit({ type: "prefix", sharedChars, totalChars });
