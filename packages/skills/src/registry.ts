@@ -10,6 +10,29 @@ export interface SkillLoadOptions { invocation: "user" | "model"; arguments?: st
 export interface SkillLoadResult { ok: boolean; output: string; }
 const clean = (text: string) => text.replace(/[\x00-\x1f\x7f]/g, " ").replace(/\s+/g, " ").trim();
 const xml = (text: string) => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+/**
+ * A description as the index shows it: one short line, angle brackets defused.
+ *
+ * The index rides in the system prompt of every request, and the built-in
+ * skills keep their rows under 140 characters for that reason. An installed
+ * skill need not: one installed package added nine descriptions of about 700
+ * characters each, with every quote spelled `&quot;` — the index is plain
+ * text, not XML — and took the system prompt from about 5,000 characters to
+ * over 10,000. The full description is still what a person sees in `/skills`,
+ * and what the skill tool loads.
+ */
+const INDEX_DESCRIPTION_CHARS = 120;
+function indexDescription(text: string): string {
+  // By code point, so a cut never splits a surrogate pair.
+  const chars = Array.from(clean(text));
+  let t = chars.join("");
+  if (chars.length > INDEX_DESCRIPTION_CHARS) {
+    const cut = chars.slice(0, INDEX_DESCRIPTION_CHARS - 1).join("");
+    const space = cut.lastIndexOf(" ");
+    t = `${space > INDEX_DESCRIPTION_CHARS * 0.6 ? cut.slice(0, space) : cut}…`;
+  }
+  return t.replace(/</g, "‹").replace(/>/g, "›");
+}
 
 export class SkillRegistry {
   private readonly skills = new Map<string, Skill>();
@@ -30,7 +53,7 @@ export class SkillRegistry {
     return this.list().filter(s => invocation === "user" ? s.userInvocable : !s.disableModelInvocation && !s.diagnostics.some(d=>d.severity === "error") && this.mcpReady(s));
   }
   index(): string {
-    const rows = this.listFor("model").map(s => `  ${xml(s.name)} — ${xml(clean(s.description))}`);
+    const rows = this.listFor("model").map(s => `  ${xml(s.name)} — ${indexDescription(s.description)}`);
     return rows.length ? ["# Skills", "", "Load one with the `skill` tool when it applies. If the person names an available skill, load it before following its instructions. Do not search the filesystem for installed skill paths; the tool supplies its complete instructions and resource directory.", ...rows].join("\n") : "";
   }
   /** Read-only bundle access becomes available only after successful invocation. */
