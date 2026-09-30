@@ -35,3 +35,6 @@ scratch/
 
 # The vendor's modelling code, fetched rather than vendored — see toolkit/README.md.
 toolkit/ref/
+
+# Private analysis and experiment notes on tuning the harness for Motif-3.
+docs/motif3-optimization/
