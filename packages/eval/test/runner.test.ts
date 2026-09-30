@@ -149,6 +149,17 @@ describe("runner", () => {
     expect(row.grade?.status).toBe("passed");
   });
 
+  it("counts work the agent committed, not just what it left uncommitted", async () => {
+    // A commit moves the checkout's HEAD; a diff against HEAD would be empty.
+    const agent = fakeAgent(
+      `printf 'def add(a, b):\\n    return a + b\\n' > "$cwd/calc.py"\n` +
+        `git -C "$cwd" -c user.name=a -c user.email=a@example.com commit -qam fix\n` +
+        `printf 'helper\\n' > "$cwd/later.py"\n${SESSION_END("done")}`,
+    );
+    const row = await runRow(options(agent), planned, instance());
+    expect(row.grade?.status).toBe("passed");
+  });
+
   it("does not let the agent reach the copy it is graded on", async () => {
     // The agent rewrites its own tests to be vacuous. The grade comes from a
     // checkout it never had a path to, so this changes nothing.

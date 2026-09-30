@@ -264,10 +264,13 @@ async function runAgent(
  * it, an agent that solves the task by adding a module scores zero and the
  * transcript shows it working perfectly — a failure mode that looks like the
  * model being bad at the task.
+ *
+ * Against the base commit, not HEAD: an agent that commits its work moves HEAD,
+ * and a diff against it would leave out everything committed.
  */
-async function extractPatch(checkout: string): Promise<string> {
+async function extractPatch(checkout: string, baseCommit: string): Promise<string> {
   await exec("git", ["add", "-A"], { cwd: checkout });
-  const { stdout } = await exec("git", ["diff", "--cached", "--binary"], {
+  const { stdout } = await exec("git", ["diff", "--cached", "--binary", baseCommit], {
     cwd: checkout,
     maxBuffer: 64 * 1024 * 1024,
   });
@@ -357,7 +360,7 @@ export async function runRow(
       }
     }
     const outcome = await runAgent(opts, instance, checkout, journalPath, planned.seed);
-    const patch = await extractPatch(checkout).catch(() => "");
+    const patch = await extractPatch(checkout, instance.baseCommit).catch(() => "");
     const request = (p: string): GradeRequest => ({
       instanceId: instance.id,
       patch: p,
@@ -383,7 +386,7 @@ export async function runRow(
         prompt: graded.feedback,
         continueFrom: journalPath,
       });
-      const patch2 = await extractPatch(checkout).catch(() => "");
+      const patch2 = await extractPatch(checkout, instance.baseCommit).catch(() => "");
       const graded2 = await gradeRow(opts.grader, request(patch2));
       actions.push(...actionsOf(second));
       feedback = {
