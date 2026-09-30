@@ -6,14 +6,15 @@ What protocol v2 asks a report to carry, and nothing it does not:
     per replicate and per language;
   - paired comparisons between harnesses on the same instances: discordant pairs, McNemar exact p, a bootstrap CI
     on the difference; agreement between replicates;
-  - how the rows that did not pass ended: false completion, abort, infrastructure, safety cap, invalid by the
-    network rule — and, where results/manual-labels.json says so, spec ambiguity or a wrong answer;
+  - how the rows that did not pass ended: false completion, abort, protocol error, infrastructure, safety cap,
+    invalid by the network rule — and, where results/manual-labels.json says so, spec ambiguity or a wrong answer;
   - cost per task and per success (requests, tokens, wall time: p50 / p90 / max) and pass rate by budget;
   - a Harness Card per harness (harness-cards.json, with the versions and budgets from the manifests);
-  - comparisons with the 2026-09-20 campaign only as a different protocol, and with Aider's leaderboard not at all.
+  - a comparison with the 2026-09-20 campaign, named as a different protocol, and none with Aider's leaderboard.
 
 Reads results/r<N>/<harness>/*.jsonl (the runner's rows; rerun.jsonl replaces the rows it names), the manifests, the
-runner's artifacts/ and the adapters' logs/. Every number is computed from those files.
+runner's artifacts/ and the adapters' logs/. Every number is computed from those files, except the campaign's totals
+when CAMPAIGN_RESULTS (that campaign's results/ directory) is not given: then they are the ones ../REPORT.md records.
 """
 import collections, glob, json, math, os, pathlib, random, statistics, sys
 
@@ -21,20 +22,26 @@ B = pathlib.Path(os.environ.get("BENCH") or pathlib.Path(__file__).resolve().par
 H = ["motifcode", "codex", "opencode"]
 TOKEN_BUDGETS = [10_000, 20_000, 50_000, 100_000, 200_000, None]
 STEP_BUDGETS = [5, 10, 20, 40, 80, None]
+# motifcode's endings where the model's output could not be run as actions: malformed actions past the repair budget,
+# or turn after turn with no action at all. Codex and OpenCode report no such ending of their own.
+PROTOCOL_ERRORS = {"breakage_limit", "no_action_limit"}
+# The 2026-09-20 campaign as ../REPORT.md records it: passes out of 213, first-test grading in four languages.
+CAMPAIGN_RECORDED = {"motifcode": 196, "codex": 170, "opencode": 177}
 
 
 def ok(grade):
     return (grade or {}).get("status") == "passed"
 
 
-def load(rep, h):
+def load(rep, h, base=None):
+    base = base or B / f"results/r{rep}/{h}"
     rows = {}
-    for f in sorted(glob.glob(str(B / f"results/r{rep}/{h}/chunk*.jsonl"))):
+    for f in sorted(glob.glob(str(base / "chunk*.jsonl"))):
         for line in open(f):
             if line.strip():
                 r = json.loads(line)
                 rows[r["instanceId"]] = r
-    rerun = B / f"results/r{rep}/{h}/rerun.jsonl"
+    rerun = base / "rerun.jsonl"
     if rerun.exists():
         for line in open(rerun):
             if line.strip():
@@ -118,9 +125,12 @@ def failure_type(r, labels, h):
     label = labels.get(f"{h} {r['instanceId']}")
     if label:
         return label
-    if r.get("agentEndReason") == "done":
+    reason = r.get("agentEndReason")
+    if reason == "done":
         return "false completion (unlabelled)"
-    return f"abort ({r.get('agentEndReason') or st})"
+    if reason in PROTOCOL_ERRORS:
+        return f"protocol error ({reason})"
+    return f"abort ({reason or st})"
 
 
 def mcnemar(b, c):
@@ -136,6 +146,11 @@ def boot(diffs, reps=20000, seed=0):
     n = len(diffs)
     means = sorted(sum(diffs[rng.randrange(n)] for _ in range(n)) / n for _ in range(reps))
     return means[int(0.025 * reps)], means[int(0.975 * reps) - 1]
+
+
+def within(spent, budget):
+    """Solved within a budget: any spend within none; an unrecorded spend within no finite one."""
+    return budget is None or (spent is not None and spent <= budget)
 
 
 def pct(a, b):
@@ -175,7 +190,7 @@ def main():
         w(f"| r{rep} | {h} | {n} | {pct(sum(pass1(r) for r in rs), n)} | {pct(sum(pass1(r, True) for r in rs), n)} | "
           f"{pct(sum(pass2(r) for r in rs), n)} | {sum(1 for r in rs if r.get('invalid'))} |")
 
-    w("\n## By language (pass@1 official, first replicate present)\n")
+    w("\n## By language (pass@1 · pass@2 official / rows, first replicate present)\n")
     first = reps[0] if reps else None
     langs = sorted({i.split("/")[0] for (rep, h), rows in data.items() for i in rows})
     w("| harness | " + " | ".join(langs) + " |")
@@ -187,7 +202,7 @@ def main():
         cells = []
         for l in langs:
             rs = [r for i, r in rows.items() if i.startswith(l + "/")]
-            cells.append(f"{sum(pass1(r) for r in rs)}/{len(rs)}")
+            cells.append(f"{sum(pass1(r) for r in rs)} · {sum(pass2(r) for r in rs)} / {len(rs)}")
         w(f"| {h} | " + " | ".join(cells) + " |")
 
     w("\n## Paired comparisons (same instances, McNemar exact, bootstrap 95% CI of the difference)\n")
@@ -214,8 +229,8 @@ def main():
 
     if len(reps) >= 2:
         w("\n## Agreement between replicates (pass@1 official)\n")
-        w("| harness | instances in both | same verdict | Cohen's κ |")
-        w("|---|---|---|---|")
+        w("| harness | instances in both | same verdict | Cohen's κ | first only | second only | McNemar p |")
+        w("|---|---|---|---|---|---|---|")
         for h in H:
             r1, r2 = data.get((reps[0], h)), data.get((reps[1], h))
             if not r1 or not r2:
@@ -228,10 +243,13 @@ def main():
             pa, pb = sum(a) / n, sum(b) / n
             pe = pa * pb + (1 - pa) * (1 - pb)
             kappa = (po - pe) / (1 - pe) if pe < 1 else 1.0
-            w(f"| {h} | {n} | {po * 100:.1f}% | {kappa:.2f} |")
+            only1 = sum(1 for x, y in zip(a, b) if x and not y)
+            only2 = sum(1 for x, y in zip(a, b) if y and not x)
+            w(f"| {h} | {n} | {po * 100:.1f}% | {kappa:.2f} | {only1} | {only2} | {mcnemar(only1, only2):.4f} |")
 
     w("\n## How the rows that did not pass ended (pass@1 official)\n")
-    w("False completion: the agent ended the task as done and the grade failed. Label rows in results/manual-labels.json "
+    w("False completion: the agent ended the task as done and the grade failed. Protocol error: the harness ended the task "
+      "because the model's output could not be run as actions. Label rows in results/manual-labels.json "
       "(`{\"<harness> <instance>\": \"spec ambiguity\" | \"wrong answer\"}`) to split them.\n")
     for (rep, h), rows in sorted(data.items()):
         kinds = collections.Counter(failure_type(r, labels, h) for r in rows.values() if not pass1(r))
@@ -241,16 +259,18 @@ def main():
                 w(f"  - invalid: {r['instanceId']} — {r['invalid']}")
 
     w("\n## Cost (p50 / p90 / max)\n")
-    w("| replicate | harness | requests per task | completion tokens per task | wall s per task | completion tokens per success | wall s per success |")
-    w("|---|---|---|---|---|---|---|")
+    w("| replicate | harness | requests per task | prompt tokens per task | completion tokens per task | wall s per task | "
+      "requests per success | completion tokens per success | wall s per success |")
+    w("|---|---|---|---|---|---|---|---|---|")
     costs = {}
     for (rep, h), rows in sorted(data.items()):
         per = {i: cost(h, r) for i, r in rows.items()}
         costs[(rep, h)] = per
         succ = [i for i, r in rows.items() if pass1(r)]
         wall = {i: (r.get("wallMs") or 0) / 1000 for i, r in rows.items()}
-        w(f"| r{rep} | {h} | {quant(p[0] for p in per.values())} | {quant(p[2] for p in per.values())} | {quant(wall.values())} | "
-          f"{quant(per[i][2] for i in succ)} | {quant(wall[i] for i in succ)} |")
+        w(f"| r{rep} | {h} | {quant(p[0] for p in per.values())} | {quant(p[1] for p in per.values())} | "
+          f"{quant(p[2] for p in per.values())} | {quant(wall.values())} | "
+          f"{quant(per[i][0] for i in succ)} | {quant(per[i][2] for i in succ)} | {quant(wall[i] for i in succ)} |")
 
     w("\n## Pass rate by budget (pass@1 official: solved within the budget)\n")
     header = ["completion tokens ≤ " + (f"{b // 1000}k" if b else "∞") for b in TOKEN_BUDGETS]
@@ -259,7 +279,7 @@ def main():
     for (rep, h), rows in sorted(data.items()):
         cells = []
         for b in TOKEN_BUDGETS:
-            n = sum(1 for i, r in rows.items() if pass1(r) and (b is None or (costs[(rep, h)][i][2] or 0) <= b))
+            n = sum(1 for i, r in rows.items() if pass1(r) and within(costs[(rep, h)][i][2], b))
             cells.append(f"{n / len(rows) * 100:.1f}%")
         w(f"| r{rep} | {h} | " + " | ".join(cells) + " |")
     header = ["requests ≤ " + (str(b) if b else "∞") for b in STEP_BUDGETS]
@@ -268,7 +288,7 @@ def main():
     for (rep, h), rows in sorted(data.items()):
         cells = []
         for b in STEP_BUDGETS:
-            n = sum(1 for i, r in rows.items() if pass1(r) and (b is None or (costs[(rep, h)][i][0] or 0) <= b))
+            n = sum(1 for i, r in rows.items() if pass1(r) and within(costs[(rep, h)][i][0], b))
             cells.append(f"{n / len(rows) * 100:.1f}%")
         w(f"| r{rep} | {h} | " + " | ".join(cells) + " |")
 
@@ -284,16 +304,43 @@ def main():
             bud = m["budgets"]
             w(f"- Budgets (manifest): output cap {m['sampling']['max_output_tokens_per_step']} tokens per step; "
               f"{'no wall clock, safety cap ' + str(bud.get('safety_cap_seconds')) + ' s' if bud['task_wall_timeout_seconds'] is None else str(bud['task_wall_timeout_seconds']) + ' s wall'}; "
-              f"turn limit passed {bud['max_turns']}; grading {bud['command_timeout_seconds']} s per test run.")
+              f"{'turn limit ' + str(bud['max_turns']) if h == 'motifcode' else 'no turn limit (the harness has none)'}; "
+              f"grading {bud['command_timeout_seconds']} s per test run.")
         for layer in ("execution", "tools", "context", "scheduling", "observability", "verification", "governance"):
             if layer in card:
                 w(f"- {layer.capitalize()}: {card[layer]}")
         w("")
 
-    w("## Comparisons\n")
-    w("- The 2026-09-20 campaign ran a different protocol: 213 exercises, the graded tests in the agent's directory with most "
-      "of them switched off, a 15-minute wall clock, first-test grading in four languages. Its numbers are not this benchmark's.")
-    w("- Aider's leaderboard measures a model with Aider's own harness (track A); nothing here is comparable with it.")
+    w("## Comparison with the 2026-09-20 campaign\n")
+    w("A different protocol, compared only as that: 213 of the 225 exercises; the graded tests in the agent's directory, "
+      "most of them switched off in four languages; a 15-minute wall clock per task and 120 s per test run; grading on the "
+      "first test in JavaScript, Java, C++ and Rust, C++ compiled with `g++` without warning flags; Codex without an "
+      "output cap; the task text without `introduction.md`; one run.\n")
+    campaign = os.environ.get("CAMPAIGN_RESULTS")
+    if campaign:
+        w("| harness | campaign passes (its grading) | this run, pass@1 official, same instances | campaign only | this run only | this run, all rows |")
+        w("|---|---|---|---|---|---|")
+        for h in H:
+            old = load(None, h, pathlib.Path(campaign) / h)
+            new = data.get((first, h))
+            if not old or not new:
+                continue
+            keys = sorted(set(old) & set(new))
+            po = [ok(old[k].get("grade")) for k in keys]
+            pn = [pass1(new[k]) for k in keys]
+            w(f"| {h} | {pct(sum(po), len(keys))} | {pct(sum(pn), len(keys))} | "
+              f"{sum(1 for x, y in zip(po, pn) if x and not y)} | {sum(1 for x, y in zip(po, pn) if y and not x)} | "
+              f"{pct(sum(pass1(r) for r in new.values()), len(new))} |")
+    else:
+        w("| harness | campaign passes (its grading, ../REPORT.md) | this run, pass@1 official |")
+        w("|---|---|---|")
+        for h in H:
+            new = data.get((first, h))
+            if new:
+                w(f"| {h} | {pct(CAMPAIGN_RECORDED[h], 213)} | {pct(sum(pass1(r) for r in new.values()), len(new))} |")
+        w("\nSet CAMPAIGN_RESULTS to that campaign's results/ directory for the same instances side by side.")
+    w("\nAider's leaderboard measures a model with Aider's own harness (track A, not run here); nothing in this report is "
+      "comparable with it.")
     target = B / "REPORT-v2.md"
     target.write_text("\n".join(out) + "\n")
     print(f"wrote {target}")
