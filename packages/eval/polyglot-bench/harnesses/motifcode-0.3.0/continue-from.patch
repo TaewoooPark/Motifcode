@@ -1,0 +1,112 @@
+diff --git a/packages/cli/src/main.ts b/packages/cli/src/main.ts
+index cd47ef0..5e6cb8d 100644
+--- a/packages/cli/src/main.ts
++++ b/packages/cli/src/main.ts
+@@ -9,7 +9,7 @@
+ 
+ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+ import { homedir } from "node:os";
+-import { join } from "node:path";
++import { join, resolve } from "node:path";
+ import { AgentRegistry, AgentScheduler, BUILTIN_AGENTS, concurrencyFor, parseAgent } from "@motifcode/agents";
+ import {
+   DEFAULT_ENDPOINT,
+@@ -387,6 +387,7 @@ Flags
+   --journal <path>          write the session record here instead of .motif/sessions
+   --interactive             open the prompt after the task, or with no task at all
+   --continue                open the prompt with the most recent conversation here loaded
++  --continue-from <journal> continue that session with the task as the next message, and exit
+   --thinking                show the model's reasoning in the transcript
+   --verbose                 show tool output in full (ctrl-o toggles it in the session)
+   --theme <name>            colour theme (motif, claude, mono, solarized, dracula)
+@@ -783,6 +784,13 @@ async function main(): Promise<number> {
+       break;
+   }
+ 
++  // A session to continue with a new message: `codex exec resume` and
++  // `opencode run --session`, for a conversation recorded in a journal.
++  if (args.flags["continue-from"] === true) throw new UsageError("--continue-from needs a session journal");
++  const continuePath = typeof args.flags["continue-from"] === "string" ? resolve(args.flags["continue-from"]) : undefined;
++  if (continuePath && resumeFrom) throw new UsageError("resume and --continue-from both pick a session up; use one");
++  const continueFrom = continuePath ? loadResume(continuePath) : undefined;
++
+   const channel: ChannelId = flagEnum(args.flags, "channel", CHANNELS, stored.values.channel ?? "toolcall");
+   const channelPolicy = flagEnum(args.flags, "channel-policy", CHANNEL_POLICIES, "fixed");
+   const maxTurns = flagInt(args.flags, "max-turns", stored.values.maxTurns ?? 100, 1);
+@@ -857,6 +865,20 @@ async function main(): Promise<number> {
+   } else {
+     task = args.rest.join(" ").trim();
+   }
++  // The conversation a continued task follows, system turn aside.
++  let history: Message[] | undefined;
++  if (continueFrom) {
++    if (!task) throw new UsageError("--continue-from needs the message to continue with");
++    const blocker = checkResumable(continueFrom, { systemHash: promptHash, toolSchemaHash: schemaHash, model }, { continuing: true });
++    if (blocker) {
++      process.stderr.write(`cannot continue: ${blocker}\n`);
++      return 2;
++    }
++    if (continueFrom.checkpoint!.currentChannel !== channel) {
++      throw new UsageError(`that session used the ${continueFrom.checkpoint!.currentChannel} channel; pass --channel ${continueFrom.checkpoint!.currentChannel}`);
++    }
++    history = continueFrom.checkpoint!.messages.slice(1);
++  }
+ 
+   // No task and a terminal on both ends means a conversation, not a usage
+   // error. Without a terminal the old answer stands: a pipe cannot host a
+@@ -946,6 +968,7 @@ async function main(): Promise<number> {
+         tools: activeTools,
+         system: (ch) => buildSystemPrompt({ mode: "chat", channel: ch, tools: activeTools, skills, agents, ...(projectNotes !== undefined ? { projectNotes } : {}), cwd }),
+         userTask: task,
++        ...(history ? { history } : {}),
+         executor,
+         emit: (e) => {
+           if (e.type === "notice" && e.level === "error") process.stderr.write(`${e.text}\n`);
+@@ -1004,13 +1027,14 @@ async function main(): Promise<number> {
+   journal.record(rootScope, {
+     t: "scope_start",
+     task,
+-    initialMessages: [{ role: "user", content: task }],
++    initialMessages: [...(history ?? []), { role: "user", content: task }],
+   });
+-  if (resumeFrom?.checkpoint) {
++  const pickedUp = resumeFrom ?? continueFrom;
++  if (pickedUp?.checkpoint) {
+     journal.record(rootScope, {
+       t: "resume",
+-      fromSeq: resumeFrom.checkpoint.afterSeq,
+-      previousRunId: resumeFrom.header.runId,
++      fromSeq: pickedUp.checkpoint.afterSeq,
++      previousRunId: pickedUp.header.runId,
+     });
+   }
+ 
+@@ -1134,6 +1158,7 @@ async function main(): Promise<number> {
+       tools: activeTools,
+       system: systemFor,
+       userTask: task,
++      ...(history ? { history } : {}),
+       executor,
+       emit,
+       onCheckpoint: journal.checkpointFor(rootScope),
+diff --git a/packages/journal/src/index.ts b/packages/journal/src/index.ts
+index 4c5d935..4225ba9 100644
+--- a/packages/journal/src/index.ts
++++ b/packages/journal/src/index.ts
+@@ -409,11 +409,15 @@ export function loadResume(path: string): ResumeState {
+ export function checkResumable(
+   state: ResumeState,
+   current: { systemHash: string; toolSchemaHash: string; model: string },
++  opts: { continuing?: boolean } = {},
+ ): string | null {
+   if (state.corruption !== undefined) {
+     return `this journal is corrupt (${state.corruption}); it cannot be salvaged`;
+   }
+-  if (state.finished) {
++  // Continuing adds a message to a conversation, so a finished one is the
++  // usual case; resuming picks an interrupted run up where it stopped, and a
++  // finished run has nowhere to pick up from.
++  if (state.finished && !opts.continuing) {
+     return "this session already ended; start a new run rather than resuming a finished one";
+   }
+   if (!state.checkpoint) {

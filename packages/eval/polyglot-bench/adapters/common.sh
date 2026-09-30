@@ -98,6 +98,8 @@ finish() {
   # Against the base (the suite's only commit), so that work the agent committed is in it too.
   ( cd "$CWD" && git add -A >/dev/null 2>&1 && git diff --cached --binary "$(git rev-list --max-parents=0 HEAD | tail -n 1)" > "$LOGDIR/patch$PHASE.diff" 2>/dev/null; git reset -q >/dev/null 2>&1 ) || true
   [ -f "$JOURNAL" ] && cp "$JOURNAL" "$LOGDIR/session$PHASE.jsonl" 2>/dev/null
-  printf '{"harness":"%s","phase":"%s","exit":%s,"reason":"%s","wallMs":%s,"cwd":"%s","seed":"%s","maxTurns":"%s","maxOutputTokens":"%s"}\n' \
-    "$HARNESS" "${PHASE:-first}" "$code" "$reason" "$((end_ms-START_MS))" "$CWD" "$SEED" "$MAX_TURNS" "$MAX_OUT" > "$LOGDIR/meta$PHASE.json"
+  # BUILD, when an adapter sets it: the file that ran, and its sha256.
+  local build=""; [ -n "$BUILD" ] && [ -f "$BUILD" ] && build="$BUILD sha256:$(shasum -a 256 "$BUILD" | cut -d' ' -f1)"
+  printf '{"harness":"%s","phase":"%s","exit":%s,"reason":"%s","wallMs":%s,"cwd":"%s","seed":"%s","maxTurns":"%s","maxOutputTokens":"%s","build":"%s"}\n' \
+    "$HARNESS" "${PHASE:-first}" "$code" "$reason" "$((end_ms-START_MS))" "$CWD" "$SEED" "$MAX_TURNS" "$MAX_OUT" "$build" > "$LOGDIR/meta$PHASE.json"
 }

@@ -10,6 +10,9 @@ export MOTIF_JS="$REPO/packages/cli/dist/motif.js"
 export POLYGLOT="${POLYGLOT:-$BENCH/polyglot-benchmark}"        # a checkout of Aider-AI/polyglot-benchmark
 export NODE_PATH_DIR="${NODE_PATH_DIR:-$BENCH/js-deps/node_modules}"
 export LANGS="${LANGS:-cpp,go,java,javascript,python,rust}"
+# The harnesses a campaign runs, each an adapters/<name>.sh and a manifests/<name>.json: this repository's motifcode;
+# motifcode 0.3.0, the build the 2026-09-20 campaign ran (install_harnesses.sh); Codex CLI; OpenCode.
+export HARNESSES="${HARNESSES:-motifcode motifcode-0.3.0 codex opencode}"
 # Toolchain pins: Gradle 8.7 in the Java exercises does not run on JDK 25 (JAVA21_HOME overrides); boost for two C++ exercises.
 J="${JAVA21_HOME:-/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home}"
 [ -d "$J" ] && export JAVA_HOME="$J" && export PATH="$JAVA_HOME/bin:$PATH"

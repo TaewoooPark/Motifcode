@@ -9,9 +9,13 @@ verify/
 manifests/
 chunks/
 instances.json
-corpus-spec.json
+corpus-spec*.json
 REPORT.md
 REPORT-v2.md
 artifacts/
 report.html
 homes/opencode/cache/
+# installed by install_harnesses.sh; the backport patches are the kit's
+harnesses/*/release/
+harnesses/*/continue/
+harnesses/*/identity.json

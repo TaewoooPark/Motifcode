@@ -5,8 +5,10 @@ written into chunks/pool/<harness>/ for run_pool.sh to claim. Also seeds chunks/
 Protocol v2 excludes nothing: Aider's 225 tasks, the six whose stubs already pass among them. An exercise that
 verify/*.json says cannot run here is a toolchain to fix, not a task to drop — it is reported, and the plan
 refuses to start until the list is empty or EXCLUDE_UNRUNNABLE=1 says otherwise out loud."""
-import glob, json, os, pathlib, sys, collections
+import glob, json, os, pathlib, re, sys, collections
 B = pathlib.Path(os.environ.get("BENCH") or pathlib.Path(__file__).resolve().parent)
+# HARNESSES from the environment, else env.sh's default.
+HARNESSES = (os.environ.get("HARNESSES") or re.search(r'HARNESSES="\$\{HARNESSES:-([^}"]*)\}"', (B / "env.sh").read_text()).group(1)).split()
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 12
 inst = json.load(open(B / "instances.json"))
 unrunnable = {}
@@ -27,7 +29,7 @@ while any(by.values()):
 pieces = [order[k:k + N] for k in range(0, len(order), N)]
 (B / "chunks").mkdir(exist_ok=True)
 (B / "chunks/excluded.json").write_text(json.dumps(unrunnable, indent=2, sort_keys=True) + "\n")
-for h in ("motifcode", "codex", "opencode"):
+for h in HARNESSES:
     pool = B / "chunks/pool" / h; pool.mkdir(parents=True, exist_ok=True)
     for old in pool.glob("chunk*.txt"): old.unlink()
     for n, p in enumerate(pieces, 1): (pool / f"chunkP{n:02d}.txt").write_text("\n".join(p) + "\n")

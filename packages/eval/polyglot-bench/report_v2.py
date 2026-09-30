@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write REPORT-v2.md: the polyglot harness benchmark, protocol v2, for the three harnesses on Motif-3.
+"""Write REPORT-v2.md: the polyglot harness benchmark, protocol v2, for the harnesses in HARNESSES on Motif-3.
 
 What protocol v2 asks a report to carry, and nothing it does not:
   - pass@1 under the official rules (the primary number) and the strict ones, pass@2 after the feedback round,
@@ -10,16 +10,18 @@ What protocol v2 asks a report to carry, and nothing it does not:
     invalid by the network rule — and, where results/manual-labels.json says so, spec ambiguity or a wrong answer;
   - cost per task and per success (requests, tokens, wall time: p50 / p90 / max) and pass rate by budget;
   - a Harness Card per harness (harness-cards.json, with the versions and budgets from the manifests);
-  - a comparison with the 2026-09-20 campaign, named as a different protocol, and none with Aider's leaderboard.
+  - a comparison with the 2026-09-20 campaign, named as a different protocol (its motifcode was 0.3.0, the build
+    motifcode-0.3.0 runs here), and none with Aider's leaderboard.
 
 Reads results/r<N>/<harness>/*.jsonl (the runner's rows; rerun.jsonl replaces the rows it names), the manifests, the
 runner's artifacts/ and the adapters' logs/. Every number is computed from those files, except the campaign's totals
 when CAMPAIGN_RESULTS (that campaign's results/ directory) is not given: then they are the ones ../REPORT.md records.
 """
-import collections, glob, json, math, os, pathlib, random, statistics, sys
+import collections, glob, json, math, os, pathlib, random, re, statistics, sys
 
 B = pathlib.Path(os.environ.get("BENCH") or pathlib.Path(__file__).resolve().parent)
-H = ["motifcode", "codex", "opencode"]
+# HARNESSES from the environment, else env.sh's default.
+H = (os.environ.get("HARNESSES") or re.search(r'HARNESSES="\$\{HARNESSES:-([^}"]*)\}"', (B / "env.sh").read_text()).group(1)).split()
 TOKEN_BUDGETS = [10_000, 20_000, 50_000, 100_000, 200_000, None]
 STEP_BUDGETS = [5, 10, 20, 40, 80, None]
 # motifcode's endings where the model's output could not be run as actions: malformed actions past the repair budget,
@@ -27,6 +29,19 @@ STEP_BUDGETS = [5, 10, 20, 40, 80, None]
 PROTOCOL_ERRORS = {"breakage_limit", "no_action_limit"}
 # The 2026-09-20 campaign as ../REPORT.md records it: passes out of 213, first-test grading in four languages.
 CAMPAIGN_RECORDED = {"motifcode": 196, "codex": 170, "opencode": 177}
+# What it ran (../REPORT.md): motifcode 0.3.0 (a87dec0) — the build motifcode-0.3.0 runs here — codex-cli 0.154.0,
+# opencode 1.17.9.
+CAMPAIGN_BUILD = {"motifcode": "motifcode 0.3.0", "motifcode-0.3.0": "motifcode 0.3.0, this build",
+                  "codex": "codex-cli 0.154.0", "opencode": "opencode 1.17.9"}
+
+
+def motif(h):
+    """A motifcode build: this repository's (motifcode) or a release (motifcode-<version>)."""
+    return h == "motifcode" or h.startswith("motifcode-")
+
+
+def campaign_harness(h):
+    return "motifcode" if motif(h) else h
 
 
 def ok(grade):
@@ -86,7 +101,7 @@ def cost(h, r, rounds=("",)):
     requests = prompt = completion = 0
     seen = False
     for phase in rounds:
-        if h == "motifcode":
+        if motif(h):
             for e in jsonl(art / f"session{phase}.jsonl"):
                 ev = (e.get("record") or {}).get("event") or {}
                 if ev.get("type") == "usage":
@@ -322,8 +337,10 @@ def main():
             bud = m["budgets"]
             w(f"- Budgets (manifest): output cap {m['sampling']['max_output_tokens_per_step']} tokens per step; "
               f"{'no wall clock, safety cap ' + str(bud.get('safety_cap_seconds')) + ' s' if bud['task_wall_timeout_seconds'] is None else str(bud['task_wall_timeout_seconds']) + ' s wall'}; "
-              f"{'turn limit ' + str(bud['max_turns']) if h == 'motifcode' else 'no turn limit (the harness has none)'}; "
+              f"{'turn limit ' + str(bud['max_turns']) if motif(h) else 'no turn limit (the harness has none)'}; "
               f"grading {bud['command_timeout_seconds']} s per test run.")
+            if m["harness"].get("source"):
+                w(f"- Build: {m['harness']['source']}.")
         for layer in ("execution", "tools", "context", "scheduling", "observability", "verification", "governance"):
             if layer in card:
                 w(f"- {layer.capitalize()}: {card[layer]}")
@@ -336,26 +353,27 @@ def main():
       "output cap; the task text without `introduction.md`; one run.\n")
     campaign = os.environ.get("CAMPAIGN_RESULTS")
     if campaign:
-        w("| harness | campaign passes (its grading) | this run, pass@1 official, same instances | campaign only | this run only | this run, all rows |")
-        w("|---|---|---|---|---|---|")
+        w("| harness | campaign's build | campaign passes (its grading) | this run, pass@1 official, same instances | campaign only | this run only | this run, all rows |")
+        w("|---|---|---|---|---|---|---|")
         for h in H:
-            old = load(None, h, pathlib.Path(campaign) / h)
+            old = load(None, h, pathlib.Path(campaign).expanduser() / campaign_harness(h))
             new = data.get((first, h))
             if not old or not new:
                 continue
             keys = sorted(set(old) & set(new))
             po = [ok(old[k].get("grade")) for k in keys]
             pn = [pass1(new[k]) for k in keys]
-            w(f"| {h} | {pct(sum(po), len(keys))} | {pct(sum(pn), len(keys))} | "
+            w(f"| {h} | {CAMPAIGN_BUILD.get(h, '?')} | {pct(sum(po), len(keys))} | {pct(sum(pn), len(keys))} | "
               f"{sum(1 for x, y in zip(po, pn) if x and not y)} | {sum(1 for x, y in zip(po, pn) if y and not x)} | "
               f"{pct(sum(pass1(r) for r in new.values()), len(new))} |")
     else:
-        w("| harness | campaign passes (its grading, ../REPORT.md) | this run, pass@1 official |")
-        w("|---|---|---|")
+        w("| harness | campaign's build | campaign passes (its grading, ../REPORT.md) | this run, pass@1 official |")
+        w("|---|---|---|---|")
         for h in H:
             new = data.get((first, h))
-            if new:
-                w(f"| {h} | {pct(CAMPAIGN_RECORDED[h], 213)} | {pct(sum(pass1(r) for r in new.values()), len(new))} |")
+            if new and campaign_harness(h) in CAMPAIGN_RECORDED:
+                w(f"| {h} | {CAMPAIGN_BUILD.get(h, '?')} | {pct(CAMPAIGN_RECORDED[campaign_harness(h)], 213)} | "
+                  f"{pct(sum(pass1(r) for r in new.values()), len(new))} |")
         w("\nSet CAMPAIGN_RESULTS to that campaign's results/ directory for the same instances side by side.")
     w("\nAider's leaderboard measures a model with Aider's own harness (track A, not run here); nothing in this report is "
       "comparable with it.")

@@ -4,10 +4,10 @@
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 cd "$BENCH"
 python3 - <<'PY'
-import json, glob, collections, re
+import json, glob, collections, os, re
 def ok(g): return (g or {}).get("status") == "passed"
 for rdir in sorted(glob.glob("results/r*")):
-    for h in ["motifcode", "codex", "opencode"]:
+    for h in os.environ["HARNESSES"].split():
         rows = []
         for f in sorted(glob.glob(f"{rdir}/{h}/chunk*.jsonl")):
             rows += [json.loads(l) for l in open(f) if l.strip()]

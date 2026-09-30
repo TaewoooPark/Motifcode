@@ -1,12 +1,21 @@
 {
   "motifcode": {
-    "execution": "`motif \"<task>\"` one-shot, in the directory the runner gives it; a task ends only by a `done` call, which is challenged once and must be confirmed; a turn without an action is handed back; turn limit from the manifest (100); the feedback round is `motif --continue-from <journal> \"<test output>\"`.",
+    "execution": "This repository's build: 0.4.0 with the Motif-3 harness optimizations. `motif \"<task>\"` one-shot, in the directory the runner gives it; a task ends only by a `done` call, which is challenged once and must be confirmed; a turn without an action is handed back; turn limit from the manifest (100); the feedback round is `motif --continue-from <journal> \"<test output>\"`.",
     "tools": "done, bash (120 s per command unless the model sets another), read, write, apply_patch, term, skill, task; no MCP servers, no web tools.",
     "context": "Frozen tool order; the model's reasoning is sent back every turn; compaction at 75% of the 262,144-token window; the output cap per step from the manifest, temperature 1.0 and top_p 0.95 sent with every request.",
     "scheduling": "One agent; subagents through the task tool.",
     "observability": "Journal of events, checkpoints and per-request usage; the runner keeps it with the patch and both grades.",
     "verification": "The done-confirmation challenge; every turn's actions validated against closed schemas before any runs; a loop guard.",
     "governance": "A home directory of its own per row; streams every request; retries a failed or cut-off request up to six times; the API key is withheld from the commands the agent runs."
+  },
+  "motifcode-0.3.0": {
+    "execution": "motifcode 0.3.0 as published on npm, the build the 2026-09-20 campaign ran (v0.3.0, a87dec0). `motif \"<task>\"` one-shot, in the directory the runner gives it; a task ends only by a `done` call, which is challenged once and must be confirmed; turn limit from the manifest (100). No release before this repository's build can continue a finished session without a terminal, so the feedback round runs v0.3.0 built with a backport of --continue-from (harnesses/motifcode-0.3.0/continue-from.patch); install_harnesses.sh checks that it carries the release's system prompt and tool schemas.",
+    "tools": "done, bash (120 s per command unless the model sets another), read, write, apply_patch, term, skill, task; no MCP servers, no web tools.",
+    "context": "Frozen tool order; the model's reasoning is sent back every turn; compaction at 75% of the 262,144-token window, whose summary request carries no output cap; the output cap per step from the manifest on the loop's and subagents' requests; temperature 1.0 and top_p 0.95 sent with every request.",
+    "scheduling": "One agent; subagents through the task tool.",
+    "observability": "Journal of events, checkpoints and per-request usage; the runner keeps it with the patch and both grades.",
+    "verification": "The done-confirmation challenge; every turn's actions validated against closed schemas before any runs; a loop guard.",
+    "governance": "A home directory of its own per row; streams a request only when its output is a terminal, which in these rows it is not (the endpoint ends a request it has not streamed at 600 s); retries a failed request up to three times; the API key is withheld from the commands the agent runs."
   },
   "codex": {
     "execution": "`codex exec` in the row's directory, approvals never, sandbox bypassed; no turn limit; the feedback round is `codex exec resume <thread>`.",
