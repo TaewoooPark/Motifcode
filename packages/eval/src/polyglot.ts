@@ -1,30 +1,43 @@
 /**
- * Instances from the Exercism polyglot benchmark.
+ * Instances from the Exercism polyglot benchmark, the way Aider's benchmark
+ * defines them, run as a benchmark of the harness around the model.
  *
  * A published suite rather than one written here. A benchmark whose author is
  * also the person reporting the score has a problem no amount of care in the
  * arithmetic fixes, and these exercises predate this project by years.
  *
- * Each exercise becomes its own single-commit git repository, which is what the
- * runner and the grader both want: a base commit to check out from, and no
- * history to inherit. Building them is cheap — a few files each.
+ * The task set, the task text and the grading are Aider's own: all 225
+ * exercises with no exclusions, the introduction, instructions and append
+ * followed by Aider's addendum, and each track's official test command with
+ * its own way of switching on the tests an exercise ships switched off. What
+ * differs is the protocol, because Aider's is a benchmark of a model — it sees
+ * the stub and the instructions, has no shell and gets two tries — and a
+ * harness has nothing to do there. Here the agent works in a directory of its
+ * own with a shell and as many turns as it wants, and one line after the
+ * addendum says which of two tracks it is in:
  *
- * The part that has to be exactly right is `.meta/`. Every exercise ships the
- * reference solution there, and the agent has a shell. So `.meta` is excluded
- * when the repository is built, not hidden afterwards: an agent that finds a
- * file it was not meant to read has not cheated, it has been handed the answer
- * by the harness, and the resulting number would be meaningless in a way that
- * looks exactly like the model being good.
+ *   H — the graded tests are not in the directory. The agent may write and run
+ *       tests of its own; they are removed before grading. The primary track.
+ *   V — the tests are there with every skip switched off, the way a repository
+ *       with a test suite looks. A ceiling, not the primary number.
  *
- * Six language tracks, and they agree on almost nothing. Python and Go put the
- * solution beside its test; Rust splits `src/lib.rs` from `tests/`; Java nests
- * both under `src/main` and `src/test`; C++ needs a compile before there is
- * anything to run. So a language says where its files are and how its tests are
- * run, and what is common — build the repository, exclude `.meta`, restore the
- * tests before grading — is written once.
+ * Each exercise becomes its own single-commit git repository: a base commit to
+ * check out from and no history to inherit. What the agent must never reach is
+ * kept out of that repository entirely rather than hidden in it: `.meta` holds
+ * the reference solution, the `.approaches` and `.articles` write-ups hold
+ * worked solutions, and in track H the tests themselves. A file left in any
+ * commit is one `git log -p` away from an agent with a shell. Grading starts
+ * from the exercise in the benchmark checkout instead; see
+ * `polyglot-grader.ts`.
+ *
+ * Six language tracks, and they agree on almost nothing. So a language says
+ * which of its files are tests, what an agent's new file must look like to be
+ * graded as source, how its tests run and how they are switched on, and what
+ * is common — the task text, the repository, the tracks — is written once.
  */
 
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   copyFileSync,
   existsSync,
@@ -35,121 +48,289 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import type { Instance } from "./runner.js";
-import { WorktreeGrader, type WorktreeGraderOptions } from "./worktree-grader.js";
+
+/** Where the graded tests are: hidden from the agent (primary), or shown to it. */
+export type Track = "H" | "V";
+
+/**
+ * Which tests a grade switches on.
+ *
+ * `official` is Aider's benchmark exactly, holes included: JavaScript switches
+ * on `xtest(` but not `xit(`, Java removes `@Disabled(...)` with an argument
+ * and only from the files the exercise's config lists. `strict` switches on
+ * everything a track ships switched off. The primary number uses the official
+ * rules so it means what the leaderboard's does; the strict one is reported
+ * beside it.
+ */
+export type GradingRules = "official" | "strict";
+export const GRADING_RULES: readonly GradingRules[] = ["official", "strict"];
+
+/** Directories never copied out of an exercise: the answer, and worked solutions. */
+export const NEVER_COPIED: ReadonlySet<string> = new Set([".meta", ".approaches", ".articles", ".git"]);
+
+/**
+ * Files an exercise's config never lets the model edit, whatever its
+ * `solution` list says. Aider's benchmark removes these from the files it puts
+ * in the chat; every Rust exercise lists its `Cargo.toml` as a solution file.
+ */
+const NOT_A_SOLUTION = new Set(["CMakeLists.txt", "Cargo.toml"]);
 
 export interface LanguageSpec {
   name: string;
-  /** Identifies the graded tests among the exercise's files, by relative path. */
-  isTest: (path: string, exercise: string) => boolean;
-  /** Files the agent is told to edit. */
-  isSolution: (path: string, exercise: string) => boolean;
-  /** Run from the repository root; exit zero is a pass. */
-  testCommand: (tests: string[], exercise: string) => string[];
   /**
-   * Where a file under `.meta` belongs in the exercise, or `undefined` if it is
-   * not part of the reference solution. Used only by `motif-suite verify`.
+   * Test material by name: what the track's test runner would pick up, beyond
+   * what the exercise's config lists. Removed from a track H directory, and
+   * dropped from an agent's work before grading.
    */
+  isTest: (path: string) => boolean;
+  /** Harness code that sits beside the tests but is not one: kept in track H. */
+  isVendored?: (path: string) => boolean;
+  /**
+   * A file the agent created that grading keeps: source code of the language,
+   * where the build looks for it, and not a test, a build product or a
+   * configuration that would change how the tests run.
+   */
+  isSource: (path: string) => boolean;
+  /** The official test command, run from a directory named after the exercise. */
+  command: string[];
+  /**
+   * Switch on the tests of one file under a rule set. `listed` says whether
+   * the exercise's config names the file as a test, which is all Aider's Java
+   * rule looks at.
+   */
+  enable?: (path: string, text: string, rules: GradingRules, listed: boolean) => string;
+  /** Track V: every skip in a visible test file switched off. */
+  reveal?: (path: string, text: string) => string;
+  /** Where a file under `.meta` belongs in the exercise, for `motif-suite verify`. */
   referenceTarget?: (metaPath: string, exercise: string) => string | undefined;
-  env?: Record<string, string>;
-  /** Written to `.gitignore`, so build output never enters the agent's diff. */
+  /** Written to `.gitignore`, so build output never enters the agent's patch. */
   ignore?: string[];
-  /** A shared dependency directory linked into every fresh checkout. */
+  /** A shared dependency directory linked into every fresh directory. */
   link?: { to: string };
+  env?: Record<string, string>;
 }
 
+const base = (path: string): string => basename(path);
 const snake = (exercise: string): string => exercise.replace(/-/g, "_");
+
+/** Aider's `npm-test.sh`: `sed -i 's/\bxtest(/test(/g' *.spec.js`. */
+const jsOfficial = (text: string): string => text.replace(/\bxtest\(/g, "test(");
+const jsStrict = (text: string): string =>
+  jsOfficial(text).replace(/\bxit\(/g, "it(").replace(/\bxdescribe\(/g, "describe(");
+/** Aider's `re.sub(r"@Disabled\([^)]*\)\s*\n", "", content)`, applied to the config's test files. */
+const javaOfficial = (text: string): string => text.replace(/@Disabled\([^)]*\)\s*\n/g, "");
+/** The official rule first, so a file it already covers comes out byte for byte the same. */
+const javaStrict = (text: string): string =>
+  javaOfficial(text).replace(/^[ \t]*@(?:Disabled|Ignore)\b.*\r?\n/gm, "");
 
 export const LANGUAGES: Record<string, LanguageSpec> = {
   python: {
     name: "python",
-    isTest: (p) => p.endsWith("_test.py"),
-    isSolution: (p, e) => p === `${snake(e)}.py`,
-    // `-p no:cacheprovider` so the run leaves no `.pytest_cache` in the
-    // worktree; it would show up in the agent's diff as work it did not do.
-    testCommand: (tests) => ["python3", "-m", "pytest", "-q", "-p", "no:cacheprovider", ...tests],
+    // pytest collects `test_*.py` and `*_test.py`; `conftest.py` changes what
+    // it collects and how, so an agent's own counts as test material too.
+    isTest: (p) => /(^|\/)(test_[^/]*|[^/]*_test)\.py$/.test(p) || base(p) === "conftest.py",
+    isSource: (p) =>
+      p.endsWith(".py") &&
+      !/(^|\/)(test_[^/]*|[^/]*_test)\.py$/.test(p) &&
+      !["conftest.py", "setup.py"].includes(base(p)) &&
+      !p.split("/").includes("__pycache__"),
+    command: ["python3", "-m", "pytest"],
     referenceTarget: (m, e) => (m === "example.py" ? `${snake(e)}.py` : undefined),
+    ignore: ["__pycache__/", ".pytest_cache/"],
   },
 
   javascript: {
     name: "javascript",
-    isTest: (p) => p.endsWith(".spec.js"),
-    isSolution: (p, e) => p === `${e}.js`,
-    // `node_modules` is linked in rather than resolved through `NODE_PATH`:
-    // jest and babel look for their plugins relative to the root they are run
-    // from, and a `NODE_PATH` that works for `require` does not make jest find
-    // its own transform.
-    testCommand: (tests) => ["node", "node_modules/jest/bin/jest.js", "--ci", ...tests],
+    isTest: (p) => /\.(spec|test)\.[cm]?[jt]sx?$/.test(p) || p.split("/").includes("__tests__"),
+    isSource: (p) =>
+      /\.[cm]?js$/.test(p) &&
+      !/\.(spec|test)\.[cm]?[jt]sx?$/.test(p) &&
+      !p.split("/").includes("__tests__") &&
+      !/(^|\/)[^/]*\.config\.[cm]?js$/.test(p) &&
+      !p.startsWith("node_modules/"),
+    // Aider's `npm-test.sh` after its `sed`: the exercise's own `test` script,
+    // which is `jest ./*`.
+    command: ["npm", "run", "test"],
+    enable: (p, text, rules) =>
+      !/^[^/]*\.spec\.js$/.test(p) ? text : rules === "official" ? jsOfficial(text) : jsStrict(text),
+    reveal: (_p, text) => jsStrict(text),
     referenceTarget: (m, e) => (m === "proof.ci.js" ? `${e}.js` : undefined),
-    ignore: ["node_modules/"],
+    ignore: ["node_modules", "package-lock.json"],
     link: { to: "node_modules" },
+    // Nothing on stdout but the tests: no update check, no funding notice.
+    env: { NPM_CONFIG_UPDATE_NOTIFIER: "false", NPM_CONFIG_FUND: "false", NPM_CONFIG_AUDIT: "false" },
   },
 
   go: {
     name: "go",
-    // `cases_test.go` holds the table the real test file reads, so it is graded
-    // material too: restoring one without the other would let an agent rewrite
-    // the cases and keep the assertions.
+    // `cases_test.go` holds the table the assertions read; `bonus_test.go` is
+    // behind a build tag Aider does not set either. Both are test material.
     isTest: (p) => p.endsWith("_test.go"),
-    isSolution: (p, e) => p === `${snake(e)}.go`,
-    testCommand: () => ["go", "test", "./..."],
+    isSource: (p) => p.endsWith(".go") && !p.endsWith("_test.go"),
+    command: ["go", "test", "./..."],
     referenceTarget: (m, e) => (m === "example.go" ? `${snake(e)}.go` : undefined),
   },
 
   rust: {
     name: "rust",
     isTest: (p) => p.startsWith("tests/"),
-    isSolution: (p) => p === "src/lib.rs",
-    testCommand: () => ["cargo", "test", "-q"],
-    referenceTarget: (m) => (m === "example.rs" ? "src/lib.rs" : undefined),
-    ignore: ["target/"],
+    // Modules under `src/`. A `build.rs`, an example or a bench runs code or
+    // builds targets the tests did not ask for.
+    isSource: (p) => p.startsWith("src/") && p.endsWith(".rs"),
+    command: ["cargo", "test", "--", "--include-ignored"],
+    reveal: (_p, text) => text.replace(/^[ \t]*#\[ignore(?:\s*=\s*"[^"]*")?\][ \t]*\r?\n/gm, ""),
+    referenceTarget: (m) =>
+      m === "example.rs" ? "src/lib.rs" : m === "Cargo-example.toml" ? "Cargo.toml" : undefined,
+    ignore: ["target/", "Cargo.lock"],
   },
 
   cpp: {
     name: "cpp",
-    isTest: (p, e) => p === `${snake(e)}_test.cpp`,
-    // The header too: several exercises are header-only, and an agent told to
-    // edit only the `.cpp` cannot declare the type the tests construct.
-    isSolution: (p, e) => p === `${snake(e)}.cpp` || p === `${snake(e)}.h`,
-    // Compiled directly rather than through the exercise's CMakeLists, which
-    // derives its target name from the *directory* name. Every checkout here
-    // is called `checkout`, so CMake looks for `checkout.cpp` and fails with
-    // "No SOURCES given to target". The tests and the vendored Catch2 are the
-    // same either way; only the build driver differs.
-    //
-    // The solution `.cpp` is globbed rather than named because header-only
-    // exercises do not have one, and naming a file that is not there fails the
-    // compile for a reason that has nothing to do with the agent.
-    // `CXX_EXTRA_INCLUDE` rather than a hard-coded path: two exercises
-    // (`gigasecond`, `meetup`) include boost date-time headers, which are not
-    // vendored the way Catch2 is. With them the track is 26/26; without them
-    // those two fail to compile for a reason that has nothing to do with the
-    // agent.
-    testCommand: (tests, e) => [
+    isTest: (p) => /_test\.(cpp|cc|cxx)$/.test(p) || p.startsWith("test/"),
+    // Catch2 and its main, which the exercise's CMakeLists compiles in: an
+    // agent that writes `<exercise>_test.cpp` of its own can then use the
+    // official build, and grading replaces that file with the real one.
+    isVendored: (p) => p.startsWith("test/"),
+    isSource: (p) =>
+      /\.(cpp|cc|cxx|h|hh|hpp)$/.test(p) &&
+      !/_test\.(cpp|cc|cxx)$/.test(p) &&
+      !p.startsWith("test/") &&
+      !p.startsWith("build/") &&
+      !p.split("/").includes("CMakeFiles"),
+    // Aider's `cpp-test.sh`, verbatim. The CMakeLists builds with
+    // `-Wall -Wextra -Wpedantic -Werror` and runs the tests inside `make`.
+    command: [
       "sh",
       "-c",
-      `g++ -std=c++17 -I. -Itest \${CXX_EXTRA_INCLUDE:+-I$CXX_EXTRA_INCLUDE} ` +
-        `-o runner $(ls ${snake(e)}.cpp 2>/dev/null) ` +
-        `${tests.join(" ")} test/tests-main.cpp && ./runner`,
+      'set -e\n[ ! -d "build" ] && mkdir build\ncd build\ncmake -DEXERCISM_RUN_ALL_TESTS=1 -G "Unix Makefiles" ..\nmake',
     ],
+    reveal: (_p, text) => `#define EXERCISM_RUN_ALL_TESTS\n${text}`,
     referenceTarget: (m, e) =>
       m === "example.cpp" ? `${snake(e)}.cpp` : m === "example.h" ? `${snake(e)}.h` : undefined,
-    ignore: ["runner", "build/"],
+    ignore: ["build/", "CMakeCache.txt", "CMakeFiles/", "cmake_install.cmake", "Makefile", "*.o"],
   },
 
   java: {
     name: "java",
     isTest: (p) => p.startsWith("src/test/"),
-    isSolution: (p) => p.startsWith("src/main/"),
-    testCommand: () => ["./gradlew", "test", "--quiet"],
+    isSource: (p) => p.startsWith("src/main/") && p.endsWith(".java"),
+    command: ["./gradlew", "test"],
+    enable: (p, text, rules, listed) =>
+      !p.endsWith(".java") ? text : rules === "official" ? (listed ? javaOfficial(text) : text) : javaStrict(text),
+    reveal: (p, text) => (p.endsWith(".java") ? javaStrict(text) : text),
     referenceTarget: (m) =>
-      m.startsWith("src/reference/java/")
-        ? m.replace("src/reference/java/", "src/main/java/")
-        : undefined,
+      m.startsWith("src/reference/java/") ? m.replace("src/reference/java/", "src/main/java/") : undefined,
     ignore: [".gradle/", "build/"],
   },
 };
+
+/** `.meta/config.json`'s `files`, as the exercise declares them. */
+export interface ExerciseConfig {
+  solution: string[];
+  test: string[];
+  editor: string[];
+  example: string[];
+}
+
+export function readExerciseConfig(dir: string): ExerciseConfig {
+  const path = join(dir, ".meta", "config.json");
+  const files = existsSync(path)
+    ? ((JSON.parse(readFileSync(path, "utf8")) as { files?: Partial<ExerciseConfig> }).files ?? {})
+    : {};
+  return {
+    solution: files.solution ?? [],
+    test: files.test ?? [],
+    editor: files.editor ?? [],
+    example: files.example ?? [],
+  };
+}
+
+/** Every file under `root`, relative and sorted, skipping the directory names given. */
+export function walk(root: string, exclude: ReadonlySet<string> = NEVER_COPIED, from = root): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(from, { withFileTypes: true })) {
+    if (exclude.has(entry.name)) continue;
+    const full = join(from, entry.name);
+    if (entry.isDirectory()) out.push(...walk(root, exclude, full));
+    else if (entry.isFile()) out.push(relative(root, full));
+  }
+  return out.sort();
+}
+
+/** The exercise's files as it ships them, without the answer or the write-ups. */
+export function exerciseFiles(dir: string): string[] {
+  return walk(dir);
+}
+
+/**
+ * The graded tests: what the config lists, and whatever else the track's test
+ * runner would pick up, less the vendored harness code. `python/paasio` lists
+ * a `test_utils.py` no name pattern catches; `java/satellite` ships a
+ * `TreeTest.java` its config does not list.
+ */
+export function gradedTests(spec: LanguageSpec, config: ExerciseConfig, files: readonly string[]): string[] {
+  const listed = new Set(config.test);
+  return files.filter((f) => (listed.has(f) || spec.isTest(f)) && !spec.isVendored?.(f)).sort();
+}
+
+/**
+ * The files the model is told to modify, as Aider's benchmark lists them: the
+ * config's solution files that exist, less build files, tests and examples.
+ */
+export function solutionFiles(config: ExerciseConfig, files: readonly string[]): string[] {
+  const present = new Set(files);
+  const excluded = new Set([...config.test, ...config.example]);
+  return config.solution
+    .filter((f) => present.has(f) && !NOT_A_SOLUTION.has(base(f)) && !excluded.has(f) && !f.startsWith(".docs/"))
+    .sort();
+}
+
+/** Aider's `instructions_addendum`, byte for byte. */
+export function officialAddendum(fileList: string): string {
+  return (
+    "\n####\n\n" +
+    `Use the above instructions to modify the supplied files: ${fileList}\n` +
+    "Don't change the names of existing functions or classes, as they may be referenced from other code like unit tests, etc.\n" +
+    "Only use standard libraries, don't suggest installing any packages.\n"
+  );
+}
+
+/** Aider's `test_failures`, byte for byte: what follows the test output in a feedback round. */
+export function officialTestFailures(fileList: string): string {
+  return (
+    "\n####\n\n" +
+    "See the testing errors above.\n" +
+    "The tests are correct, don't try and change them.\n" +
+    `Fix the code in ${fileList} to resolve the errors.\n`
+  );
+}
+
+/** How Aider names the solution files in its prompts: file names, space-separated. */
+export function fileList(solution: readonly string[]): string {
+  return solution.map(base).join(" ");
+}
+
+/**
+ * The task as Aider's benchmark writes it: the introduction, the instructions
+ * and the append, concatenated as they are, then the addendum.
+ */
+export function officialTaskText(dir: string, solution: readonly string[]): string {
+  const read = (name: string): string => {
+    const path = join(dir, ".docs", name);
+    return existsSync(path) ? readFileSync(path, "utf8") : "";
+  };
+  return read("introduction.md") + read("instructions.md") + read("instructions.append.md") + officialAddendum(fileList(solution));
+}
+
+/** The one line a track adds after the official text. */
+export function trackLine(track: Track, visibleTests: readonly string[]): string {
+  return track === "H"
+    ? "The unit tests used for grading are not in this directory. You may write and run your own tests; test files you add are removed before grading.\n"
+    : `The tests are in \`${visibleTests.join("`, `")}\` — run them to check your work. ` +
+        "Do not modify them: they are restored from a pristine copy before grading.\n";
+}
 
 export interface PolyglotOptions {
   /** A checkout of Aider-AI/polyglot-benchmark. */
@@ -157,6 +338,8 @@ export interface PolyglotOptions {
   languages: readonly string[];
   /** Where the per-exercise repositories are built. */
   repoRoot: string;
+  /** Default H. */
+  track?: Track;
   /** Cap per language, for a dev split. Omit for all of them. */
   limit?: number;
   /** Node modules directory shared by the JavaScript exercises. */
@@ -166,8 +349,13 @@ export interface PolyglotOptions {
 export interface PolyglotInstance extends Instance {
   language: string;
   exercise: string;
+  track: Track;
+  /** The graded tests, by path in the exercise. Not in the agent's directory in track H. */
   testFiles: string[];
+  /** The files the agent is told to modify. */
   solutionFiles: string[];
+  /** The exercise in the benchmark checkout, which grading starts from. */
+  sourceDir: string;
 }
 
 function git(args: string[], cwd: string): string {
@@ -184,47 +372,15 @@ function git(args: string[], cwd: string): string {
   });
 }
 
-/** Every file under `root`, relative, skipping the directory names given. */
-function walk(root: string, exclude: ReadonlySet<string>, base = root): string[] {
-  const out: string[] = [];
-  for (const entry of readdirSync(base, { withFileTypes: true })) {
-    if (exclude.has(entry.name)) continue;
-    const full = join(base, entry.name);
-    if (entry.isDirectory()) out.push(...walk(root, exclude, full));
-    else if (entry.isFile()) out.push(relative(root, full));
-  }
-  return out;
-}
-
-/**
- * What the agent is asked, and the only description of the task it gets.
- *
- * The instruction not to edit the tests is not a defence — the grader restores
- * them either way. It is here so that a model which obeys it is not penalised
- * relative to one that does not, which would otherwise be the difference
- * between a wasted turn and a useful one.
- */
-function promptFor(instructions: string, solution: string[], tests: string[]): string {
-  return [
-    instructions.trim(),
-    "",
-    "---",
-    "",
-    `Implement this in \`${solution.join("`, `")}\`. The tests are in ` +
-      `\`${tests.join("`, `")}\` — run them to check your work.`,
-    "Do not modify the tests: they are restored from a pristine copy before grading, so changes to them are discarded.",
-  ].join("\n");
-}
-
 function setupFor(spec: LanguageSpec, opts: { nodePath?: string }): string[] | undefined {
   if (spec.link && opts.nodePath) return ["ln", "-sfn", opts.nodePath, spec.link.to];
   return undefined;
 }
 
 export function buildPolyglotSuite(opts: PolyglotOptions): PolyglotInstance[] {
+  const track: Track = opts.track ?? "H";
   const instances: PolyglotInstance[] = [];
   mkdirSync(opts.repoRoot, { recursive: true });
-  const EXCLUDE = new Set([".meta", ".git"]);
 
   for (const language of opts.languages) {
     const spec = LANGUAGES[language];
@@ -244,22 +400,16 @@ export function buildPolyglotSuite(opts: PolyglotOptions): PolyglotInstance[] {
 
     for (const exercise of exercises.slice(0, opts.limit ?? exercises.length)) {
       const source = join(practice, exercise);
-      const files = walk(source, EXCLUDE);
-
-      const testFiles = files.filter((f) => spec.isTest(f, exercise)).sort();
-      const solutionFiles = files.filter((f) => spec.isSolution(f, exercise)).sort();
-      if (testFiles.length === 0 || solutionFiles.length === 0) {
-        // An exercise whose layout does not match is skipped rather than
-        // guessed at. Guessing produces an instance that can never pass and
-        // scores zero for every configuration, which looks like difficulty.
-        continue;
+      const files = exerciseFiles(source);
+      const config = readExerciseConfig(source);
+      const tests = gradedTests(spec, config, files);
+      const solution = solutionFiles(config, files);
+      if (solution.length === 0 || tests.length === 0 || !existsSync(join(source, ".docs", "instructions.md"))) {
+        // Every exercise in the pinned checkout has all three, so this is a
+        // checkout that is not the one the benchmark names. Refusing is better
+        // than an instance that can never pass and scores zero everywhere.
+        throw new Error(`${language}/${exercise} has no solution file, test or instructions; wrong checkout?`);
       }
-
-      const instructionsPath = join(source, ".docs", "instructions.md");
-      if (!existsSync(instructionsPath)) continue;
-      let instructions = readFileSync(instructionsPath, "utf8");
-      const appendPath = join(source, ".docs", "instructions.append.md");
-      if (existsSync(appendPath)) instructions += "\n\n" + readFileSync(appendPath, "utf8");
 
       // Rebuilt from scratch each time. Reusing a directory that is already
       // there makes the suite depend on what a previous run left behind, and
@@ -269,20 +419,21 @@ export function buildPolyglotSuite(opts: PolyglotOptions): PolyglotInstance[] {
       rmSync(repo, { recursive: true, force: true });
       mkdirSync(repo, { recursive: true });
 
-      // Only the files an exercise legitimately exposes. `.meta` holds the
-      // reference solution and is never copied — not copied and then ignored,
-      // not copied and then deleted in a second commit where `git log -p`
-      // would still show it.
+      const hidden = new Set(track === "H" ? tests : []);
       for (const file of files) {
+        if (hidden.has(file)) continue;
         const from = join(source, file);
         const target = join(repo, file);
         mkdirSync(dirname(target), { recursive: true });
-        copyFileSync(from, target);
+        if (track === "V" && tests.includes(file) && spec.reveal) {
+          writeFileSync(target, spec.reveal(file, readFileSync(from, "utf8")), "utf8");
+        } else {
+          copyFileSync(from, target);
+        }
         // The executable bit survives the copy. A `gradlew` that cannot be run
         // turns every Java instance into an infrastructure failure.
         if (statSync(from).mode & 0o111) execFileSync("chmod", ["+x", target]);
       }
-      writeFileSync(join(repo, "INSTRUCTIONS.md"), instructions, "utf8");
       if (spec.ignore) {
         // Without this, build output and linked dependencies land in
         // `git add -A`, and the agent's patch is thousands of files of
@@ -300,60 +451,52 @@ export function buildPolyglotSuite(opts: PolyglotOptions): PolyglotInstance[] {
         id: `${language}/${exercise}`,
         repo,
         baseCommit,
-        prompt: promptFor(instructions, solutionFiles, testFiles),
+        prompt: officialTaskText(source, solution) + trackLine(track, tests),
+        // The name matters: C++'s CMakeLists takes its target from it.
+        workdirName: exercise,
         ...(setup ? { setupCommand: setup } : {}),
         language,
         exercise,
-        testFiles,
-        solutionFiles,
+        track,
+        testFiles: tests,
+        solutionFiles: solution,
+        sourceDir: source,
       });
     }
   }
   return instances;
 }
 
-/** The grader for one instance: its own test files, its own command. */
-export function polyglotGrader(
-  instance: PolyglotInstance,
-  opts: { nodePath?: string; env?: Record<string, string> } = {},
-): WorktreeGrader {
-  const spec = LANGUAGES[instance.language]!;
-  const options: WorktreeGraderOptions = {
-    repo: instance.repo,
-    testCommand: spec.testCommand(instance.testFiles, instance.exercise),
-    testPaths: instance.testFiles,
-    ...(spec.env || opts.env ? { env: { ...spec.env, ...opts.env } } : {}),
-  };
-  const setup = setupFor(spec, opts);
-  if (setup) options.setupCommand = setup;
-  return new WorktreeGrader(options);
+/**
+ * The instance list's fingerprint, the way `make_manifest.py` computes it:
+ * sorted ids with their base commits, as Python's `json.dumps(sort_keys=True)`
+ * writes them. A run refuses a suite whose fingerprint is not its manifest's.
+ */
+export function instancesSha256(instances: readonly { id: string; baseCommit: string; language: string }[]): string {
+  const rows = [...instances]
+    .map((i) => ({ baseCommit: i.baseCommit, id: i.id, language: i.language }))
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const text =
+    "[" +
+    rows
+      .map((r) => `{"baseCommit": ${JSON.stringify(r.baseCommit)}, "id": ${JSON.stringify(r.id)}, "language": ${JSON.stringify(r.language)}}`)
+      .join(", ") +
+    "]";
+  return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
 /**
- * Does the exercise's own reference solution pass its own tests here?
+ * The exercise's reference solution, as files to write into a candidate.
  *
- * Run before a campaign, never during one. An exercise that cannot pass on this
- * machine — a missing toolchain, a test that needs the network — scores zero
- * for every configuration, and a suite full of those reports a model that
- * cannot code when what it has is a machine that cannot run the tests.
- *
- * The reference solution is read from the benchmark checkout, which is why this
- * takes the source path rather than being something the runner could reach.
+ * For `motif-suite verify` only, never during a campaign: it reads `.meta`.
+ * Rust's `Cargo-example.toml` is included where there is one — six references
+ * use crates the stub's `Cargo.toml` does not declare, and the grader keeps
+ * that file only in reference mode.
  */
-export function referenceSolution(
-  benchmarkRoot: string,
-  instance: PolyglotInstance,
-): Record<string, string> | undefined {
+export function referenceSolution(instance: PolyglotInstance): Record<string, string> | undefined {
   const spec = LANGUAGES[instance.language]!;
   if (!spec.referenceTarget) return undefined;
-  const meta = join(
-    benchmarkRoot,
-    instance.language,
-    "exercises",
-    "practice",
-    instance.exercise,
-    ".meta",
-  );
+  const meta = join(instance.sourceDir, ".meta");
   if (!existsSync(meta)) return undefined;
 
   const out: Record<string, string> = {};
@@ -361,7 +504,7 @@ export function referenceSolution(
     const target = spec.referenceTarget(file, instance.exercise);
     if (target) out[target] = readFileSync(join(meta, file), "utf8");
   }
-  return Object.keys(out).length > 0 ? out : undefined;
+  return Object.keys(out).some((k) => instance.solutionFiles.includes(k) || spec.isSource(k)) ? out : undefined;
 }
 
 export function instanceSummary(instances: readonly PolyglotInstance[]): string {

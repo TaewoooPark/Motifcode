@@ -5,3 +5,5 @@ export * from "./grader.js";
 export * from "./worktree-grader.js";
 export * from "./runner.js";
 export * from "./polyglot.js";
+export * from "./polyglot-grader.js";
+export * from "./network.js";
