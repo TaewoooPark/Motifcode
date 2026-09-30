@@ -159,6 +159,11 @@ export function reduce(state: ViewState, event: LoopEvent): ViewState {
       break;
 
     case "stream":
+      if (event.restart) {
+        pendingThink = "";
+        pendingContent = "";
+        pendingTool = undefined;
+      }
       if (event.reasoning !== undefined) pendingThink += event.reasoning;
       if (event.content !== undefined) pendingContent += event.content;
       if (event.tool !== undefined) pendingTool = event.tool;

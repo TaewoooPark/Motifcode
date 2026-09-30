@@ -259,6 +259,33 @@ describe("a stream cut short", () => {
     expect(r.reason).toBe("done");
     expect(r.summary).toBe("fine");
   });
+
+  it("tells a watcher that what streamed of the failed attempt is void", async () => {
+    let calls = 0;
+    const t = new HttpTransport({
+      endpoint: "http://x",
+      model: "m",
+      fetchImpl: fetchOf(() =>
+        ++calls === 1
+          ? sse([chunk({ reasoning: "half a th" })])
+          : sse([chunk({ reasoning: "again" }), chunk({ content: "fine" }), { choices: [{ delta: {}, finish_reason: "stop", index: 0 }] }]),
+      ),
+    });
+    const events: LoopEvent[] = [];
+    await runLoop({
+      transport: t,
+      tools: [...CORE_TOOLS],
+      system: () => "sys",
+      userTask: "t",
+      executor: { run: async () => ({ ok: true, output: "" }) },
+      emit: (e) => events.push(e),
+      stream: true,
+      replyEnds: true,
+      random: () => 0,
+    });
+    const streamed = events.filter((e): e is Extract<LoopEvent, { type: "stream" }> => e.type === "stream");
+    expect(streamed.map((e) => (e.restart ? "RESTART" : (e.reasoning ?? e.content)))).toEqual(["half a th", "RESTART", "again", "fine"]);
+  });
 });
 
 describe("the loop's stream events", () => {

@@ -592,6 +592,10 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
         const te = err;
         transportErrors++;
         if (te.kind === "aborted") return finish("aborted");
+        // What streamed of the failed attempt is void, whether the request is
+        // sent again or given up on; without this the screen ran the retry on
+        // from the middle of the cut-off text.
+        if (opts.stream) emit({ type: "stream", restart: true });
         if (te.kind === "generation") {
           // The server cut the sample off; on Infron that is Motif-3 caught in
           // a reasoning loop past ten thousand tokens. A fresh sample of the

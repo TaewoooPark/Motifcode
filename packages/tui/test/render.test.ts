@@ -363,6 +363,23 @@ describe("live tail", () => {
   });
 });
 
+describe("a streamed attempt that failed", () => {
+  it("is voided by a restart, so the retry does not run on from the cut-off text", () => {
+    const state = fold([
+      { type: "turn_start", turn: 1 },
+      { type: "stream", reasoning: "half a th" },
+      { type: "stream", content: "Let me wr" },
+      { type: "stream", tool: "write" },
+      { type: "stream", restart: true },
+      { type: "stream", reasoning: "fresh" },
+      { type: "stream", content: "Done." },
+    ]);
+    expect(state.pendingThink).toBe("fresh");
+    expect(state.pendingContent).toBe("Done.");
+    expect(state.pendingTool).toBeUndefined();
+  });
+});
+
 describe("instruments", () => {
   it("shows the server's cached-token count beside the prefix overlap", () => {
     // The percentage is textual overlap computed here; the count is the

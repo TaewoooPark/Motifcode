@@ -1401,8 +1401,10 @@ export class Chat {
       switch (e.type) {
         case "stream":
           // Once words arrive the words are the progress; while a tool call
-          // is still being sent, say which.
-          if (e.content) this.screen.setActivity(null);
+          // is still being sent, say which. A failed attempt's words are gone,
+          // and the model is thinking again.
+          if (e.restart) this.screen.setActivity("Thinking…");
+          else if (e.content) this.screen.setActivity(null);
           else if (e.tool) this.screen.setActivity(`Calling ${e.tool}…`);
           break;
         case "session_start":

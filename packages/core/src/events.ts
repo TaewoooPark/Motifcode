@@ -127,8 +127,10 @@ export type LoopEvent =
    * A piece of the response as it streams in. Display only: the events that
    * describe the turn — reasoning_end, content_delta, tool_start — follow
    * once the whole response is in, and the journal does not keep these.
+   * `restart` says the attempt that was streaming failed, so everything it
+   * streamed so far is void.
    */
-  | { type: "stream"; reasoning?: string; content?: string; tool?: string }
+  | { type: "stream"; reasoning?: string; content?: string; tool?: string; restart?: true }
   /** A running tool's progress, for the screen — a subagent's tool count and elapsed time. */
   | { type: "tool_progress"; id: string; text: string }
   | { type: "notice"; level: "info" | "warn" | "error"; text: string }
