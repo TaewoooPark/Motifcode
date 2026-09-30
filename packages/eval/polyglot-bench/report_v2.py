@@ -95,13 +95,31 @@ def cost(h, r, rounds=("",)):
                     prompt += ev.get("promptTokens") or 0
                     completion += ev.get("completionTokens") or 0
         elif h == "codex":
+            # Codex's rollout has a token_count event per model response, with that response's usage. A resumed
+            # session appends to the first round's rollout, so the feedback round's copy starts with the first's.
+            record = art / f"record{phase}.jsonl"
+            if record.exists():
+                counts = [e for e in jsonl(record) if e.get("type") == "event_msg"
+                          and (e.get("payload") or {}).get("type") == "token_count"
+                          and ((e.get("payload") or {}).get("info") or {}).get("last_token_usage")]
+                if phase:
+                    counts = counts[sum(1 for e in jsonl(art / "record.jsonl") if e.get("type") == "event_msg"
+                                        and (e.get("payload") or {}).get("type") == "token_count"
+                                        and ((e.get("payload") or {}).get("info") or {}).get("last_token_usage")):]
+                for e in counts:
+                    seen = True
+                    u = e["payload"]["info"]["last_token_usage"]
+                    requests += 1
+                    prompt += u.get("input_tokens") or 0
+                    completion += u.get("output_tokens") or 0
+                continue
+            # Without a rollout: usage per turn from the event log, and a request per line of the parameter proxy's log.
             for e in jsonl(art / f"agent{phase}.log"):
                 if e.get("type") == "turn.completed":
                     seen = True
                     u = e.get("usage") or {}
                     prompt += u.get("input_tokens") or 0
                     completion += u.get("output_tokens") or 0
-            # Codex's events carry no request count; the parameter proxy logs one line per request.
             requests += sum(1 for _ in jsonl(log / f"param-proxy{phase}.jsonl"))
         elif h == "opencode":
             for e in jsonl(art / f"agent{phase}.log"):
