@@ -202,7 +202,7 @@ def main():
         cells = []
         for l in langs:
             rs = [r for i, r in rows.items() if i.startswith(l + "/")]
-            cells.append(f"{sum(pass1(r) for r in rs)} · {sum(pass2(r) for r in rs)} / {len(rs)}")
+            cells.append(f"{sum(pass1(r) for r in rs)} · {sum(pass2(r) for r in rs)} / {len(rs)}" if rs else "—")
         w(f"| {h} | " + " | ".join(cells) + " |")
 
     w("\n## Paired comparisons (same instances, McNemar exact, bootstrap 95% CI of the difference)\n")
