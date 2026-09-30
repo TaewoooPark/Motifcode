@@ -4,6 +4,9 @@ model_provider = "infron"
 model_context_window = 262144
 approval_policy = "never"
 sandbox_mode = "danger-full-access"
+# Protocol v2 allows the endpoint and nothing else on the network. codex-cli 0.154 offers the model a hosted web
+# search tool unless told not to; OpenCode's web tools are denied the same way.
+web_search = "disabled"
 
 [model_providers.infron]
 name = "Infron (Motif-3)"

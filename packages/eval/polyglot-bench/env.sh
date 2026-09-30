@@ -19,5 +19,14 @@ export GIT_AUTHOR_DATE="2024-12-22T00:00:00+0000"
 export GIT_COMMITTER_DATE="2024-12-22T00:00:00+0000"
 # Gradle daemons are shared across rows; with per-row process-group kills they must not exist at all.
 export GRADLE_OPTS="-Dorg.gradle.daemon=false"
+# Tool caches, pinned to the invoking user's: the adapters give every agent a home of its own, and without these a
+# row would download Gradle, crates and Go modules again.
+export GRADLE_USER_HOME="${GRADLE_USER_HOME:-$HOME/.gradle}"
+export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+export GOPATH="${GOPATH:-$HOME/go}"
+export GOMODCACHE="${GOMODCACHE:-$GOPATH/pkg/mod}"
+[ -z "$GOCACHE" ] && command -v go >/dev/null && export GOCACHE="$(go env GOCACHE)"
+export npm_config_cache="${npm_config_cache:-$HOME/.npm}"
 export NO_COLOR=1
 suite() { node "$SUITE_JS" "$@"; }

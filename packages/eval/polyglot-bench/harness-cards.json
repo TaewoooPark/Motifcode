@@ -1,29 +1,29 @@
 {
   "motifcode": {
-    "execution": "`motif \"<task>\"` one-shot, in the directory the runner gives it; a task ends only by a `done` call, which is challenged once and must be confirmed; a turn without an action is handed back; turn limit from the manifest (100).",
+    "execution": "`motif \"<task>\"` one-shot, in the directory the runner gives it; a task ends only by a `done` call, which is challenged once and must be confirmed; a turn without an action is handed back; turn limit from the manifest (100); the feedback round is `motif --continue-from <journal> \"<test output>\"`.",
     "tools": "done, bash (120 s per command unless the model sets another), read, write, apply_patch, term, skill, task; no MCP servers, no web tools.",
-    "context": "Frozen tool order; the model's reasoning is sent back every turn; compaction at 75% of the 262,144-token window; output cap per step from the manifest.",
+    "context": "Frozen tool order; the model's reasoning is sent back every turn; compaction at 75% of the 262,144-token window; the output cap per step from the manifest, temperature 1.0 and top_p 0.95 sent with every request.",
     "scheduling": "One agent; subagents through the task tool.",
     "observability": "Journal of events, checkpoints and per-request usage; the runner keeps it with the patch and both grades.",
     "verification": "The done-confirmation challenge; every turn's actions validated against closed schemas before any runs; a loop guard.",
-    "governance": "Streams every request; retries a failed or cut-off request up to six times; the API key is withheld from the commands the agent runs."
+    "governance": "A home directory of its own per row; streams every request; retries a failed or cut-off request up to six times; the API key is withheld from the commands the agent runs."
   },
   "codex": {
     "execution": "`codex exec` in the row's directory, approvals never, sandbox bypassed; no turn limit; the feedback round is `codex exec resume <thread>`.",
-    "tools": "Codex's own: shell commands, apply_patch, plan updates; no web search configured.",
-    "context": "model_context_window 262,144 (config); Codex's own compaction.",
-    "scheduling": "One agent.",
-    "observability": "`--json` event log (commands, messages, usage per turn); the cap proxy logs one line per request.",
+    "tools": "What codex-cli 0.154 offers a model it has no metadata for: exec_command (runs in a PTY and answers after 10 s by default; a longer command keeps running in a session the model polls with write_stdin, so there is no command timeout), write_stdin, view_image, multi_agent_v1, get_goal / create_goal / update_goal, request_user_input (Plan mode only); the hosted web search is disabled in config.",
+    "context": "model_context_window 262,144 (config); Codex's own compaction; the output cap per step from the manifest, temperature 1.0 and top_p 0.95 added to each request by adapters/param_proxy.mjs.",
+    "scheduling": "One agent; subagents through multi_agent_v1.",
+    "observability": "`--json` event log (commands, messages, usage per turn); the parameter proxy logs one line per request with what it added.",
     "verification": "None beyond the model's own.",
-    "governance": "Per-row CODEX_HOME from a pristine config; stream idle timeout raised to 30 minutes; the output cap added per request by adapters/cap_proxy.mjs (CODEX_STOCK=1 runs without it)."
+    "governance": "A home directory and a CODEX_HOME from a pristine config of its own per row; stream idle timeout raised to 30 minutes; CODEX_STOCK=1 runs Codex without the parameter proxy. At startup codex-cli fetches its curated plugin marketplace (a git fetch, on by default); no plugin is installed."
   },
   "opencode": {
     "execution": "`opencode run --pure` in the row's directory, permissions auto-approved; no turn limit; the feedback round is `opencode run --session <id>`.",
-    "tools": "OpenCode's own: bash, read, edit, write, glob, grep, todowrite, task; webfetch and websearch denied by config.",
-    "context": "limit.context 262,144; limit.output set to the manifest's cap in a per-row config.",
+    "tools": "OpenCode 1.18's own: bash (120 s per command unless the model sets another), read, edit, write, glob, grep, todowrite, task, skill; webfetch and websearch denied by config.",
+    "context": "limit.context 262,144; OpenCode's own compaction; limit.output set to the manifest's cap, and temperature 1.0 / top_p 0.95 on each of its agents, in a per-row config.",
     "scheduling": "One agent; subagents through its task tool.",
     "observability": "`--format json` event log (tool calls, tokens per step).",
     "verification": "None beyond the model's own.",
-    "governance": "Per-row XDG config, data and state directories; no external plugins."
+    "governance": "A home directory and XDG config, data and state directories of its own per row; no external plugins. At startup OpenCode installs its plugin SDK into the per-row config directory."
   }
 }

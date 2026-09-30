@@ -27,6 +27,12 @@ LOGDIR="$BENCH/logs/$HARNESS/$REL"
 mkdir -p "$LOGDIR"
 # The feedback round keeps its own files beside the first round's.
 PHASE=""; [ -n "$CONTINUE_FROM" ] && PHASE="-h2"
+# The protocol's sampling, as the manifests record it and motifcode sends it (the model's published generation
+# config). Codex and OpenCode send none of their own; their adapters set these.
+TEMPERATURE=1.0; TOP_P=0.95
+# Every agent gets a home of its own, the same for both rounds of a row: none of the settings, installed skills,
+# global instruction files or credentials of whoever runs the campaign reach a row. The tool caches stay shared (env.sh).
+export HOME="$ROWDIR/home"; mkdir -p "$HOME"
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 START_MS=$(python3 -c 'import time;print(int(time.time()*1000))')
 
@@ -86,7 +92,8 @@ write_journal() {
 finish() {
   local code="$1"; local reason="$2"
   local end_ms; end_ms=$(python3 -c 'import time;print(int(time.time()*1000))')
-  ( cd "$CWD" && git add -A >/dev/null 2>&1 && git diff --cached --binary > "$LOGDIR/patch$PHASE.diff" 2>/dev/null; git reset -q >/dev/null 2>&1 ) || true
+  # Against the base (the suite's only commit), so that work the agent committed is in it too.
+  ( cd "$CWD" && git add -A >/dev/null 2>&1 && git diff --cached --binary "$(git rev-list --max-parents=0 HEAD | tail -n 1)" > "$LOGDIR/patch$PHASE.diff" 2>/dev/null; git reset -q >/dev/null 2>&1 ) || true
   [ -f "$JOURNAL" ] && cp "$JOURNAL" "$LOGDIR/session$PHASE.jsonl" 2>/dev/null
   printf '{"harness":"%s","phase":"%s","exit":%s,"reason":"%s","wallMs":%s,"cwd":"%s","seed":"%s","maxTurns":"%s","maxOutputTokens":"%s"}\n' \
     "$HARNESS" "${PHASE:-first}" "$code" "$reason" "$((end_ms-START_MS))" "$CWD" "$SEED" "$MAX_TURNS" "$MAX_OUT" > "$LOGDIR/meta$PHASE.json"

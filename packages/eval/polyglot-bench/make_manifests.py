@@ -11,7 +11,7 @@ Wraps toolkit/campaign/make_manifest.py, which measures every hash it records. F
 fields hash the adapter script and its pristine config, and the name carries the CLI version, so the record
 identifies what ran.
 """
-import hashlib, json, os, pathlib, subprocess, sys
+import hashlib, json, os, pathlib, re, subprocess, sys
 
 B = pathlib.Path(os.environ.get("BENCH") or pathlib.Path(__file__).resolve().parent)
 REPO = pathlib.Path(os.environ.get("MOTIFCODE_REPO") or B.parents[2])
@@ -36,8 +36,11 @@ sha = subprocess.run(["git", "-C", str(REPO), "rev-parse", "HEAD"], capture_outp
 
 
 def version(cmd):
+    """The first version number a CLI prints for --version."""
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=30).stdout.strip().splitlines()[0]
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        m = re.search(r"\d+\.\d+\.\d+[\w.+-]*", out.stdout + out.stderr)
+        return m.group(0) if m else "unknown"
     except Exception:
         return "unknown"
 
@@ -54,7 +57,7 @@ for h in ("motifcode", "codex", "opencode"):
                     "--out", str(out)], check=True, capture_output=True)
     m = json.loads(out.read_text())
     if h == "motifcode":
-        m["harness"]["name"] = f"motifcode {version(['node', str(MOTIF_JS), '--version'])}"
+        m["harness"]["name"] = f"motifcode {json.loads((REPO / 'packages/cli/package.json').read_text())['version']}"
     else:
         adapter = (B / f"adapters/{h}.sh").read_text()
         cfg = (B / "homes/codex/config.pristine.toml").read_text() if h == "codex" else (B / "homes/opencode/config/opencode/opencode.json").read_text()

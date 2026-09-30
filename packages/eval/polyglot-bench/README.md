@@ -23,10 +23,10 @@ tries. Here the tasks, the task text and the grading are Aider's own, and only t
 | Grading | The tree graded is built, not patched: the exercise as shipped, the agent's solution files and any new source file it wrote. Tests, build files, vendored and helper files are the originals; build output and the agent's own tests are left out. Each track's official command from a directory named after the exercise, 180 s, exit 0 = pass: `pytest`; `go test ./...`; `cargo test -- --include-ignored`; `npm run test` (= `jest ./*`) after npm-test.sh's `xtest` switch; cpp-test.sh's CMake build (`-Wall -Wextra -Wpedantic -Werror`, `EXERCISM_RUN_ALL_TESTS`); `./gradlew test` after Aider's `@Disabled(...)` rule |
 | Rules | **official** (primary): Aider's, holes included — `xit(` and a bare `@Disabled` stay off, and Java's rule reads only the test files the config lists. **strict** (beside it): everything switched on. They differ on javascript/grep, java/forth and java/satellite |
 | Budget | No wall clock per task, as in Aider's benchmark: on a slow shared endpoint a wall clock scores serving speed as the harness. A 6-hour safety cap stands in for a wedged process (status `safety_cap`, re-run once); an 8 GB memory cap per row; 180 s per test run; motifcode's turn limit 100 (the other two have none) |
-| Output cap | 16,384 tokens per step for all three: the endpoint ends reasoning at three quarters of a request's cap and never without one. motifcode sends it from `--max-output-tokens`, OpenCode from its model config, Codex — which has no setting for it — through `adapters/cap_proxy.mjs`, which adds it to each request (`CODEX_STOCK=1` runs Codex without it) |
-| Network | The endpoint only, where it can be enforced. On a host where it cannot, rule `network-v1` reads every command and tool call back from each agent's log: a download, a package install, a git remote operation, a web tool or a source-host URL in a command makes the row invalid (scored zero, kept in the denominator). The rule is fixed and versioned in `packages/eval/src/network.ts` |
+| API parameters | The same for all three: 16,384 output tokens per step — the endpoint ends reasoning at three quarters of a request's cap and never without one — and the model's published sampling, temperature 1.0 and top_p 0.95. motifcode sends them itself, OpenCode from a per-row config (its model's output limit, each of its agents' sampling), Codex — which has a setting for none of them — through `adapters/param_proxy.mjs`, which adds what a request lacks (`CODEX_STOCK=1` runs Codex without it) |
+| Network | The endpoint only, where it can be enforced. On a host where it cannot, rule `network-v1` reads every command and tool call back from each agent's log and session record (Codex's rollout, which has the keystrokes its log leaves out): a download, a package install, a git remote operation, a web tool or a source-host URL in a command makes the row invalid (scored zero, kept in the denominator). The rule is fixed and versioned in `packages/eval/src/network.ts`. The web tools the harnesses ship with are switched off: Codex's hosted web search, OpenCode's webfetch and websearch |
 | Replicates | Two independent runs (`REPLICATE=1`, `REPLICATE=2`); the endpoint does not honour seeds |
-| Evidence | The runner keeps each row's patch, both grades, the feedback message, the second patch and the journals under `artifacts/`, whatever an adapter does |
+| Evidence | The runner keeps each row's patch, both grades, the feedback message, the second patch, the journals and the harness's own log and session record under `artifacts/`, whatever an adapter does |
 
 What protocol v2 recommends and this host does not do: running the agents and the grader inside Aider's Docker image
 (this Mac has no container runtime — grading uses the host's toolchains: Apple clang where the image has GCC 11, Go 1.26,
@@ -71,18 +71,21 @@ them into `results/r<N>/<harness>/rerun.jsonl`, which the report substitutes for
 ## What the adapters do
 
 `adapters/common.sh` parses the runner's argv (`<task> [--continue-from <journal>] --cwd --journal --endpoint --model
---max-turns --max-output-tokens --seed …`), runs the agent in its own process group under an 8 GB resident-memory cap,
-writes a journal the runner reads (`session_end` with `done`, `memory_limit`, `repetition_abort`, `transport_error` or
-`agent_error`) with the harness's own log beside it for the network rule, and keeps its evidence under
-`logs/<harness>/…`. `--continue-from` marks the feedback round, which keeps its own `-h2` files.
+--max-turns --max-output-tokens --seed …`), gives the agent a home directory of its own (the tool caches stay shared),
+runs it in its own process group under an 8 GB resident-memory cap, writes a journal the runner reads (`session_end`
+with `done`, `memory_limit`, `repetition_abort`, `transport_error` or `agent_error`) with the harness's own log beside
+it for the network rule, and keeps its evidence under `logs/<harness>/…`. `--continue-from` marks the feedback round,
+which keeps its own `-h2` files.
 
 - `motifcode.sh` runs `motif "<task>"` as shipped; the feedback round is `motif --continue-from <journal> "<output>"`.
 - `codex.sh` copies `homes/codex/config.pristine.toml` into a per-row `CODEX_HOME` (responses API, sandbox bypassed,
-  `stream_idle_timeout_ms` 30 min because the responses route sends nothing while the model reasons), starts the cap
-  proxy, and runs `codex exec --json`; the feedback round is `codex exec resume <thread>`.
+  web search disabled, `stream_idle_timeout_ms` 30 min because the responses route sends nothing while the model
+  reasons), starts the parameter proxy, runs `codex exec --json` and keeps Codex's rollout beside the journal; the
+  feedback round is `codex exec resume <thread>`, which appends to the same rollout.
 - `opencode.sh` writes a per-row config from `homes/opencode/config/opencode/opencode.json` (openai-compatible
-  provider, webfetch/websearch denied, output limit = the manifest's cap) with per-row XDG directories and runs
-  `opencode run --pure --format json`; the feedback round is `opencode run --session <id>`.
+  provider, webfetch/websearch denied, output limit = the manifest's cap, the protocol's sampling on each agent) with
+  per-row XDG directories and runs `opencode run --pure --format json`; the feedback round is
+  `opencode run --session <id>`.
 
 ## Files
 
@@ -92,7 +95,7 @@ writes a journal the runner reads (`session_end` with `done`, `memory_limit`, `r
 | `verify.sh` | `motif-suite build` + `verify` per language into `verify/*.json`; `instances.json` for the manifests |
 | `make_manifests.py`, `make_chunks.py` | the pinned plan (protocol, budgets, caps, replicates) and stratified pieces |
 | `run_chunk.sh`, `run_pool.sh`, `run_rerun.sh` | drive `motif-suite run` over one piece, over a pool, over the re-run list |
-| `adapters/`, `homes/` | the three harnesses behind one runner contract; the cap proxy; pristine Codex and OpenCode configs |
+| `adapters/`, `homes/` | the three harnesses behind one runner contract; the parameter proxy; pristine Codex and OpenCode configs |
 | `status.sh`, `cleanup_orphans.sh` | progress and hygiene during a campaign |
 | `report_v2.py`, `harness-cards.json` | the protocol v2 report: pass@1/pass@2 under both rule sets, paired statistics, replicate agreement, failure types, cost and budget curves, Harness Cards |
 | `compare.py`, `make_report.py` | the 2026-09-20 campaign's report, kept for that record |

@@ -14,7 +14,8 @@
           "name": "Motif-3",
           "limit": { "context": 262144, "output": 16384 },
           "tool_call": true,
-          "reasoning": true
+          "reasoning": true,
+          "temperature": true
         }
       }
     }

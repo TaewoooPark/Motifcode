@@ -3,20 +3,26 @@
 HARNESS=opencode
 source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 # Per-row config, data and state. The config is the pristine one with the manifest's output cap as the model's
-# output limit, which OpenCode sends as max_tokens. OpenCode keeps a SQLite db under XDG_DATA_HOME, and two rows
-# starting at the same instant on one db die with "database is locked"; the feedback round resumes the first
-# round's session from the same db. The row directory is removed by the runner after grading.
+# output limit, which OpenCode sends as max_tokens, and the protocol's sampling on every agent it has — OpenCode sends
+# a temperature only for a model marked as taking one, and neither value unless an agent sets it. OpenCode keeps a
+# SQLite db under XDG_DATA_HOME, and two rows starting at the same instant on one db die with "database is locked";
+# the feedback round resumes the first round's session from the same db. The row directory is removed by the runner
+# after grading.
 export XDG_CONFIG_HOME="$ROWDIR/xdg/config"
 export XDG_DATA_HOME="$ROWDIR/xdg/data"
 export XDG_STATE_HOME="$ROWDIR/xdg/state"
 export XDG_CACHE_HOME="$BENCH/homes/opencode/cache"
 mkdir -p "$XDG_CONFIG_HOME/opencode" "$XDG_DATA_HOME" "$XDG_STATE_HOME"
-python3 - "$BENCH/homes/opencode/config/opencode/opencode.json" "$XDG_CONFIG_HOME/opencode/opencode.json" "$MAX_OUT" <<'PY'
+python3 - "$BENCH/homes/opencode/config/opencode/opencode.json" "$XDG_CONFIG_HOME/opencode/opencode.json" "$MAX_OUT" "$TEMPERATURE" "$TOP_P" <<'PY'
 import json, sys
-src, dst, cap = sys.argv[1], sys.argv[2], sys.argv[3]
+src, dst, cap, temperature, top_p = sys.argv[1:6]
 c = json.load(open(src))
 if cap and cap not in ("0", "off"):
     for m in c["provider"]["infron"]["models"].values(): m["limit"]["output"] = int(cap)
+# OpenCode 1.18's own agents: the two primary ones, its subagents, and the hidden ones that write titles, summaries
+# and compactions. Naming an agent it does not have would add one.
+for name in ("build", "plan", "general", "explore", "compaction", "title", "summary"):
+    c.setdefault("agent", {}).setdefault(name, {}).update(temperature=float(temperature), top_p=float(top_p))
 json.dump(c, open(dst, "w"), indent=2)
 PY
 # The flag that skips permission prompts was renamed between releases.

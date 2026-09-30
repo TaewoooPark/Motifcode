@@ -94,8 +94,8 @@ def cost(h, r, rounds=("",)):
                     u = e.get("usage") or {}
                     prompt += u.get("input_tokens") or 0
                     completion += u.get("output_tokens") or 0
-            # Codex's events carry no request count; the cap proxy logs one line per request.
-            requests += sum(1 for _ in jsonl(log / f"cap-proxy{phase}.jsonl"))
+            # Codex's events carry no request count; the parameter proxy logs one line per request.
+            requests += sum(1 for _ in jsonl(log / f"param-proxy{phase}.jsonl"))
         elif h == "opencode":
             for e in jsonl(art / f"agent{phase}.log"):
                 if e.get("type") == "step_finish":
