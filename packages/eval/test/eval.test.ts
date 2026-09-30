@@ -22,6 +22,9 @@ import {
   judgeNonInferiority,
   materialize,
   pairedBootstrap,
+  passed,
+  passedStrict,
+  passedWithFeedback,
   planRuns,
   resolvedRate,
   validateManifest,
@@ -341,5 +344,88 @@ describe("grader calibration", () => {
       timeoutSeconds: 60,
     });
     expect(result.patchSha256).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+
+describe("protocol v2 in the manifest", () => {
+  const PROTOCOL = {
+    name: "polyglot-harness-v2",
+    track: "H",
+    feedback_round: true,
+    grading_rules: ["official", "strict"],
+    network_rule: "network-v1",
+    replicates: 2,
+  };
+  const budgets = (over: Record<string, unknown>) => ({
+    budgets: { ...(manifest()["budgets"] as Record<string, unknown>), ...over },
+  });
+
+  it("accepts no wall-clock budget, with a safety cap", () => {
+    expect(problems(manifest({ ...budgets({ task_wall_timeout_seconds: null, safety_cap_seconds: 21600 }), protocol: PROTOCOL }))).toEqual([]);
+  });
+
+  it("refuses no wall-clock budget without a safety cap, and a nonsense budget", () => {
+    expect(problems(manifest(budgets({ task_wall_timeout_seconds: null })))).toEqual([
+      "budgets: with no task_wall_timeout_seconds, safety_cap_seconds is required",
+    ]);
+    expect(problems(manifest(budgets({ task_wall_timeout_seconds: 0 })))[0]).toContain("task_wall_timeout_seconds");
+    expect(problems(manifest(budgets({ command_timeout_seconds: "180" })))[0]).toContain("command_timeout_seconds");
+  });
+
+  it("refuses a protocol it cannot run as written", () => {
+    const found = problems(manifest({ protocol: { ...PROTOCOL, track: "X", grading_rules: ["strict"], replicates: 0, extra: 1 } }));
+    expect(found).toEqual(
+      expect.arrayContaining([
+        "protocol.track must be H or V",
+        'protocol.grading_rules must list "official" first, then optionally "strict"',
+        "protocol.replicates must be a whole number >= 1",
+        'unknown field "protocol.extra"',
+      ]),
+    );
+  });
+
+  it("refuses to pair runs made under different protocols", () => {
+    const a = validateManifest(manifest({ protocol: PROTOCOL }));
+    const b = validateManifest(manifest({ protocol: { ...PROTOCOL, track: "V" } }));
+    expect(checkPairable(a, b)).toContain("different protocol");
+  });
+
+  it("plans a replicate as its own rows", () => {
+    const m = validateManifest(manifest());
+    expect(planRuns(m, ["a"], 2).every((r) => r.replicate === 2)).toBe(true);
+  });
+});
+
+describe("what counts as a pass under protocol v2", () => {
+  const row = (extra: Partial<CompletedRun>): CompletedRun => ({
+    manifestId: "m",
+    configId: "c",
+    instanceId: "i",
+    seed: 0,
+    replicate: 1,
+    status: "completed",
+    ...extra,
+  });
+
+  it("reads the official grade first, the strict one beside it", () => {
+    const r = row({ grade: pass(), gradeStrict: fail() });
+    expect(passed(r)).toBe(true);
+    expect(passedStrict(r)).toBe(false);
+  });
+
+  it("counts a pass in the feedback round within two, not within one", () => {
+    const r = row({ grade: fail(), feedback: { status: "completed", grade: pass() } });
+    expect(passed(r)).toBe(false);
+    expect(passedWithFeedback(r)).toBe(true);
+  });
+
+  it("counts nothing from a row the network rule invalidated, and keeps it in the denominator", () => {
+    const r = row({ grade: pass(), invalid: "network rule network-v1: downloads with curl" });
+    expect(passed(r)).toBe(false);
+    expect(passedWithFeedback(r)).toBe(false);
+    const counts = countStatuses([r, row({ status: "safety_cap", grade: fail() })]);
+    expect(counts).toMatchObject({ planned: 2, passed: 0, failed: 2, invalid: 1, safetyCap: 1 });
   });
 });

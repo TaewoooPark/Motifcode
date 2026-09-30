@@ -23,13 +23,14 @@
  */
 
 import { execFile, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import type { SessionEndReason } from "@motifcode/core";
-import type { JournalLine } from "@motifcode/journal";
-import type { GraderAdapter } from "./grader.js";
+import type { GraderResult, JournalLine } from "@motifcode/journal";
+import type { GradeRequest, GraderAdapter } from "./grader.js";
 import type { EvalManifest } from "./manifest.js";
+import { NETWORK_RULE, actionsFromLog, networkViolations, type AgentAction } from "./network.js";
 import type { CompletedRun, PlannedRun } from "./results.js";
 
 const exec = promisify(execFile);
@@ -51,12 +52,35 @@ export interface Instance {
    * benchmark claims to.
    */
   setupCommand?: string[];
+  /**
+   * What the agent's directory is called. Default `checkout`.
+   *
+   * Not cosmetic for every suite: the polyglot C++ exercises take their CMake
+   * target from the directory's name, and one called `checkout` fails the
+   * official build before a line of the agent's code is compiled.
+   */
+  workdirName?: string;
+}
+
+/** A row's grade: the primary verdict, a secondary rule set, and what a feedback round would say. */
+export interface RowGrade {
+  official: GraderResult;
+  strict?: GraderResult;
+  /** The message a feedback round sends when the official grade failed. */
+  feedback?: string;
+  /** Anything worth keeping beside the patch: what was carried, dropped, restored. */
+  detail?: unknown;
+}
+
+/** A grader that can also report a second rule set and a feedback message for the row. */
+export interface RowGrader extends GraderAdapter {
+  gradeRow?(request: GradeRequest): Promise<RowGrade>;
 }
 
 export interface RunnerOptions {
   manifest: EvalManifest;
   instances: readonly Instance[];
-  grader: GraderAdapter;
+  grader: RowGrader;
   /** The `motif` entry point: `["node", "/path/to/motif.js"]` or `["motif"]`. */
   agentCommand: string[];
   endpoint: string;
@@ -89,15 +113,37 @@ export interface RunnerOptions {
    * scheduling mistake into a quality result.
    */
   concurrency?: number;
+  /**
+   * Track H2: when the official grade fails, resume the agent's session once
+   * with the failed tests' output, then grade again. Aider's second try, for
+   * an agent: the same session and directory, and still no test files.
+   */
+  feedbackRound?: boolean;
+  /**
+   * Where the runner keeps each row's evidence itself — the patch it graded,
+   * both grades, the feedback message, the journals — whatever an adapter
+   * does. An experiment once lost the patches of 33 rows to an adapter that
+   * was edited while they ran.
+   */
+  artifactsRoot?: string;
   onRow?: (row: CompletedRun) => void;
 }
 
 interface AgentOutcome {
-  status: "completed" | "agent_timeout" | "agent_crash" | "model_transport_failure";
+  status: "completed" | "agent_timeout" | "safety_cap" | "agent_crash" | "model_transport_failure";
   endReason?: SessionEndReason;
   wallMs: number;
   journalPath?: string;
 }
+
+/** A second, resumed round of the same session. */
+interface Round {
+  prompt: string;
+  continueFrom: string;
+}
+
+/** When nothing else bounds a row: an infrastructure guard, not a budget. */
+const DEFAULT_SAFETY_CAP_SECONDS = 6 * 60 * 60;
 
 /**
  * Why the run ended, read from the record the agent itself wrote.
@@ -134,11 +180,13 @@ async function runAgent(
   checkout: string,
   journalPath: string,
   seed: number,
+  round?: Round,
 ): Promise<AgentOutcome> {
   const { budgets, sampling, harness } = opts.manifest;
   const argv = [
     ...opts.agentCommand.slice(1),
-    instance.prompt,
+    round ? round.prompt : instance.prompt,
+    ...(round ? ["--continue-from", round.continueFrom] : []),
     "--cwd", checkout,
     "--journal", journalPath,
     "--endpoint", opts.endpoint,
@@ -163,6 +211,13 @@ async function runAgent(
       },
     });
     let timedOut = false;
+    // A wall-clock budget when the manifest sets one. Without one the row runs
+    // until the agent stops, as Aider's benchmark does, and only a safety cap
+    // for a wedged process remains — recorded as its own status, because it
+    // says something about the infrastructure and nothing about the task.
+    const wall = budgets.task_wall_timeout_seconds;
+    const capped = typeof wall !== "number";
+    const limitS = typeof wall === "number" ? wall : (budgets.safety_cap_seconds ?? DEFAULT_SAFETY_CAP_SECONDS);
     const timer = setTimeout(() => {
       timedOut = true;
       // The group. An agent that started a build or a server leaves it running
@@ -173,7 +228,7 @@ async function runAgent(
       } catch {
         child.kill("SIGKILL");
       }
-    }, budgets.task_wall_timeout_seconds * 1000);
+    }, limitS * 1000);
 
     const settle = (code: number | null): void => {
       clearTimeout(timer);
@@ -191,7 +246,7 @@ async function runAgent(
       // ended; believe it when it is there, and fall back to the exit code
       // only when the agent died without writing an ending at all.
       let status: AgentOutcome["status"];
-      if (timedOut) status = "agent_timeout";
+      if (timedOut) status = capped ? "safety_cap" : "agent_timeout";
       else if (endReason === "transport_error") status = "model_transport_failure";
       else if (endReason === undefined) status = "agent_crash";
       else status = "completed";
@@ -216,7 +271,45 @@ async function extractPatch(checkout: string): Promise<string> {
     cwd: checkout,
     maxBuffer: 64 * 1024 * 1024,
   });
+  // Unstaged again: a feedback round resumes in this directory, and an agent
+  // that runs `git status` should see its work as it left it.
+  await exec("git", ["reset", "-q"], { cwd: checkout }).catch(() => undefined);
   return stdout;
+}
+
+async function gradeRow(grader: RowGrader, request: GradeRequest): Promise<RowGrade> {
+  if (grader.gradeRow) return grader.gradeRow(request);
+  return { official: await grader.grade(request) };
+}
+
+/** An infrastructure error scores zero; it is kept as a status, not dropped. */
+const scored = (grade: GraderResult | undefined): GraderResult | undefined =>
+  grade && grade.status === "infra_error" ? { ...grade, score: 0 } : grade;
+
+/**
+ * Everything the agent did in a session, from its journal and, for an
+ * adapter-driven harness, the harness's own log beside it (`<journal>.agent.log`).
+ */
+function actionsOf(journalPath: string): AgentAction[] {
+  const out: AgentAction[] = [];
+  for (const path of [journalPath, `${journalPath}.agent.log`]) {
+    if (!existsSync(path)) continue;
+    try {
+      out.push(...actionsFromLog(readFileSync(path, "utf8")));
+    } catch {
+      // Unreadable evidence is not evidence of a violation.
+    }
+  }
+  return out;
+}
+
+function keep(dir: string | undefined, name: string, from: string): void {
+  if (!dir || !existsSync(from)) return;
+  try {
+    copyFileSync(from, join(dir, name));
+  } catch {
+    // Evidence is best-effort; the row's result does not depend on it.
+  }
 }
 
 export async function runRow(
@@ -224,10 +317,13 @@ export async function runRow(
   planned: PlannedRun,
   instance: Instance,
 ): Promise<CompletedRun> {
-  const rowDir = join(opts.workRoot, `${planned.configId}--${planned.instanceId}--${planned.seed}--${planned.replicate}`);
-  const checkout = join(rowDir, "checkout");
+  const rowName = `${planned.configId}--${planned.instanceId}--${planned.seed}--${planned.replicate}`;
+  const rowDir = join(opts.workRoot, rowName);
+  const checkout = join(rowDir, instance.workdirName ?? "checkout");
   const journalPath = join(rowDir, "session.jsonl");
   mkdirSync(rowDir, { recursive: true });
+  const evidence = opts.artifactsRoot ? join(opts.artifactsRoot, rowName.replace(/\//g, "--")) : undefined;
+  if (evidence) mkdirSync(evidence, { recursive: true });
 
   try {
     // Serialized: `git worktree add` and `remove` both rewrite `.git/worktrees`
@@ -262,22 +358,65 @@ export async function runRow(
     }
     const outcome = await runAgent(opts, instance, checkout, journalPath, planned.seed);
     const patch = await extractPatch(checkout).catch(() => "");
-    const grade = await opts.grader.grade({
+    const request = (p: string): GradeRequest => ({
       instanceId: instance.id,
-      patch,
+      patch: p,
       baseCommit: instance.baseCommit,
       timeoutSeconds: opts.manifest.budgets.command_timeout_seconds,
     });
     // A row where the agent never finished is still graded — an agent that
     // times out having already written the fix has solved the instance, and
     // discarding its work would score the clock rather than the model.
-    return {
+    const graded = await gradeRow(opts.grader, request(patch));
+    if (evidence) {
+      writeFileSync(join(evidence, "patch.diff"), patch);
+      writeFileSync(join(evidence, "grade.json"), JSON.stringify(graded, null, 2) + "\n");
+      keep(evidence, "session.jsonl", journalPath);
+      keep(evidence, "agent.log", `${journalPath}.agent.log`);
+    }
+
+    let feedback: CompletedRun["feedback"];
+    const actions = actionsOf(journalPath);
+    if (opts.feedbackRound && graded.official.status === "failed" && graded.feedback !== undefined) {
+      const second = join(rowDir, "session-h2.jsonl");
+      const outcome2 = await runAgent(opts, instance, checkout, second, planned.seed, {
+        prompt: graded.feedback,
+        continueFrom: journalPath,
+      });
+      const patch2 = await extractPatch(checkout).catch(() => "");
+      const graded2 = await gradeRow(opts.grader, request(patch2));
+      actions.push(...actionsOf(second));
+      feedback = {
+        status: outcome2.status === "completed" ? "completed" : outcome2.status,
+        ...(outcome2.endReason !== undefined ? { agentEndReason: outcome2.endReason } : {}),
+        ...(scored(graded2.official) ? { grade: scored(graded2.official)! } : {}),
+        ...(scored(graded2.strict) ? { gradeStrict: scored(graded2.strict)! } : {}),
+        wallMs: outcome2.wallMs,
+      };
+      if (evidence) {
+        writeFileSync(join(evidence, "feedback.txt"), graded.feedback);
+        writeFileSync(join(evidence, "patch-h2.diff"), patch2);
+        writeFileSync(join(evidence, "grade-h2.json"), JSON.stringify(graded2, null, 2) + "\n");
+        keep(evidence, "session-h2.jsonl", second);
+        keep(evidence, "agent-h2.log", `${second}.agent.log`);
+      }
+    }
+
+    const violations = networkViolations(actions);
+    const row: CompletedRun = {
       ...planned,
       status: outcome.status === "completed" ? "completed" : outcome.status,
       ...(outcome.endReason !== undefined ? { agentEndReason: outcome.endReason } : {}),
-      grade: grade.status === "infra_error" ? { ...grade, score: 0 } : grade,
+      grade: scored(graded.official)!,
+      ...(scored(graded.strict) ? { gradeStrict: scored(graded.strict)! } : {}),
       wallMs: outcome.wallMs,
+      ...(feedback ? { feedback } : {}),
+      network: { rule: NETWORK_RULE, violations },
+      ...(violations.length > 0 ? { invalid: `network rule ${NETWORK_RULE}: ${violations[0]!.reason}` } : {}),
+      ...(evidence ? { artifacts: evidence } : {}),
     };
+    if (evidence) writeFileSync(join(evidence, "row.json"), JSON.stringify(row, null, 2) + "\n");
+    return row;
   } finally {
     // Kept means kept: the journal says what the agent decided, the checkout
     // says what it actually left behind, and a failure is usually only

@@ -14,9 +14,10 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, chmodSync, existsSync, r
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type { GraderResult } from "@motifcode/journal";
 import type { EvalManifest } from "../src/manifest.js";
-import type { PlannedRun } from "../src/results.js";
-import { runAll, runRow } from "../src/runner.js";
+import { passed, passedWithFeedback, type PlannedRun } from "../src/results.js";
+import { runAll, runRow, type RowGrader } from "../src/runner.js";
 import { WorktreeGrader } from "../src/worktree-grader.js";
 
 let repo: string;
@@ -262,5 +263,127 @@ describe("runner", () => {
     // Kept on purpose above; not left for the tests after this one.
     git(["worktree", "remove", "--force", join(rowDir, "checkout")]);
     rmSync(rowDir, { recursive: true, force: true });
+  });
+});
+
+describe("protocol v2 rows", () => {
+  const result = (status: GraderResult["status"]): GraderResult => ({
+    status,
+    score: status === "passed" ? 1 : 0,
+    graderName: "t",
+    graderVersion: "1",
+    startedAt: "",
+    finishedAt: "",
+  });
+  /** Passes a patch that fixes `add`; otherwise fails with a feedback message, as the polyglot grader does. */
+  const rowGrader: RowGrader = {
+    name: "t",
+    version: "1",
+    grade: async (req) => result(req.patch.includes("a + b") ? "passed" : "failed"),
+    gradeRow: async (req) => {
+      const ok = req.patch.includes("a + b");
+      return {
+        official: result(ok ? "passed" : "failed"),
+        strict: result("failed"),
+        ...(ok ? {} : { feedback: "AssertionError: add(2, 3) == -1\n####\nFix the code in calc.py" }),
+      };
+    },
+  };
+
+  /** An agent that records how it was called, and fixes `add` only in a resumed round. */
+  function recordingAgent(log: string): string[] {
+    const path = join(workRoot, `agent-${Math.random().toString(36).slice(2)}.sh`);
+    writeFileSync(
+      path,
+      `#!/bin/sh
+prompt="$1"; shift
+cwd=""; journal=""; from=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --cwd) cwd="$2"; shift 2 ;;
+    --journal) journal="$2"; shift 2 ;;
+    --continue-from) from="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf '%s|%s|%s\\n' "$(basename "$cwd")" "$from" "$(printf '%s' "$prompt" | tr '\\n' '~')" >> "${log}"
+if [ -n "$from" ]; then printf 'def add(a, b):\\n    return a + b\\n' > "$cwd/calc.py"; fi
+${SESSION_END("done")}
+`,
+    );
+    chmodSync(path, 0o755);
+    return [path];
+  }
+
+  it("runs the agent in a directory named after the exercise", async () => {
+    const log = join(workRoot, `calls-${Math.random().toString(36).slice(2)}.txt`);
+    await runRow({ ...options(recordingAgent(log)), grader: rowGrader }, { ...planned, seed: 31 }, { ...instance(), workdirName: "bank-account" });
+    expect(readFileSync(log, "utf8").split("|")[0]).toBe("bank-account");
+  });
+
+  it("resumes a failed row once with the feedback, in the same directory, and grades it again", async () => {
+    const log = join(workRoot, `calls-${Math.random().toString(36).slice(2)}.txt`);
+    const artifacts = mkdtempSync(join(tmpdir(), "motif-evidence-"));
+    const row = await runRow(
+      { ...options(recordingAgent(log)), grader: rowGrader, feedbackRound: true, artifactsRoot: artifacts },
+      { ...planned, seed: 32 },
+      { ...instance(), workdirName: "calc" },
+    );
+    const calls = readFileSync(log, "utf8").trim().split("\n").map((l) => l.split("|"));
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toEqual(["calc", "", "fix add"]);
+    // The second round continues the first session's journal with the test output.
+    expect(calls[1]![0]).toBe("calc");
+    expect(calls[1]![1]).toMatch(/c--calc-1--32--0\/session\.jsonl$/);
+    expect(calls[1]![2]).toBe("AssertionError: add(2, 3) == -1~####~Fix the code in calc.py");
+    expect(row.grade?.status).toBe("failed");
+    expect(row.feedback?.grade?.status).toBe("passed");
+    expect(passed(row)).toBe(false);
+    expect(passedWithFeedback(row)).toBe(true);
+    // The runner kept the evidence itself.
+    const dir = row.artifacts!;
+    for (const f of ["patch.diff", "grade.json", "feedback.txt", "patch-h2.diff", "grade-h2.json", "row.json", "session.jsonl"]) {
+      expect(existsSync(join(dir, f)), f).toBe(true);
+    }
+    expect(readFileSync(join(dir, "patch-h2.diff"), "utf8")).toContain("a + b");
+    rmSync(artifacts, { recursive: true, force: true });
+  });
+
+  it("does not resume a row that passed", async () => {
+    const log = join(workRoot, `calls-${Math.random().toString(36).slice(2)}.txt`);
+    const fixer = fakeAgent(`printf 'def add(a, b):\\n    return a + b\\n' > "$cwd/calc.py"\n${SESSION_END("done")}`);
+    const row = await runRow({ ...options(fixer), grader: rowGrader, feedbackRound: true }, { ...planned, seed: 33 }, instance());
+    expect(row.grade?.status).toBe("passed");
+    expect(row.feedback).toBeUndefined();
+    expect(existsSync(log)).toBe(false);
+  });
+
+  it("with no wall-clock budget, stops a wedged row at the safety cap and says so", async () => {
+    const agent = fakeAgent(`printf 'def add(a, b):\\n    return a + b\\n' > "$cwd/calc.py"\nsleep 120`);
+    const capped = {
+      ...options(agent),
+      manifest: { ...manifest, budgets: { ...manifest.budgets, task_wall_timeout_seconds: null, safety_cap_seconds: 2 } } as unknown as EvalManifest,
+    };
+    const row = await runRow(capped, { ...planned, seed: 34 }, instance());
+    expect(row.status).toBe("safety_cap");
+    // Graded all the same: the work it did is still its work.
+    expect(row.grade?.status).toBe("passed");
+  });
+
+  it("invalidates a row whose agent fetched from outside, whatever the grade", async () => {
+    const event = JSON.stringify({
+      v: 2, seq: 1, at: "now", runId: "r", scopeId: "root", scopeKind: "root",
+      record: { t: "event", event: { type: "tool_start", call: { id: "c1", name: "bash", arguments: { command: "curl -sL https://github.com/exercism/python/raw/main/x.py" } } } },
+    });
+    const agent = fakeAgent(
+      `printf '%s\\n' '${event}' > "$journal"\n` +
+        `printf 'def add(a, b):\\n    return a + b\\n' > "$cwd/calc.py"\n` +
+        SESSION_END("done").replace('> "$journal"', '>> "$journal"'),
+    );
+    const row = await runRow({ ...options(agent), grader: rowGrader }, { ...planned, seed: 35 }, instance());
+    expect(row.grade?.status).toBe("passed");
+    expect(row.network?.violations.map((v) => v.reason)).toEqual(["downloads with curl"]);
+    expect(row.invalid).toContain("downloads with curl");
+    expect(passed(row)).toBe(false);
   });
 });

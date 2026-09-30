@@ -26,6 +26,7 @@ export type RunStatus =
   | "running"
   | "completed"
   | "agent_timeout"
+  | "safety_cap"
   | "agent_crash"
   | "model_transport_failure"
   | "grader_failed"
@@ -89,9 +90,38 @@ export interface BudgetSpec {
   max_model_steps: number;
   max_turns: number;
   max_repairs_per_failure: number;
+  /** The grader's limit on one test run. Aider's is 180 s. */
   command_timeout_seconds: number;
-  task_wall_timeout_seconds: number;
+  /**
+   * A wall-clock budget per task, or `null` for none — Aider's benchmark has
+   * none. On a slow shared endpoint a wall-clock limit measures serving speed
+   * and scores it as the harness.
+   */
+  task_wall_timeout_seconds: number | null;
+  /**
+   * With no wall-clock budget, the limit past which a row is taken to be a
+   * wedged process and killed as `safety_cap`: infrastructure, not a result.
+   */
+  safety_cap_seconds?: number;
   max_total_tokens: number | null;
+}
+
+/**
+ * How a harness benchmark's rows are run, pinned with the rest.
+ *
+ * `polyglot-harness-v2`: the polyglot tasks and Aider's grading, with the
+ * protocol for an agent — track H hides the graded tests, track V shows them;
+ * a feedback round (H2) resumes a failed row once with the test output; the
+ * grades are read under the official rules first and the strict ones beside
+ * them; agents' network use is judged by a fixed, versioned rule.
+ */
+export interface ProtocolSpec {
+  name: "polyglot-harness-v2";
+  track: "H" | "V";
+  feedback_round: boolean;
+  grading_rules: ("official" | "strict")[];
+  network_rule: string;
+  replicates: number;
 }
 
 export interface EnvironmentSpec {
@@ -130,6 +160,7 @@ export interface EvalManifest {
   budgets: BudgetSpec;
   environment: EnvironmentSpec;
   design: DesignSpec;
+  protocol?: ProtocolSpec;
 }
 
 export class ManifestError extends Error {
@@ -156,6 +187,7 @@ const TOP_LEVEL_KEYS = new Set([
   "budgets",
   "environment",
   "design",
+  "protocol",
 ]);
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -252,6 +284,53 @@ export function validateManifest(input: unknown): EvalManifest {
     problems.push("design.noninferiority_margin_pp must be a number or explicitly null");
   }
 
+  const budgets = input["budgets"];
+  if (isRecord(budgets)) {
+    const wall = budgets["task_wall_timeout_seconds"];
+    if (wall !== null && !(typeof wall === "number" && wall > 0)) {
+      problems.push("budgets.task_wall_timeout_seconds must be a positive number of seconds, or null for none");
+    }
+    const cap = budgets["safety_cap_seconds"];
+    if (cap !== undefined && !(typeof cap === "number" && cap > 0)) {
+      problems.push("budgets.safety_cap_seconds must be a positive number of seconds");
+    }
+    if (wall === null && cap === undefined) {
+      // Without either, a wedged row holds its slot until someone notices.
+      problems.push("budgets: with no task_wall_timeout_seconds, safety_cap_seconds is required");
+    }
+    const grading = budgets["command_timeout_seconds"];
+    if (!(typeof grading === "number" && grading > 0)) {
+      problems.push("budgets.command_timeout_seconds must be a positive number of seconds");
+    }
+  }
+
+  const protocol = input["protocol"];
+  if (protocol !== undefined) {
+    if (!isRecord(protocol)) {
+      problems.push("protocol must be a mapping");
+    } else {
+      if (protocol["name"] !== "polyglot-harness-v2") problems.push('protocol.name must be "polyglot-harness-v2"');
+      if (protocol["track"] !== "H" && protocol["track"] !== "V") problems.push("protocol.track must be H or V");
+      if (typeof protocol["feedback_round"] !== "boolean") problems.push("protocol.feedback_round must be true or false");
+      const rules = protocol["grading_rules"];
+      if (!Array.isArray(rules) || rules[0] !== "official" || !rules.every((r) => r === "official" || r === "strict")) {
+        problems.push('protocol.grading_rules must list "official" first, then optionally "strict"');
+      }
+      if (typeof protocol["network_rule"] !== "string" || protocol["network_rule"] === "") {
+        problems.push("protocol.network_rule must name the rule version");
+      }
+      const reps = protocol["replicates"];
+      if (!(typeof reps === "number" && Number.isInteger(reps) && reps >= 1)) {
+        problems.push("protocol.replicates must be a whole number >= 1");
+      }
+      for (const key of Object.keys(protocol)) {
+        if (!["name", "track", "feedback_round", "grading_rules", "network_rule", "replicates"].includes(key)) {
+          problems.push(`unknown field "protocol.${key}"`);
+        }
+      }
+    }
+  }
+
   // A fixed channel that is allowed to downgrade is not a fixed channel, and
   // the run would silently become two experiments.
   if (isRecord(harness) && harness["channel_policy"] === "fixed" && harness["features"] !== undefined) {
@@ -286,6 +365,9 @@ export function checkPairable(a: EvalManifest, b: EvalManifest): string[] {
   }
   if (JSON.stringify(a.budgets) !== JSON.stringify(b.budgets)) {
     problems.push("different budgets");
+  }
+  if (JSON.stringify(a.protocol ?? null) !== JSON.stringify(b.protocol ?? null)) {
+    problems.push("different protocol");
   }
   if (a.sampling.seed_policy !== b.sampling.seed_policy) {
     problems.push("different seed policy");
