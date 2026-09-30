@@ -527,6 +527,8 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
           transport,
           messages: session.messages,
           tools,
+          // A model step like any other, so under the same cap.
+          ...(opts.maxOutputTokens !== undefined ? { maxTokens: opts.maxOutputTokens } : {}),
           ...(signal ? { signal } : {}),
         });
         const turns = [...(opts.compaction.userTurns ?? [])];

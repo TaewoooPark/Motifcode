@@ -66,7 +66,7 @@ import { Chat } from "./chat.js";
 import { InfronBilling } from "./billing.js";
 import { balanceRows } from "./billing-view.js";
 import { describePlugins, loadPlugins, type LoadedPlugins } from "./plugins.js";
-import { loadSettings, saveUserSetting } from "./settings.js";
+import { DEFAULT_MAX_OUTPUT_TOKENS, loadSettings, saveUserSetting } from "./settings.js";
 import { commandOnPath, ranFromNpx } from "./install.js";
 import { KEY_PAGE, normaliseKeyInput, readSecret, verifyApiKey } from "./login.js";
 import { doctor, formatChecks, worstState } from "./doctor.js";
@@ -179,6 +179,24 @@ function flagInt(flags: Args["flags"], key: string, fallback: number, min: numbe
     throw new UsageError(`--${key} must be an integer >= ${min}; got ${String(v)}`);
   }
   return n;
+}
+
+/**
+ * The output cap for each model step: `--max-output-tokens <n|off>`, then the
+ * settings files (where 0 is off), then the default. `undefined` sends none.
+ */
+function outputCapFrom(flags: Args["flags"], stored: number | undefined): number | undefined {
+  const v = flags["max-output-tokens"];
+  if (v === "off") return undefined;
+  if (v !== undefined) {
+    const n = typeof v === "string" ? Number(v) : NaN;
+    if (!Number.isInteger(n) || n < 1) {
+      throw new UsageError(`--max-output-tokens must be an integer >= 1, or off; got ${String(v)}`);
+    }
+    return n;
+  }
+  if (stored === 0) return undefined;
+  return stored ?? DEFAULT_MAX_OUTPUT_TOKENS;
 }
 
 const CHANNELS = ["toolcall", "object", "raw"] as const;
@@ -423,7 +441,9 @@ Flags
   --channel <id>            toolcall | object | raw (default toolcall)
   --channel-policy <p>      fixed | adaptive (default fixed)
   --max-turns <n>           turn ceiling (default 100)
-  --max-output-tokens <n>   cap on each model step
+  --max-output-tokens <n|off>
+                            cap on each model step (default 16384; off sends none). The hosted
+                            endpoint ends reasoning at 3/4 of the cap, and never without one
   --bash-timeout <s>        seconds a shell command may run when the model sets no timeout (default 120)
   --seed <n>                sampling seed, passed to the server
   --cwd <path>              working directory
@@ -732,7 +752,7 @@ async function main(): Promise<number> {
         ["endpoint", endpoint, connection.sources.endpoint],
         ["channel", stored.values.channel ?? "toolcall", stored.sources.channel ?? "default"],
         ["maxTurns", String(stored.values.maxTurns ?? 100), stored.sources.maxTurns ?? "default"],
-        ["maxOutputTokens", stored.values.maxOutputTokens === undefined ? "off" : String(stored.values.maxOutputTokens), stored.sources.maxOutputTokens ?? "default"],
+        ["maxOutputTokens", String(outputCapFrom(args.flags, stored.values.maxOutputTokens) ?? "off"), args.flags["max-output-tokens"] !== undefined ? "flag" : (stored.sources.maxOutputTokens ?? "default")],
         ["seed", stored.values.seed === undefined ? "off" : String(stored.values.seed), stored.sources.seed ?? "default"],
         ["theme", themeName, typeof args.flags["theme"] === "string" ? "flag" : (stored.sources.theme ?? "default")],
         ["thinking", showThinking ? "shown" : "hidden", args.flags["thinking"] === true ? "flag" : (stored.sources.thinking ?? "default")],
@@ -754,6 +774,7 @@ async function main(): Promise<number> {
         model,
         ...(apiKey !== undefined ? { apiKey } : {}),
         ...(connection.sources.apiKey !== undefined ? { apiKeySource: connection.sources.apiKey } : {}),
+        maxOutputTokens: outputCapFrom(args.flags, stored.values.maxOutputTokens) ?? null,
       });
       process.stdout.write(formatChecks(checks) + "\n");
       return worstState(checks) === "fail" ? 1 : 0;
@@ -847,10 +868,7 @@ async function main(): Promise<number> {
   const channel: ChannelId = flagEnum(args.flags, "channel", CHANNELS, stored.values.channel ?? "toolcall");
   const channelPolicy = flagEnum(args.flags, "channel-policy", CHANNEL_POLICIES, "fixed");
   const maxTurns = flagInt(args.flags, "max-turns", stored.values.maxTurns ?? 100, 1);
-  const maxOutputTokens =
-    args.flags["max-output-tokens"] !== undefined
-      ? flagInt(args.flags, "max-output-tokens", 0, 1)
-      : stored.values.maxOutputTokens;
+  const maxOutputTokens = outputCapFrom(args.flags, stored.values.maxOutputTokens);
   const seed = args.flags["seed"] !== undefined ? flagInt(args.flags, "seed", 0, 0) : stored.values.seed;
   const bashTimeout = flagInt(args.flags, "bash-timeout", stored.values.bashTimeout ?? 120, 1);
 

@@ -17,6 +17,7 @@
 
 import { MAX_CONTEXT, SAMPLING_DEFAULTS } from "@motifcode/protocol";
 import { detectSandbox } from "./sandbox.js";
+import { DEFAULT_MAX_OUTPUT_TOKENS } from "./settings.js";
 
 export type CheckState = "ok" | "warn" | "fail" | "unknown";
 
@@ -34,6 +35,8 @@ export interface DoctorOptions {
   apiKey?: string;
   /** Where the key came from, so a wrong file is findable from the output. */
   apiKeySource?: string;
+  /** The `max_tokens` each step sends, or null when the cap is off. Left out, it is not reported. */
+  maxOutputTokens?: number | null;
   fetchImpl?: typeof fetch;
 }
 
@@ -116,6 +119,30 @@ export async function doctor(opts: DoctorOptions): Promise<Check[]> {
           fix: "set MOTIF_API_KEY in the environment or in a .env file (not needed for a local server without auth)",
         },
   );
+
+  // A local setting, so reported before the network like the key. It is the
+  // one that most changes how long a step takes on the hosted endpoint, which
+  // ends reasoning at three quarters of `max_tokens` and never without it.
+  if (opts.maxOutputTokens !== undefined) {
+    const cap = opts.maxOutputTokens;
+    checks.push(
+      cap === null
+        ? {
+            name: "output cap",
+            state: "warn",
+            detail: "off — steps are sent without max_tokens",
+            fix:
+              "the hosted endpoint bounds reasoning only at 3/4 of max_tokens, so a step can reason for many minutes " +
+              `(1,004 s measured) and be cut off at 30. Drop --max-output-tokens off or the 0 in settings.json, ` +
+              `or run /max-tokens ${DEFAULT_MAX_OUTPUT_TOKENS}, to restore the default`,
+          }
+        : {
+            name: "output cap",
+            state: "ok",
+            detail: `max_tokens ${cap} on every step; the hosted endpoint ends reasoning at ${Math.floor(cap * 0.75)}`,
+          },
+    );
+  }
 
   let models: ModelsResponse | null = null;
   try {

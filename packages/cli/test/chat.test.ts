@@ -589,6 +589,23 @@ describe("interactive session", () => {
     expect(String(summaryRequest.messages[summaryRequest.messages.length - 1]!.content)).toContain("CONTEXT CHECKPOINT COMPACTION");
   });
 
+  it("sends /compact under the same output cap as every other step", async () => {
+    const t = new GateTransport([...reply("first answer"), "</think>HANDOFF"]);
+    const s = session(t, {
+      settings: {
+        model: "motif/motif-3", endpoint: "https://llm.onerouter.pro", channel: "toolcall", maxTurns: 20,
+        maxOutputTokens: 16384, cwd: mkdtempSync(join(tmpdir(), "motif-chat-")), theme: "motif", compactAt: 0.75, permissions: "auto",
+      },
+    });
+    open.push(s);
+    s.type("fix the parser\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    s.type("/compact\r");
+    await vi.waitFor(() => expect(s.screen()).toContain("Context compacted"));
+    expect(t.seen[0]!.maxTokens).toBe(16384);
+    expect(t.seen[1]!.maxTokens).toBe(16384);
+  });
+
   it("refuses to compact while a task runs, since the task would hand back the old transcript", async () => {
     const t = new GateTransport([...reply("later")]);
     t.gated = true;

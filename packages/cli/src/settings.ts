@@ -40,6 +40,24 @@ export interface StoredSettings {
   bashTimeout?: number;
 }
 
+/**
+ * The output cap when neither a flag nor a settings file sets one; 0 in a
+ * settings file means no cap.
+ *
+ * Not only an output cap. The hosted endpoint bounds reasoning at three
+ * quarters of `max_tokens`: past that it ends the thinking itself ("I have to
+ * give the solution based on the reasoning directly now.") and the model
+ * answers in the same generation. Without `max_tokens` it does not bound it at
+ * all — one step was measured at 41,872 tokens and 1,004 s, another cut off by
+ * the gateway at 30 minutes, and long reasoning is where the router's
+ * repetition detector fires. 16,384 bounds reasoning at 12,288 tokens and
+ * leaves 4,096 for the answer, which no step of the polyglot campaign
+ * outgrew. Run both ways on 21 reasoning-heavy exercises, the cap solved 13
+ * (every test counted) against 9, and no request timed out at the gateway
+ * against eleven.
+ */
+export const DEFAULT_MAX_OUTPUT_TOKENS = 16_384;
+
 export type SettingsSource = "project" | "user" | "default";
 
 export interface LoadedSettings {
@@ -111,7 +129,7 @@ export function parseSettings(text: string): { values: StoredSettings; problems:
     else problems.push(`${k} must be an integer >= ${min}`);
   };
   int("maxTurns", 1);
-  int("maxOutputTokens", 1);
+  int("maxOutputTokens", 0);
   int("seed", 0);
   int("bashTimeout", 1);
   for (const key of ["thinking", "verbose"] as const) {

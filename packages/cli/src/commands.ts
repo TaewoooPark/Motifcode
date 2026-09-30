@@ -279,16 +279,17 @@ export const COMMANDS: readonly SlashCommand[] = [
     usage: "[n|off]",
     run: (ctx, args) => {
       if (args === "") {
-        return ok("/max-tokens", [ctx.settings.maxOutputTokens === undefined ? "off (server default)" : String(ctx.settings.maxOutputTokens)]);
+        return ok("/max-tokens", [ctx.settings.maxOutputTokens ? String(ctx.settings.maxOutputTokens) : "off (no cap: the hosted endpoint then leaves reasoning unbounded)"]);
       }
       if (args === "off") {
         delete ctx.settings.maxOutputTokens;
-        return ok("/max-tokens", ["output cap removed; the server's default applies", ...saved(ctx, "maxOutputTokens", undefined)]);
+        // Saved as 0, not removed: a removed setting falls back to the default cap.
+        return ok("/max-tokens", ["output cap removed; the hosted endpoint no longer bounds reasoning", ...saved(ctx, "maxOutputTokens", 0)]);
       }
       const n = parseIntArg(args, "max-tokens", 1);
       if (typeof n === "string") return fail("/max-tokens", n);
       ctx.settings.maxOutputTokens = n;
-      return ok("/max-tokens", [`output cap set to ${n} tokens per step`, ...saved(ctx, "maxOutputTokens", n)]);
+      return ok("/max-tokens", [`output cap set to ${n} tokens per step; the hosted endpoint ends reasoning at ${Math.floor(n * 0.75)}`, ...saved(ctx, "maxOutputTokens", n)]);
     },
   },
   {

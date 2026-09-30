@@ -116,8 +116,12 @@ describe("commands", () => {
 
     await runSlash("/max-tokens 4096", ctx);
     expect(settings.maxOutputTokens).toBe(4096);
+    expect((await runSlash("/max-tokens", ctx)).lines).toEqual(["4096"]);
     await runSlash("/max-tokens off", ctx);
     expect(settings.maxOutputTokens).toBeUndefined();
+    // Saved as 0, not removed: a removed key would bring the default cap back.
+    expect(calls).toContain("persist maxOutputTokens=0");
+    expect((await runSlash("/max-tokens", ctx)).lines[0]).toMatch(/^off/);
 
     await runSlash("/seed 42", ctx);
     expect(settings.seed).toBe(42);

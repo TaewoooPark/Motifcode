@@ -186,11 +186,15 @@ describe("interactive settings dashboard", () => {
     expect(s.saved().seed).toBe(0);
     expect(s.persist).not.toHaveBeenCalledWith("seed", -1);
     s.type("/config max-tokens off\r");
-    await vi.waitFor(() => expect(s.saved().maxOutputTokens).toBeUndefined());
+    // Saved as 0: removing the key would bring back the default cap next session.
+    await vi.waitFor(() => expect(s.saved().maxOutputTokens).toBe(0));
     s.type("again\r");
     await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(2));
     expect(s.transport.seen[1]!.maxTokens).toBeUndefined();
     expect(s.transport.seen[1]!.seed).toBe(0);
+    // Shown as off, not as the 0 that holds it.
+    s.type("/config\r");
+    expect(s.value("Max output tokens")).toBe("off");
   });
 
   it("allows display changes while a task is running but blocks changes to its execution settings", async () => {

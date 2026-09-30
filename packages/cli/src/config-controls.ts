@@ -18,7 +18,7 @@ export const CONFIG_FIELDS: readonly ConfigField[] = [
   { key: "endpoint", label: "Endpoint", detail: "API base URL for the next task. The current API key will be sent to this server." },
   { key: "channel", label: "Action channel", choices: ["toolcall", "object", "raw"], detail: "Changing this restarts the conversation. object/raw are experimental and require /v1/completions." },
   { key: "maxTurns", label: "Max turns / task", detail: "Positive integer: maximum model steps per task." },
-  { key: "maxOutputTokens", label: "Max output tokens", detail: "Positive integer per model step, or off to use the server default." },
+  { key: "maxOutputTokens", label: "Max output tokens", detail: "Positive integer per model step (default 16384; the hosted endpoint ends reasoning at 3/4 of it), or off for no cap." },
   { key: "seed", label: "Sampling seed", detail: "Integer >= 0, or off. The endpoint must support seeded sampling." },
   { key: "compactAt", label: "Compact at", detail: "Context fraction from 0.1 to 1 at which automatic compaction runs." },
   { key: "theme", label: "Theme", choices: Object.keys(THEMES), detail: "Terminal color palette. Applies immediately; NO_COLOR takes precedence." },
@@ -37,9 +37,9 @@ export function parseConfigValue(field: ConfigField, raw: string): string | numb
     if (!field.choices.includes(value)) throw new Error(`Choose ${field.choices.join(" or ")}.`);
     return field.key === "thinking" || field.key === "verbose" ? value === "true" : value;
   }
-  if (field.key === "maxOutputTokens" || field.key === "seed") {
-    if (value === "off") return undefined;
-  }
+  // Off is saved as 0 for the output cap: a removed setting would fall back to the default cap.
+  if (field.key === "maxOutputTokens" && value === "off") return 0;
+  if (field.key === "seed" && value === "off") return undefined;
   if (field.key === "maxTurns" || field.key === "maxOutputTokens" || field.key === "seed") {
     const n = Number(value);
     const min = field.key === "seed" ? 0 : 1;

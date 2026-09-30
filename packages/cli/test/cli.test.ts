@@ -566,6 +566,28 @@ describe("doctor", () => {
     expect(by(checks, "model family").state).toBe("warn");
   });
 
+  it("reports the output cap, and warns when it is off", async () => {
+    // The hosted endpoint ends reasoning at 3/4 of max_tokens, and never without it.
+    const r = router({});
+    const on = await doctor({ endpoint: "http://x", model: "motif/motif-3", apiKey: "k", maxOutputTokens: 16384, fetchImpl: r.fetchImpl });
+    expect(by(on, "output cap").state).toBe("ok");
+    expect(by(on, "output cap").detail).toContain("ends reasoning at 12288");
+    const off = await doctor({ endpoint: "http://x", model: "motif/motif-3", apiKey: "k", maxOutputTokens: null, fetchImpl: r.fetchImpl });
+    expect(by(off, "output cap").state).toBe("warn");
+    expect(by(off, "output cap").fix).toContain("/max-tokens 16384");
+    // Reported before the network: a dead endpoint does not hide it.
+    const dead = await doctor({
+      endpoint: "http://x",
+      model: "motif/motif-3",
+      maxOutputTokens: null,
+      fetchImpl: (async () => { throw new TypeError("fetch failed"); }) as unknown as typeof fetch,
+    });
+    expect(by(dead, "endpoint").state).toBe("fail");
+    expect(by(dead, "output cap").state).toBe("warn");
+    const unasked = await doctor({ endpoint: "http://x", model: "motif/motif-3", apiKey: "k", fetchImpl: r.fetchImpl });
+    expect(unasked.map((c) => c.name)).not.toContain("output cap");
+  });
+
   it("warns, rather than failing, when no key is configured", async () => {
     const r = router({});
     const checks = await doctor({ endpoint: "http://x", model: "motif/motif-3", fetchImpl: r.fetchImpl });

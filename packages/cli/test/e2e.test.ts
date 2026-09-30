@@ -26,6 +26,8 @@ const MAIN = join(REPO, "packages/cli/src/main.ts");
 
 interface ChatBody {
   messages: { role: string; content?: string; tool_calls?: unknown[] }[];
+  max_tokens?: number;
+  stream?: boolean;
   tools?: { function?: { name?: string } }[];
   prompt?: string;
   model?: string;
@@ -153,6 +155,40 @@ describe("cli process end to end", () => {
     // A journal entry is not evidence: the point is that the model saw it.
     expect(first.messages).toHaveLength(2);
   }, 30_000);
+
+  it("caps each step at 16384 tokens by default, streams, and sends no cap when told off", async () => {
+    // The hosted endpoint bounds reasoning at 3/4 of max_tokens and not at all
+    // without it; a gateway ends a silent request at 600 s.
+    const script = (_turn: number, body: ChatBody) =>
+      body.messages.some((m) => m.role === "assistant")
+        ? toolCall("done", { summary: "s", confirm: true })
+        : toolCall("done", { summary: "s" });
+    server = new MockServer(script);
+    await server.start();
+    const run = async (extra: string[], env: Record<string, string> = {}): Promise<ChatBody> => {
+      const before = server.bodies.length;
+      const r = await runCli(["t", "--endpoint", server.endpoint, "--no-hero", ...extra], dir, env);
+      expect(r.code, r.stderr).toBe(0);
+      return server.bodies[before]!;
+    };
+    const first = await run([]);
+    expect(first.max_tokens).toBe(16384);
+    expect(first.stream).toBe(true);
+    // Print mode, which had neither the cap nor a stream.
+    const printed = await run(["-p"]);
+    expect(printed.max_tokens).toBe(16384);
+    expect(printed.stream).toBe(true);
+    expect(await run(["--max-output-tokens", "off"])).not.toHaveProperty("max_tokens");
+    expect((await run(["--max-output-tokens", "8192"])).max_tokens).toBe(8192);
+    // Off in a settings file is 0: a removed key is the default again.
+    const home = mkdtempSync(join(tmpdir(), "motif-home-"));
+    mkdirSync(join(home, ".motif"));
+    writeFileSync(join(home, ".motif", "settings.json"), JSON.stringify({ maxOutputTokens: 0 }));
+    expect(await run([], { HOME: home })).not.toHaveProperty("max_tokens");
+    const zero = await runCli(["t", "--endpoint", server.endpoint, "--no-hero", "--max-output-tokens", "0"], dir);
+    expect(zero.code).toBe(2);
+    expect(zero.stderr).toContain("--max-output-tokens must be an integer >= 1, or off");
+  }, 60_000);
 
   it("registers the full canonical tool list on the first request", async () => {
     server = new MockServer((turn) =>

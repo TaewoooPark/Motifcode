@@ -16,7 +16,7 @@ describe("interactive configuration values", () => {
     expect(parse("seed", "0")).toBe(0);
     expect(parse("seed", String(Number.MAX_SAFE_INTEGER))).toBe(Number.MAX_SAFE_INTEGER);
     expect(parse("seed", "off")).toBeUndefined();
-    expect(parse("max-tokens", "off")).toBeUndefined();
+    expect(parse("max-tokens", "off")).toBe(0);
     expect(() => parse("maxTurns", "off")).toThrow();
     for (const value of ["0", "-1", "1.5", "2e3", "0x10", "Infinity", "NaN", "9007199254740992", ""]) {
       expect(() => parse("max-tokens", value), value).toThrow();

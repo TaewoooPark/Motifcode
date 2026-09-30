@@ -104,6 +104,20 @@ describe("in the loop", () => {
     expect(String(after[3]!.content)).toContain("HANDOFF SUMMARY");
   });
 
+  it("sends the summary request under the session's output cap, and streamed", async () => {
+    const t = new ScriptedTransport([
+      withUsage(toolCallBody("bash", { command: "ls" }), 5000),
+      "</think>HANDOFF SUMMARY",
+      withUsage(doneBody("d"), 100),
+      withUsage(doneBody("d", { confirm: true }), 100),
+    ]);
+    const r = await runLoop({ ...base, transport: t, maxOutputTokens: 8192, compaction: { limitTokens: 4000 } });
+    expect(r.reason).toBe("done");
+    expect(t.seen[1]!.messages[t.seen[1]!.messages.length - 1]!.content).toBe(SUMMARIZATION_PROMPT);
+    expect(t.seen[1]!.maxTokens).toBe(8192);
+    expect(t.seen[1]!.onDelta).toBeTypeOf("function");
+  });
+
   it("re-appends complete runtime context after compaction instead of the compact update", async () => {
     const t = new ScriptedTransport([
       withUsage(toolCallBody("bash", { command: "ls" }), 5000),

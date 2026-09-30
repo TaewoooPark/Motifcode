@@ -1376,7 +1376,7 @@ export class Chat {
           topP: SAMPLING_DEFAULTS.top_p,
           ...(this.settings.seed !== undefined ? { seed: this.settings.seed } : {}),
           maxTurns: this.settings.maxTurns,
-          ...(this.settings.maxOutputTokens !== undefined ? { maxOutputTokens: this.settings.maxOutputTokens } : {}),
+          ...(this.settings.maxOutputTokens ? { maxOutputTokens: this.settings.maxOutputTokens } : {}),
           maxRepairs: 2,
         },
       }),
@@ -1475,7 +1475,7 @@ export class Chat {
         channel: this.settings.channel,
         channelPolicy: this.opts.channelPolicy,
         maxTurns: this.settings.maxTurns,
-        ...(this.settings.maxOutputTokens !== undefined ? { maxOutputTokens: this.settings.maxOutputTokens } : {}),
+        ...(this.settings.maxOutputTokens ? { maxOutputTokens: this.settings.maxOutputTokens } : {}),
         ...(this.settings.seed !== undefined ? { seed: this.settings.seed } : {}),
         // A conversation: a reply is an answer, and the person is the
         // confirmation a `done` would otherwise need.
@@ -1593,6 +1593,7 @@ export class Chat {
         transport,
         messages: [{ role: "system", content: this.systemFor(this.settings.channel) }, ...this.history],
         tools: this.opts.tools,
+        ...(this.settings.maxOutputTokens ? { maxTokens: this.settings.maxOutputTokens } : {}),
         ...(focus ? { focus } : {}),
       });
       this.history = buildCompactedHistory(this.tasks, summary);
@@ -1745,7 +1746,7 @@ export class Chat {
               channel: this.settings.channel,
               channelPolicy: this.opts.channelPolicy,
               maxTurns: def.maxTurns ?? 25,
-              ...(this.settings.maxOutputTokens !== undefined ? { maxOutputTokens: this.settings.maxOutputTokens } : {}),
+              ...(this.settings.maxOutputTokens ? { maxOutputTokens: this.settings.maxOutputTokens } : {}),
               ...(this.settings.seed !== undefined ? { seed: this.settings.seed } : {}),
               signal: active.abort.signal,
             });
@@ -1810,6 +1811,7 @@ export class Chat {
             model: this.settings.model,
             ...(this.apiKey !== undefined ? { apiKey: this.apiKey } : {}),
             ...(this.apiKeySource !== undefined ? { apiKeySource: this.apiKeySource } : {}),
+            maxOutputTokens: this.settings.maxOutputTokens || null,
           }),
         ).split("\n"),
       skills: () => this.opts.skills.list().map((s) => `${s.name.padEnd(16)} ${s.description}  (${s.source})`),
@@ -1856,6 +1858,8 @@ export class Chat {
   private configValue(key: keyof StoredSettings): string {
     if (key === "thinking") return String(this.screen.thinkingShown);
     if (key === "verbose") return String(this.screen.verboseOutput);
+    // Off is held as 0, so that the saved setting does not fall back to the default cap.
+    if (key === "maxOutputTokens") return this.settings.maxOutputTokens ? String(this.settings.maxOutputTokens) : "off";
     return String(this.settings[key] ?? "off");
   }
 
@@ -2059,7 +2063,7 @@ export class Chat {
       ["endpoint", s.endpoint, src("endpoint")],
       ["channel", s.channel, src("channel")],
       ["maxTurns", String(s.maxTurns), src("maxTurns")],
-      ["maxOutputTokens", s.maxOutputTokens === undefined ? "off" : String(s.maxOutputTokens), src("maxOutputTokens")],
+      ["maxOutputTokens", s.maxOutputTokens ? String(s.maxOutputTokens) : "off", src("maxOutputTokens")],
       ["seed", s.seed === undefined ? "off" : String(s.seed), src("seed")],
       ["theme", s.theme, src("theme")],
       ["thinking", String(this.screen.thinkingShown), src("thinking")],
@@ -2089,7 +2093,7 @@ export class Chat {
       `channel     ${s.channel} (policy ${this.opts.channelPolicy})`,
       `cwd         ${s.cwd}`,
       `max-turns   ${s.maxTurns}`,
-      `max-tokens  ${s.maxOutputTokens === undefined ? "off (server default)" : s.maxOutputTokens}`,
+      `max-tokens  ${s.maxOutputTokens ? s.maxOutputTokens : "off (reasoning unbounded)"}`,
       `seed        ${s.seed === undefined ? "off" : s.seed}`,
       `theme       ${s.theme}`,
       `permissions ${s.permissions}${this.alwaysAllowed.size ? ` (always: ${[...this.alwaysAllowed].join(", ")})` : ""}`,

@@ -21,6 +21,12 @@ describe("parsing", () => {
     expect(problems).toHaveLength(2);
   });
 
+  it("takes an output cap of 0, which turns the default cap off", () => {
+    expect(parseSettings(JSON.stringify({ maxOutputTokens: 0 })).values).toEqual({ maxOutputTokens: 0 });
+    expect(parseSettings(JSON.stringify({ maxOutputTokens: 8192 })).values).toEqual({ maxOutputTokens: 8192 });
+    expect(parseSettings(JSON.stringify({ maxOutputTokens: -1 })).problems[0]).toContain("maxOutputTokens");
+  });
+
   it("takes bashTimeout as whole seconds", () => {
     expect(parseSettings(JSON.stringify({ bashTimeout: 900 })).values).toEqual({ bashTimeout: 900 });
     expect(parseSettings(JSON.stringify({ bashTimeout: 0 })).problems[0]).toContain("bashTimeout");
