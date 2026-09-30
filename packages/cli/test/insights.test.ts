@@ -244,7 +244,8 @@ describe("local journal insights", () => {
     for (let i = 0; i < 201; i++) {
       const run = fixture(`run-${i}`);
       run.end("done");
-      run.save(dir);
+      const path = run.save(dir);
+      utimesSync(path, new Date(NOW), new Date(NOW));
     }
     const oversized = join(dir, "oversized.jsonl");
     const fd = openSync(oversized, "w");
