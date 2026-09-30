@@ -612,7 +612,27 @@ describe("server death", () => {
     const r = await runLoop({ ...base, transport, executor: okExecutor, emit });
     expect(r.reason).toBe("done");
     const warns = kinds(events, "notice") as Extract<LoopEvent, { type: "notice" }>[];
-    expect(warns.some((w) => w.level === "warn" && /retry 1\/3/.test(w.text))).toBe(true);
+    expect(warns.some((w) => w.level === "warn" && /retry 1\/6/.test(w.text))).toBe(true);
+  });
+
+  it("rides out a few seconds of failed name lookups on the default budget", async () => {
+    // Three retries at the backoff's opening delays were spent in under two
+    // seconds of `ENOTFOUND`; six wait up to about thirty.
+    const { emit } = collect();
+    const { TransportError } = await import("../src/transport.js");
+    const dns = () => new TransportError("cannot reach the endpoint (ENOTFOUND)", { kind: "network" });
+    const transport = new ScriptedTransport([
+      dns(), dns(), dns(), dns(), dns(), dns(),
+      doneBody("d"),
+      doneBody("d", { confirm: true }),
+    ]);
+    const r = await runLoop({ ...base, transport, executor: okExecutor, emit, random: () => 0 });
+    expect(r.reason).toBe("done");
+    expect(r.transportErrors).toBe(6);
+    const gone = new ScriptedTransport([dns()], true);
+    const r2 = await runLoop({ ...base, transport: gone, executor: okExecutor, emit, random: () => 0 });
+    expect(r2.reason).toBe("transport_error");
+    expect(r2.transportErrors).toBe(7);
   });
 
   it("gives up after the retry budget", async () => {

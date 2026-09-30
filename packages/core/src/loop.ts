@@ -130,7 +130,15 @@ export interface LoopOptions {
    * worth more in wall clock than in score.
    */
   noActionLimit?: number;
-  /** Retries for a server that died or rate-limited mid-session. */
+  /**
+   * Retries for a server that died or rate-limited mid-session.
+   *
+   * Six by default. The backoff doubles from half a second, so six attempts
+   * wait up to about 30 s in all, where three were spent in under two: a DNS
+   * lookup that failed for a few seconds (`ENOTFOUND`) ended two benchmark rows
+   * in `transport_error` with their work unfinished. A server that is really
+   * gone is given up on that much later.
+   */
   maxServerRetries?: number;
   /**
    * A reply is an answer.
@@ -341,7 +349,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
     maxTurns = 100,
     maxRepairs = 2,
     noActionLimit = 4,
-    maxServerRetries = 3,
+    maxServerRetries = 6,
     replyEnds = false,
     confirmDone = true,
     signal,
