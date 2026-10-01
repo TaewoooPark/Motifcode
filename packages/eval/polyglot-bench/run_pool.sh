@@ -1,11 +1,12 @@
 #!/bin/bash
 # usage: [REPLICATE=N] run_pool.sh <harness> <tag>
-# Claims chunk files from chunks/pool/<harness>/ (atomic mv into chunks/claimed/r<N>/<harness>/) and runs each with
-# the concurrency in chunks/conc-<harness>.txt, read afresh per chunk so it can be changed without a restart.
-# A second replicate is the same plan again: python3 make_chunks.py refills the pool, then REPLICATE=2.
+# Claims chunk files from replicate N's pool, chunks/pool/r<N>/<harness>/ (atomic mv into chunks/claimed/r<N>/<harness>/),
+# and runs each with the concurrency in chunks/conc-<harness>.txt, read afresh per chunk so it can be changed without
+# a restart. Each replicate has a pool of its own, so a scheduler that empties one can go straight on to the next
+# (REPLICATE=1 ./run_pool.sh h p1; REPLICATE=2 ./run_pool.sh h p1) while the others finish their pieces.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 H="$1"; TAG="$2"; R="${REPLICATE:-1}"
-POOL="$BENCH/chunks/pool/$H"; CLAIMED="$BENCH/chunks/claimed/r$R/$H"; mkdir -p "$POOL" "$CLAIMED"
+POOL="$BENCH/chunks/pool/r$R/$H"; CLAIMED="$BENCH/chunks/claimed/r$R/$H"; mkdir -p "$POOL" "$CLAIMED"
 while :; do
   next="$(ls "$POOL" 2>/dev/null | sort -V | head -1)"
   [ -n "$next" ] || break

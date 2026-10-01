@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Plan the campaign: a stratified order over every instance in instances.json, and pieces of N rows (default 12)
-written into chunks/pool/<harness>/ for run_pool.sh to claim. Also seeds chunks/conc-<harness>.txt.
+written into chunks/pool/r<N>/<harness>/ — one pool per replicate (REPLICATES, default 2) — for run_pool.sh to claim.
+A replicate a scheduler has already claimed pieces of is left as it is. Also seeds chunks/conc-<harness>.txt.
 
 Protocol v2 excludes nothing: Aider's 225 tasks, the six whose stubs already pass among them. An exercise that
 verify/*.json says cannot run here is a toolchain to fix, not a task to drop — it is reported, and the plan
@@ -29,11 +30,15 @@ while any(by.values()):
 pieces = [order[k:k + N] for k in range(0, len(order), N)]
 (B / "chunks").mkdir(exist_ok=True)
 (B / "chunks/excluded.json").write_text(json.dumps(unrunnable, indent=2, sort_keys=True) + "\n")
+for r in range(1, int(os.environ.get("REPLICATES", "2")) + 1):
+    for h in HARNESSES:
+        if any((B / f"chunks/claimed/r{r}" / h).glob("chunk*.txt")):
+            print(f"r{r} {h}: pieces already claimed, pool left as it is"); continue
+        pool = B / f"chunks/pool/r{r}" / h; pool.mkdir(parents=True, exist_ok=True)
+        for old in pool.glob("chunk*.txt"): old.unlink()
+        for n, p in enumerate(pieces, 1): (pool / f"chunkP{n:02d}.txt").write_text("\n".join(p) + "\n")
 for h in HARNESSES:
-    pool = B / "chunks/pool" / h; pool.mkdir(parents=True, exist_ok=True)
-    for old in pool.glob("chunk*.txt"): old.unlink()
-    for n, p in enumerate(pieces, 1): (pool / f"chunkP{n:02d}.txt").write_text("\n".join(p) + "\n")
     conc = B / f"chunks/conc-{h}.txt"
     if not conc.exists(): conc.write_text("3\n")
-print(f"{len(order)} instances -> {len(pieces)} pieces of up to {N}, in chunks/pool/<harness>/")
+print(f"{len(order)} instances -> {len(pieces)} pieces of up to {N}, in chunks/pool/r<N>/<harness>/")
 for k, v in sorted(unrunnable.items()): print(f"  EXCLUDED (cannot run here): {v}")

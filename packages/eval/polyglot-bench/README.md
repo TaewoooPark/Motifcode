@@ -66,16 +66,19 @@ source env.sh
 ./verify.sh                          # build track H; every stub fails but six, every reference passes under both rule sets
 ./install_harnesses.sh               # motifcode 0.3.0 and its feedback-round build; checks codex and opencode are on PATH
 python3 make_manifests.py            # manifests/<harness>.json for each of HARNESSES (TRACK=V for the visible-test track)
-python3 make_chunks.py 12            # stratified 12-row pieces into chunks/pool/<harness>/
-for h in $HARNESSES; do ./run_pool.sh $h p1 & done
+python3 make_chunks.py 12            # stratified 12-row pieces into chunks/pool/r<N>/<harness>/, a pool per replicate
+for h in $HARNESSES; do echo 1 > chunks/conc-$h.txt; for s in p1 p2 p3 p4; do
+  (REPLICATE=1 ./run_pool.sh $h $s; REPLICATE=2 ./run_pool.sh $h $s) &
+done; done                           # four rows in flight per harness, both replicates
 ./status.sh                          # pass@1 official/strict, pass@2, statuses, invalid rows, rows to re-run
-python3 make_chunks.py 12 && REPLICATE=2 ./run_pool.sh motifcode p1 & ...   # the second replicate
 python3 report_v2.py                 # REPORT-v2.md
 ```
 
-Concurrency per harness is read from `chunks/conc-<harness>.txt` at each piece start (default 3); keep them all
-together under about 18 streams, past which the endpoint's decode rate falls. A second scheduler for the same harness
-(`./run_pool.sh codex p2`) claims the next piece. Never edit a script here while rows are running: bash reads a script
+Rows in flight per harness are its schedulers times `chunks/conc-<harness>.txt`, the rows a scheduler runs at once
+(read at each piece start, default 3); keep them all together under about 18 streams, past which the endpoint's
+decode rate falls. A scheduler finishes a piece before it claims the next, so at more than one row per scheduler the
+slots of a piece's finished rows wait for its slowest; several schedulers at 1 keep every slot busy, and one that
+empties replicate 1's pool goes straight on to replicate 2's. Never edit a script here while rows are running: bash reads a script
 as it goes, and a row whose adapter changed under it dies without its evidence.
 
 Rows that fail for a reason fixed in advance — the safety cap, a DNS or network outage, a machine restart, an external
