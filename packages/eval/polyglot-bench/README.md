@@ -5,7 +5,7 @@ package. Anyone with an Infron API key can repeat it.
 
 | Harness (`HARNESSES` in `env.sh`) | What runs |
 |---|---|
-| `motifcode` | this repository's `motif`: 0.4.0 with the Motif-3 harness optimizations |
+| `motifcode` | this repository's `motif`, 0.5.0: 0.4.0 with the Motif-3 harness optimizations |
 | `motifcode-0.3.0` | motifcode 0.3.0 as published on npm, the build the 2026-09-20 campaign ran; its feedback round needs a backport (below) |
 | `codex` | Codex CLI on `PATH` (0.154) |
 | `opencode` | OpenCode on `PATH` (1.18) |

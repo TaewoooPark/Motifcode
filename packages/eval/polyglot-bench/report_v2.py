@@ -199,6 +199,10 @@ def quant(xs):
 
 def main():
     manifests = {h: json.load(open(B / f"manifests/{h}.json")) for h in H if (B / f"manifests/{h}.json").exists()}
+
+    def name(h):
+        """A harness as its manifest names it (motifcode 0.5.0, codex 0.154.0, ...), else its id."""
+        return ((manifests.get(h) or {}).get("harness") or {}).get("name") or h
     reps = sorted({int(p.name[1:]) for p in (B / "results").glob("r*") if p.name[1:].isdigit()})
     data = {(rep, h): load(rep, h) for rep in reps for h in H}
     data = {k: v for k, v in data.items() if v}
@@ -220,7 +224,7 @@ def main():
     for (rep, h), rows in sorted(data.items()):
         rs = list(rows.values())
         n = len(rs)
-        w(f"| r{rep} | {h} | {n} | {pct(sum(pass1(r) for r in rs), n)} | {pct(sum(pass1(r, True) for r in rs), n)} | "
+        w(f"| r{rep} | {name(h)} | {n} | {pct(sum(pass1(r) for r in rs), n)} | {pct(sum(pass1(r, True) for r in rs), n)} | "
           f"{pct(sum(pass2(r) for r in rs), n)} | {sum(1 for r in rs if r.get('invalid'))} |")
 
     w("\n## By language (pass@1 · pass@2 official / rows, first replicate present)\n")
@@ -236,7 +240,7 @@ def main():
         for l in langs:
             rs = [r for i, r in rows.items() if i.startswith(l + "/")]
             cells.append(f"{sum(pass1(r) for r in rs)} · {sum(pass2(r) for r in rs)} / {len(rs)}" if rs else "—")
-        w(f"| {h} | " + " | ".join(cells) + " |")
+        w(f"| {name(h)} | " + " | ".join(cells) + " |")
 
     w("\n## Paired comparisons (same instances, McNemar exact, bootstrap 95% CI of the difference)\n")
     w("| replicate | metric | A vs B | A only | B only | Δ pp [95% CI] | p |")
@@ -257,7 +261,7 @@ def main():
                     only_b = sum(1 for x, y in zip(da, db) if y and not x)
                     diffs = [int(x) - int(y) for x, y in zip(da, db)]
                     lo, hi = boot(diffs)
-                    w(f"| r{rep} | {metric} | {a} vs {b} ({len(keys)}) | {only_a} | {only_b} | "
+                    w(f"| r{rep} | {metric} | {name(a)} vs {name(b)} ({len(keys)}) | {only_a} | {only_b} | "
                       f"{sum(diffs) / len(diffs) * 100:+.1f} [{lo * 100:+.1f}, {hi * 100:+.1f}] | {mcnemar(only_a, only_b):.4f} |")
 
     if len(reps) >= 2:
@@ -278,7 +282,7 @@ def main():
             kappa = (po - pe) / (1 - pe) if pe < 1 else 1.0
             only1 = sum(1 for x, y in zip(a, b) if x and not y)
             only2 = sum(1 for x, y in zip(a, b) if y and not x)
-            w(f"| {h} | {n} | {po * 100:.1f}% | {kappa:.2f} | {only1} | {only2} | {mcnemar(only1, only2):.4f} |")
+            w(f"| {name(h)} | {n} | {po * 100:.1f}% | {kappa:.2f} | {only1} | {only2} | {mcnemar(only1, only2):.4f} |")
 
     w("\n## How the rows that did not pass ended (pass@1 official)\n")
     w("False completion: the agent ended the task as done and the grade failed. Protocol error: the harness ended the task "
@@ -286,7 +290,7 @@ def main():
       "(`{\"<harness> <instance>\": \"spec ambiguity\" | \"wrong answer\"}`) to split them.\n")
     for (rep, h), rows in sorted(data.items()):
         kinds = collections.Counter(failure_type(r, labels, h) for r in rows.values() if not pass1(r))
-        w(f"- r{rep} {h}: " + (", ".join(f"{k} {v}" for k, v in kinds.most_common()) or "none"))
+        w(f"- r{rep} {name(h)}: " + (", ".join(f"{k} {v}" for k, v in kinds.most_common()) or "none"))
         for r in rows.values():
             if r.get("invalid"):
                 w(f"  - invalid: {r['instanceId']} — {r['invalid']}")
@@ -301,7 +305,7 @@ def main():
         costs[(rep, h)] = per
         succ = [i for i, r in rows.items() if pass1(r)]
         wall = {i: (r.get("wallMs") or 0) / 1000 for i, r in rows.items()}
-        w(f"| r{rep} | {h} | {quant(p[0] for p in per.values())} | {quant(p[1] for p in per.values())} | "
+        w(f"| r{rep} | {name(h)} | {quant(p[0] for p in per.values())} | {quant(p[1] for p in per.values())} | "
           f"{quant(p[2] for p in per.values())} | {quant(wall.values())} | "
           f"{quant(per[i][0] for i in succ)} | {quant(per[i][2] for i in succ)} | {quant(wall[i] for i in succ)} |")
 
@@ -314,7 +318,7 @@ def main():
         for b in TOKEN_BUDGETS:
             n = sum(1 for i, r in rows.items() if pass1(r) and within(costs[(rep, h)][i][2], b))
             cells.append(f"{n / len(rows) * 100:.1f}%")
-        w(f"| r{rep} | {h} | " + " | ".join(cells) + " |")
+        w(f"| r{rep} | {name(h)} | " + " | ".join(cells) + " |")
     header = ["requests ≤ " + (str(b) if b else "∞") for b in STEP_BUDGETS]
     w("\n| replicate | harness | " + " | ".join(header) + " |")
     w("|---|---|" + "---|" * len(header))
@@ -323,7 +327,7 @@ def main():
         for b in STEP_BUDGETS:
             n = sum(1 for i, r in rows.items() if pass1(r) and within(costs[(rep, h)][i][0], b))
             cells.append(f"{n / len(rows) * 100:.1f}%")
-        w(f"| r{rep} | {h} | " + " | ".join(cells) + " |")
+        w(f"| r{rep} | {name(h)} | " + " | ".join(cells) + " |")
 
     w("\n## Harness Cards\n")
     cards = json.load(open(B / "harness-cards.json")) if (B / "harness-cards.json").exists() else {}
@@ -363,7 +367,7 @@ def main():
             keys = sorted(set(old) & set(new))
             po = [ok(old[k].get("grade")) for k in keys]
             pn = [pass1(new[k]) for k in keys]
-            w(f"| {h} | {CAMPAIGN_BUILD.get(h, '?')} | {pct(sum(po), len(keys))} | {pct(sum(pn), len(keys))} | "
+            w(f"| {name(h)} | {CAMPAIGN_BUILD.get(h, '?')} | {pct(sum(po), len(keys))} | {pct(sum(pn), len(keys))} | "
               f"{sum(1 for x, y in zip(po, pn) if x and not y)} | {sum(1 for x, y in zip(po, pn) if y and not x)} | "
               f"{pct(sum(pass1(r) for r in new.values()), len(new))} |")
     else:
@@ -372,7 +376,7 @@ def main():
         for h in H:
             new = data.get((first, h))
             if new and campaign_harness(h) in CAMPAIGN_RECORDED:
-                w(f"| {h} | {CAMPAIGN_BUILD.get(h, '?')} | {pct(CAMPAIGN_RECORDED[campaign_harness(h)], 213)} | "
+                w(f"| {name(h)} | {CAMPAIGN_BUILD.get(h, '?')} | {pct(CAMPAIGN_RECORDED[campaign_harness(h)], 213)} | "
                   f"{pct(sum(pass1(r) for r in new.values()), len(new))} |")
         w("\nSet CAMPAIGN_RESULTS to that campaign's results/ directory for the same instances side by side.")
     w("\nAider's leaderboard measures a model with Aider's own harness (track A, not run here); nothing in this report is "

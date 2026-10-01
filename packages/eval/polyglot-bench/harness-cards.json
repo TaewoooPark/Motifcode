@@ -1,6 +1,6 @@
 {
   "motifcode": {
-    "execution": "This repository's build: 0.4.0 with the Motif-3 harness optimizations. `motif \"<task>\"` one-shot, in the directory the runner gives it; a task ends only by a `done` call, which is challenged once and must be confirmed; a turn without an action is handed back; turn limit from the manifest (100); the feedback round is `motif --continue-from <journal> \"<test output>\"`.",
+    "execution": "This repository's build, 0.5.0: 0.4.0 with the Motif-3 harness optimizations. `motif \"<task>\"` one-shot, in the directory the runner gives it; a task ends only by a `done` call, which is challenged once and must be confirmed; a turn without an action is handed back; turn limit from the manifest (100); the feedback round is `motif --continue-from <journal> \"<test output>\"`.",
     "tools": "done, bash (120 s per command unless the model sets another), read, write, apply_patch, term, skill, task; no MCP servers, no web tools.",
     "context": "Frozen tool order; the model's reasoning is sent back every turn; compaction at 75% of the 262,144-token window; the output cap per step from the manifest, temperature 1.0 and top_p 0.95 sent with every request.",
     "scheduling": "One agent; subagents through the task tool.",

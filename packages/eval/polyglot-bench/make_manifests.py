@@ -9,8 +9,8 @@ ends reasoning at three quarters of it); 100 turns for motifcode, the only harne
 
 Wraps toolkit/campaign/make_manifest.py, which measures every hash it records. A motifcode build's system prompt and
 tool schemas are its own corpus spec, generated as a row sees it: an empty home, and one directory for every build
-(the system prompt names its working directory). This repository's build is named by its version and commit, since
-it is not a release; a release (motifcode-<version>) by its version, with the commit it was published from and what
+(the system prompt names its working directory). This repository's build is named by its version, with the commit in
+harness.source; a release (motifcode-<version>) by its version, with the commit it was published from and what
 install_harnesses.sh verified. For Codex and OpenCode the harness fields hash the adapter script and its pristine
 config, and the name carries the CLI version.
 """
@@ -68,7 +68,7 @@ for h in harnesses():
     source = None
     if h == "motifcode":
         spec, commit = corpus_spec(MOTIF_JS, h), sha
-        name = f"motifcode {json.loads((REPO / 'packages/cli/package.json').read_text())['version']}+{sha[:7]}"
+        name = f"motifcode {json.loads((REPO / 'packages/cli/package.json').read_text())['version']}"
         source = f"this repository at {sha}"
     elif h.startswith("motifcode-"):
         identity = B / f"harnesses/{h}/identity.json"
