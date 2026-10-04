@@ -4,7 +4,7 @@
 
 import { describe, expect, it } from "vitest";
 import { CORE_TOOLS } from "@motifcode/tools";
-import { HttpTransport, runLoop, type CompletionRequest, type Executor, type LoopEvent } from "../src/index.js";
+import { HttpTransport, TransportError, runLoop, type CompletionRequest, type Executor, type LoopEvent } from "../src/index.js";
 
 function sse(events: unknown[]): Response {
   const body = events.map((e) => `data: ${typeof e === "string" ? e : JSON.stringify(e)}\n\n`).join("");
@@ -97,6 +97,37 @@ describe("the streaming transport", () => {
     await t.complete({ messages: [{ role: "user", content: "x" }], tools: [] });
     expect((seen[0] as { stream: boolean }).stream).toBe(false);
     expect(seen[0]).not.toHaveProperty("stream_options");
+  });
+
+  it("turns an error the server writes into the stream into a retryable generation error", async () => {
+    // Infron stops a Motif-3 sample that keeps repeating itself with an error
+    // chunk, then closes with an ordinary `stop`. Read as a finished reply it
+    // is an empty answer; read as an error it can be sampled again.
+    const t = new HttpTransport({
+      endpoint: "http://x",
+      model: "m",
+      fetchImpl: (async () =>
+        sse([
+          chunk({ reasoning: "OK let me just do it. I'll read the table.txt files for the" }),
+          {
+            choices: [],
+            error: {
+              code: "repetition_detected",
+              message: "Repetition was detected in the model's output and generation was stopped. Retry, or send a `repetition_penalty` above 1.",
+              param: "",
+              type: "generation_error",
+            },
+          },
+          { choices: [{ delta: { reasoning: " _" }, finish_reason: "stop", index: 0 }], usage: { prompt_tokens: 37047, completion_tokens: 12866 } },
+          "[DONE]",
+        ])) as unknown as typeof fetch,
+    });
+    const err = await t.complete({ messages: [{ role: "user", content: "x" }], tools: [], onDelta: () => {} }).catch((e: unknown) => e);
+    expect(TransportError.is(err)).toBe(true);
+    const te = err as TransportError;
+    expect(te.kind).toBe("generation");
+    expect(te.code).toBe("repetition_detected");
+    expect(te.retryable).toBe(true);
   });
 });
 

@@ -28,6 +28,11 @@ export interface CompletionRequest {
   topP?: number;
   /** Deterministic sampling, when the server supports it. Recorded either way. */
   seed?: number;
+  /**
+   * Sent only when a generation the server stopped for repeating itself is
+   * tried again; every other request leaves sampling exactly as configured.
+   */
+  repetitionPenalty?: number;
   stop?: string[];
   signal?: AbortSignal;
   /**

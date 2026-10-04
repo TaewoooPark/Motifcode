@@ -12,11 +12,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { CORE_TOOLS } from "@motifcode/tools";
 import { ScriptedTransport, doneBody } from "@motifcode/replay";
+import { requestDigest } from "@motifcode/protocol";
 import {
   HttpTransport,
   TransportError,
   backoffDelay,
   parseRetryAfter,
+  requestBody,
   runLoop,
   sleep,
   type Executor,
@@ -367,5 +369,15 @@ describe("the loop's retry policy", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("the repetition penalty", () => {
+  it("is sent only when a request carries it, and leaves every other request's body and hash alone", () => {
+    const req = { messages: [{ role: "user" as const, content: "x" }], tools: [] };
+    expect(requestBody(req, "m")).not.toHaveProperty("repetition_penalty");
+    expect(requestBody({ ...req, repetitionPenalty: 1.05 }, "m")["repetition_penalty"]).toBe(1.05);
+    expect(requestDigest({ ...req, repetitionPenalty: undefined })).toBe(requestDigest(req));
+    expect(requestDigest({ ...req, repetitionPenalty: 1.05 })).not.toBe(requestDigest(req));
   });
 });
