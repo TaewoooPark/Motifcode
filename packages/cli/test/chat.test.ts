@@ -833,6 +833,37 @@ describe("interactive session", () => {
     expect(t.seen).toHaveLength(1);
   });
 
+  /** Whatever is written once a quit began is cleanup; it must not draw the box or the hint again. */
+  const expectNoRepaintSince = (s: ReturnType<typeof session>, before: number): void => {
+    const after = s.screen().slice(before);
+    expect(after).not.toContain("type a task");
+    expect(after).not.toContain("╭");
+    expect(after).not.toContain("auto-approve");
+  };
+
+  it("does not repaint the prompt after Ctrl-D quits at an empty prompt", async () => {
+    const s = session(new GateTransport([]));
+    open.push(s);
+    // The live prompt is on screen before the keypress
+    expect(s.screen()).toContain("type a task");
+    const before = s.screen().length;
+    s.type("\x04");
+    expect(await s.finished).toBe(0);
+    expectNoRepaintSince(s, before);
+  });
+
+  it("does not repaint the prompt after a second Ctrl-C quits at an empty prompt", async () => {
+    const s = session(new GateTransport([]));
+    open.push(s);
+    // The first Ctrl-C only arms the quit and repaints the prompt with a hint
+    s.type("\x03");
+    await vi.waitFor(() => expect(s.screen()).toContain("ctrl-c again to quit"));
+    const before = s.screen().length;
+    s.type("\x03");
+    expect(await s.finished).toBe(0);
+    expectNoRepaintSince(s, before);
+  });
+
   it("asks before a command runs, and a yes runs it", async () => {
     const t = new GateTransport([toolCallBody("bash", { command: "echo allowed-output" }), ...reply("done")]);
     const s = session(t, { settings: { model: "m", endpoint: "https://x", channel: "toolcall", maxTurns: 20, cwd: mkdtempSync(join(tmpdir(), "motif-chat-")), theme: "motif", compactAt: 0.75, permissions: "ask" } });
