@@ -86,7 +86,7 @@ import { expandSkillInput } from "./skill-input.js";
 import { localMcpAuthTarget } from "./mcp-connect.js";
 import { findCommand, parseSlash } from "./commands.js";
 
-const VERSION = "0.4.0";
+const VERSION = "0.4.1";
 
 interface Args {
   command: string;
