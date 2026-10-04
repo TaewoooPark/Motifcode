@@ -94,6 +94,36 @@ describe("editing", () => {
     expect(c.text).toBe("two\nlines");
   });
 
+  // xterm.js turns a clipboard's line breaks into CR before bracketed paste, so a
+  // raw CR (or CRLF) reaches the composer and would overwrite rows when drawn.
+  it("normalizes CR and CRLF line endings in a paste to the same draft as LF", () => {
+    const lines = ["첫째 줄 한글🙂", "둘째 줄 café 漢字", "셋째 줄 cursor"];
+    const expected = lines.join("\n");
+    for (const eol of ["\n", "\r\n", "\r"]) {
+      const c = new Composer();
+      c.paste(lines.join(eol));
+      expect(c.text).toBe(expected);
+      expect(c.cursor).toBe([...expected].length);
+      c.left();
+      expect(c.cursor).toBe([...expected].length - 1);
+      expect(c.submit()).toBe(expected);
+    }
+    const mixed = new Composer();
+    mixed.paste("a\r\nb\rc\nd");
+    expect(mixed.text).toBe("a\nb\nc\nd");
+    expect(mixed.text).not.toContain("\r");
+  });
+
+  it("counts a long CR or CRLF paste in normalized lines and sends the normalized text", () => {
+    const lines = Array.from({ length: 30 }, (_, i) => `line ${i}`);
+    for (const eol of ["\n", "\r\n", "\r"]) {
+      const c = new Composer();
+      c.paste(lines.join(eol));
+      expect(c.text).toBe("[paste #1: 30 lines] ");
+      expect(c.submit()).toBe(lines.join("\n"));
+    }
+  });
+
   it("trims trailing whitespace on submit and skips repeats in history", () => {
     const c = new Composer();
     c.insert("task  \n");
@@ -226,6 +256,15 @@ describe("pasted prompt history", () => {
   it("recalls the expanded paste after its placeholder map is cleared", () => {
     const c = new Composer();
     c.paste(block);
+    expect(c.submit()).toBe(block);
+    expect(c.up()).toBe(true);
+    expect(c.submit()).toBe(block);
+    expect(c.historyEntries).toEqual([block]);
+  });
+
+  it("recalls a CRLF paste as the same normalized text", () => {
+    const c = new Composer();
+    c.paste(block.replace(/\n/g, "\r\n"));
     expect(c.submit()).toBe(block);
     expect(c.up()).toBe(true);
     expect(c.submit()).toBe(block);
