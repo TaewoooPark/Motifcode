@@ -889,7 +889,23 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
 
     let anyFailure = false;
     let combinedOutput = "";
-    for (const call of calls) {
+    for (const [index, call] of calls.entries()) {
+      if (signal?.aborted) {
+        // The assistant already advertised the entire batch. Close each unused
+        // call explicitly so a resumed transcript has no dangling tool calls,
+        // without emitting execution events or durable intent for skipped work.
+        for (const skipped of calls.slice(index)) {
+          session.appendAll(codec.serializeObservation({
+            callId: skipped.id,
+            name: skipped.name,
+            arguments: skipped.arguments,
+            output: "Tool call not executed: the session was cancelled before this call started.",
+            ok: false,
+          }));
+        }
+        checkpoint();
+        return finish("aborted");
+      }
       emit({ type: "tool_start", call });
       // Durable intent, written before anything runs. Without it, a crash mid
       // `apply_patch` is indistinguishable from a crash before it.
@@ -920,6 +936,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
       checkpoint();
     }
 
+    if (signal?.aborted) return finish("aborted");
     const verdict = guard.observe(LoopGuard.signature(calls), combinedOutput);
     if (verdict.tripped) {
       emit({ type: "loop_detected", signature: verdict.signature.slice(0, 120), repeats: verdict.repeats });
