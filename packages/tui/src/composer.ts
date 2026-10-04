@@ -78,8 +78,12 @@ export class Composer {
    * Claude Code's behaviour, and for the same reason: a pasted stack trace
    * or file turns the composer into a wall the person cannot see their own
    * words in. The text goes to the model whole when the draft is sent.
+   *
+   * Line breaks are normalized to LF first: terminals send a pasted break as
+   * CR (xterm.js) or CRLF, and a raw CR would overwrite rows when drawn.
    */
-  paste(text: string): void {
+  paste(raw: string): void {
+    const text = raw.replace(/\r\n?/g, "\n");
     const lines = text.split("\n").length;
     if (lines <= PASTE_COLLAPSE_LINES && text.length <= PASTE_COLLAPSE_CHARS) {
       this.insert(text);
