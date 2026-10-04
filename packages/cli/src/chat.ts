@@ -478,7 +478,8 @@ export class Chat {
         break;
     }
     if (key.type !== "ctrl" || key.key !== "c") this.ctrlCArmedAt = 0;
-    this.refresh();
+    // A quit from the keypress (Ctrl-D, a second Ctrl-C) has already cleaned the terminal up
+    if (!this.quitting) this.refresh();
   }
 
   private onControl(letter: string): void {
