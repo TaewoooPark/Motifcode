@@ -28,6 +28,10 @@ import { dirname, join, resolve } from "node:path";
 import { AgentRegistry, AgentScheduler, concurrencyFor } from "@motifcode/agents";
 import {
   HttpTransport,
+  PROVIDERS,
+  providerForEndpoint,
+  apiKeyEnvForEndpoint,
+  type ProviderId,
   buildCompactedHistory,
   defaultEnvPath,
   forgetApiKey,
@@ -87,6 +91,10 @@ export interface ChatOptions {
   channelPolicy: ChannelPolicy;
   apiKey?: string;
   apiKeySource?: string;
+  /** Credentials captured before the CLI removes secrets from its environment. */
+  providerCredentials?: Partial<Record<ProviderId, { apiKey?: string; source?: string }>>;
+  /** Offer provider selection on an unconfigured first run. */
+  chooseProvider?: boolean;
   skills: SkillRegistry;
   agents: AgentRegistry;
   hooks: HookConfig;
@@ -180,7 +188,7 @@ const CTRL_C_WINDOW_MS = 2000;
  * `/channel` would leave the next task reading a transcript in the wrong
  * format. Waiting, or interrupting, is the honest answer.
  */
-const BLOCKED_WHILE_RUNNING = new Set(["new", "clear", "channel", "resume", "cwd", "compact"]);
+const BLOCKED_WHILE_RUNNING = new Set(["new", "clear", "channel", "resume", "cwd", "compact", "provider"]);
 
 const MENU_ITEMS: MenuItem[] = COMMANDS.map((c) => ({
   name: c.name,
@@ -232,6 +240,8 @@ export class Chat {
   private apiKey: string | undefined;
   private apiKeySource: string | undefined;
   private apiKeyVerified = false;
+  private requireKey: boolean;
+  private readonly providerCredentials: Partial<Record<ProviderId, { apiKey?: string; source?: string }>>;
   private authGeneration = 0;
   private verifyingLogin: number | null = null;
   private readonly billing: InfronBilling;
@@ -268,6 +278,9 @@ export class Chat {
     this.projectNotes = opts.projectNotes;
     this.apiKey = opts.apiKey;
     this.apiKeySource = opts.apiKeySource;
+    this.requireKey = opts.requireKey === true;
+    this.providerCredentials = { ...opts.providerCredentials };
+    this.cacheProviderCredential();
     this.now = opts.now ?? (() => Date.now());
     this.billing = new InfronBilling({
       fetchImpl: opts.balanceFetch,
@@ -317,7 +330,7 @@ export class Chat {
       }
       this.screen.setLabel(this.settings.model);
       this.screen.setTitle(`motif · ${this.settings.cwd.split("/").pop() ?? this.settings.cwd}`);
-      if (this.apiKey === undefined && !this.opts.requireKey) {
+      if (this.apiKey === undefined && !this.requireKey && !this.opts.chooseProvider) {
         this.screen.append({
           kind: "notice",
           level: "warn",
@@ -332,6 +345,13 @@ export class Chat {
 
   /** What happens before the first prompt is free: the login, the resumed conversation, the first task. */
   private async start(): Promise<void> {
+    if (this.opts.chooseProvider) {
+      const choice = await this.chooseProvider();
+      if (this.quitting) return;
+      if (choice === null) return;
+      const result = this.switchProvider(choice);
+      if (result.error) { this.screen.append({ kind: "notice", level: "error", text: result.lines.join(" ") }); this.refresh(); return; }
+    }
     void this.billing.refresh();
     if (this.needsLogin) {
       const lines = await this.login("startup");
@@ -672,7 +692,7 @@ export class Chat {
   }
 
   private get needsLogin(): boolean {
-    return this.opts.requireKey === true && this.apiKey === undefined;
+    return this.requireKey && this.apiKey === undefined;
   }
 
   /** Take over the prompt for one question; resolves with the index chosen, or null on esc. */
@@ -821,15 +841,22 @@ export class Chat {
     this.invalidateAuthentication();
     const generation = this.authGeneration;
     const endpoint = this.settings.endpoint;
+    const model = this.settings.model;
+    const provider = providerForEndpoint(endpoint) ?? "infron";
+    const label = PROVIDERS[provider].label;
+    const keyEnv = apiKeyEnvForEndpoint(endpoint);
     const title =
-      reason === "command" ? "Paste your Infron API key" : reason === "task" ? "An API key is needed before the task can run" : "Paste your Infron API key to get started";
+      reason === "command" ? `Paste your ${label} API key` : reason === "task" ? "An API key is needed before the task can run" : `Paste your ${label} API key to get started`;
     const cancelHint = reason === "command" ? "enter to check and save · esc to cancel" : "enter to check and save · esc to skip for now";
     for (;;) {
-      const raw = await this.askSecret(title, loginLines(this.envPath), "key › ", cancelHint);
+      const raw = await this.askSecret(title, loginLines(this.envPath, undefined, provider), "key › ", cancelHint);
       if (raw === null) {
         return reason === "command"
           ? ["login cancelled"]
-          : [`no key entered; /login when you have one, or put MOTIF_API_KEY in ${this.envPath}`];
+          : [`no key entered; /login when you have one, or put ${keyEnv} in ${this.envPath}`];
+      }
+      if (this.quitting || generation !== this.authGeneration || endpoint !== this.settings.endpoint) {
+        return ["login cancelled because the session or endpoint changed; /login to try again"];
       }
       const key = normaliseKeyInput(raw);
       if (key === "") continue;
@@ -837,7 +864,7 @@ export class Chat {
       this.screen.setActivity("Checking the key…");
       let result: VerifyResult;
       try {
-        result = await (this.opts.verifyKey ?? ((k: string) => verifyApiKey({ endpoint: this.settings.endpoint, model: this.settings.model, apiKey: k })))(key);
+        result = await (this.opts.verifyKey ?? ((k: string) => verifyApiKey({ endpoint, model, apiKey: k })))(key);
       } finally {
         if (this.verifyingLogin === generation) {
           this.verifyingLogin = null;
@@ -855,10 +882,12 @@ export class Chat {
       this.apiKeyVerified = true;
       this.syncBilling();
       try {
-        const path = saveApiKey(key, this.envPath);
-        this.apiKeySource = `${path} (MOTIF_API_KEY)`;
+        const path = saveApiKey(key, this.envPath, provider);
+        this.apiKeySource = `${path} (${keyEnv})`;
+        this.cacheProviderCredential();
       } catch (err) {
         this.apiKeySource = "this session only";
+        this.cacheProviderCredential();
         return [`the key works, but ${this.envPath} could not be written: ${err instanceof Error ? err.message : String(err)}`, "it is kept for this session only"];
       }
       return [`signed in · the key is saved to ${this.envPath}`];
@@ -869,9 +898,10 @@ export class Chat {
     this.invalidateAuthentication();
     const source = this.apiKeySource;
     const had = this.apiKey !== undefined;
-    const removed = forgetApiKey(this.envPath);
+    const removed = forgetApiKey(this.envPath, providerForEndpoint(this.settings.endpoint) ?? "infron");
     this.apiKey = undefined;
     this.apiKeySource = undefined;
+    this.cacheProviderCredential();
     this.apiKeyVerified = false;
     this.billing.configure(this.settings.endpoint);
     if (!had && !removed) return ["no key is set"];
@@ -1260,9 +1290,7 @@ export class Chat {
         this.refresh();
         return;
       }
-      const previousEndpoint = this.settings.endpoint;
       const out = await runSlash(text, this.context());
-      if (previousEndpoint !== this.settings.endpoint) { this.apiKeyVerified = false; this.invalidateAuthentication(); }
       // /endpoint and /login share the same credential-bound billing state.
       this.syncBilling();
       if (!this.quitting && !out.silent && out.lines.length > 0) {
@@ -1783,6 +1811,16 @@ export class Chat {
       config: () => this.configLines(),
       openPanel: (tab) => this.openPanel(tab),
       configure: (args) => this.configure(args),
+      provider: (args) => this.providerCommand(args),
+      setEndpoint: (endpoint) => {
+        if (endpoint === this.settings.endpoint) return;
+        const previous = this.settings.endpoint;
+        this.settings.endpoint = endpoint;
+        this.rebindProviderCredential(previous);
+        this.apiKeyVerified = false;
+        this.invalidateAuthentication();
+        this.syncBilling();
+      },
       stats: () => statsRows(this.insights()).flatMap((r) => [`${r.label}  ${r.value ?? ""}`, ...(r.detail ? [`  ${r.detail}`] : [])]),
       usage: () => [...balanceRows(this.billing.state), ...usageRows(this.insights())].flatMap((r) => [`${r.label}  ${r.value ?? ""}`, ...(r.detail ? [`  ${r.detail}`] : [])]),
       themes: () => Object.entries(THEMES).map(([name, t]) => `${name.padEnd(10)} ${t.description}`),
@@ -1843,7 +1881,8 @@ export class Chat {
     };
   }
 
-  private settingSource(key: keyof StoredSettings): string {
+  private settingSource(key: ConfigField["key"]): string {
+    if (key === "provider") return this.settingSource("endpoint");
     return this.changedSettings.get(key) ?? this.opts.settingSources?.[key] ?? this.opts.settingsInfo?.sources[key] ?? "default";
   }
 
@@ -1853,7 +1892,8 @@ export class Chat {
     return path;
   }
 
-  private configValue(key: keyof StoredSettings): string {
+  private configValue(key: ConfigField["key"]): string {
+    if (key === "provider") return providerForEndpoint(this.settings.endpoint) ?? "custom";
     if (key === "thinking") return String(this.screen.thinkingShown);
     if (key === "verbose") return String(this.screen.verboseOutput);
     return String(this.settings[key] ?? "off");
@@ -1870,18 +1910,20 @@ export class Chat {
     const fail = (message: string): CommandOutput => ({ title: "/config", error: true, lines: [message] });
     // A running loop captured its budgets/transport at task start. Avoid a UI
     // that claims a new value controls that in-flight request.
-    if ((this.active || this.shellBusy || this.compacting) && !["thinking", "verbose", "theme"].includes(field.key)) {
+    if ((this.active || this.settlingTask || this.shellBusy || this.compacting) && !["thinking", "verbose", "theme"].includes(field.key)) {
       return fail("Wait for the running task to finish, or close this panel and press Esc to interrupt it.");
     }
     let value: ReturnType<typeof parseConfigValue>;
     let path: string | null;
     try {
       value = parseConfigValue(field, raw);
+      if (field.key === "provider") return this.switchProvider(value as ProviderId);
       // Save first: a failed write must not partially apply the new setting.
       path = this.rememberSetting(field.key, value);
     } catch (err) {
       return fail(err instanceof Error ? err.message : String(err));
     }
+    const previousEndpoint = this.settings.endpoint;
     switch (field.key) {
       case "thinking":
         if (this.screen.thinkingShown !== value) this.screen.toggleThinking();
@@ -1905,7 +1947,7 @@ export class Chat {
         (this.settings as unknown as Record<string, unknown>)[field.key] = value;
         break;
     }
-    if (field.key === "endpoint") { this.apiKeyVerified = false; this.invalidateAuthentication(); this.syncBilling(); }
+    if (field.key === "endpoint") { this.rebindProviderCredential(previousEndpoint); this.apiKeyVerified = false; this.invalidateAuthentication(); this.syncBilling(); }
     const suffix = field.key === "channel" ? " Conversation restarted when the channel changed." : "";
     return {
       title: "/config",
@@ -1914,6 +1956,75 @@ export class Chat {
         ...(path ? [`Saved to ${path}. Startup flags, environment and trusted project settings can override this default next time.`] : []),
       ],
     };
+  }
+
+  private get providerLabel(): string {
+    const provider = providerForEndpoint(this.settings.endpoint);
+    return provider ? PROVIDERS[provider].label : "Custom endpoint";
+  }
+
+  private cacheProviderCredential(): void {
+    const provider = providerForEndpoint(this.settings.endpoint);
+    if (provider) this.providerCredentials[provider] = { apiKey: this.apiKey, source: this.apiKeySource };
+  }
+
+  private rebindProviderCredential(previousEndpoint: string): void {
+    const previous = providerForEndpoint(previousEndpoint);
+    const next = providerForEndpoint(this.settings.endpoint);
+    // Preserve custom endpoint overrides; never carry a credential across the
+    // Morphfactory boundary, including when changing the URL by hand.
+    if (previous === next) return;
+    if (next) this.requireKey = true;
+    if (previous !== "morphfactory" && next !== "morphfactory" && !(next && this.apiKey === undefined)) return;
+    if (previous) this.providerCredentials[previous] = { apiKey: this.apiKey, source: this.apiKeySource };
+    const credential = next ? this.providerCredentials[next] : undefined;
+    this.apiKey = credential?.apiKey;
+    this.apiKeySource = credential?.source;
+    this.requireKey = next !== undefined;
+  }
+
+  private chooseProvider(): Promise<ProviderId | null> {
+    const providers = Object.keys(PROVIDERS) as ProviderId[];
+    return this.askChoice("Choose a provider", ["Both providers serve Motif-3. Each uses its own API key.", "Change this later with /provider or /config provider."], providers.map((id, i) => `${i + 1}. ${PROVIDERS[id].label}`), true)
+      .then((choice) => choice === null ? null : providers[choice]!);
+  }
+
+  private switchProvider(provider: ProviderId): CommandOutput {
+    const selected = PROVIDERS[provider];
+    try {
+      this.rememberSetting("model", selected.model);
+      this.rememberSetting("endpoint", selected.endpoint);
+    } catch (err) {
+      return { title: "/provider", error: true, lines: [err instanceof Error ? err.message : String(err)] };
+    }
+    this.cacheProviderCredential();
+    this.invalidateAuthentication();
+    this.settings.endpoint = selected.endpoint;
+    this.settings.model = selected.model;
+    this.apiKey = this.providerCredentials[provider]?.apiKey;
+    this.apiKeySource = this.providerCredentials[provider]?.source;
+    this.apiKeyVerified = false;
+    this.requireKey = true;
+    this.screen.setLabel(selected.model);
+    this.syncBilling();
+    return { title: "/provider", lines: [
+      `Provider: ${selected.label} · ${this.apiKey ? "API key loaded" : "no API key; use /login"}.`,
+      `${selected.endpoint} · ${selected.model}`,
+      "Saved defaults can be overridden by startup flags, environment or trusted project settings.",
+    ] };
+  }
+
+  private async providerCommand(args: string): Promise<CommandOutput> {
+    if (this.active || this.settlingTask || this.shellBusy || this.compacting) return { title: "/provider", error: true, lines: ["Wait for the running task to finish before changing provider."] };
+    if (args && !Object.hasOwn(PROVIDERS, args)) return { title: "/provider", error: true, lines: ["Choose infron or morphfactory."] };
+    const provider = args ? args as ProviderId : await this.chooseProvider();
+    if (provider === null || this.quitting) return { title: "/provider", lines: ["Provider selection cancelled."] };
+    const result = this.switchProvider(provider);
+    if (!result.error && this.needsLogin) {
+      result.lines.push(...await this.login("command"));
+      if (this.apiKey && providerForEndpoint(this.settings.endpoint) === provider) result.lines[0] = `Provider: ${PROVIDERS[provider].label} · API key loaded.`;
+    }
+    return result;
   }
 
   private invalidateAuthentication(): void {
@@ -1952,10 +2063,11 @@ export class Chat {
   private panelView(): PanelView {
     const panel = this.panel!;
     const rows: PanelView["rows"] = panel.tab === "config"
-      ? CONFIG_FIELDS.map((f) => ({ label: f.label, value: this.configValue(f.key), detail: `${f.detail}${f.key === "permissions" && this.alwaysAllowed.size ? ` Already allowed this session: ${[...this.alwaysAllowed].join(", ")}.` : ""} Source: ${this.settingSource(f.key)}.` }))
+      ? CONFIG_FIELDS.map((f) => ({ label: f.label, value: f.key === "provider" ? this.providerLabel : this.configValue(f.key), detail: `${f.detail}${f.key === "permissions" && this.alwaysAllowed.size ? ` Already allowed this session: ${[...this.alwaysAllowed].join(", ")}.` : ""} Source: ${this.settingSource(f.key)}.` }))
       : panel.tab === "status" ? [
         { label: "Version", value: this.opts.version },
         { label: "State", value: this.active ? "Running" : this.shellBusy ? "Shell running" : this.compacting ? "Compacting" : "Ready", tone: "good" },
+        { label: "Provider", value: this.providerLabel },
         { label: "Model", value: this.settings.model },
         { label: "Endpoint", value: this.settings.endpoint },
         { label: "Authentication", value: this.apiKey ? this.apiKeyVerified ? "Verified this session" : "API key loaded" : "No API key · /login" },
@@ -2055,6 +2167,7 @@ export class Chat {
     const s = this.settings;
     const src = (key: keyof LoadedSettings["sources"]): string => this.settingSource(key);
     const rows: [string, string, string][] = [
+      ["provider", this.providerLabel, src("endpoint")],
       ["model", s.model, src("model")],
       ["endpoint", s.endpoint, src("endpoint")],
       ["channel", s.channel, src("channel")],
@@ -2084,6 +2197,7 @@ export class Chat {
     const t = this.totals;
     const fmt = (n: number): string => n.toLocaleString("en-US");
     return [
+      `provider    ${this.providerLabel}`,
       `model       ${s.model}`,
       `endpoint    ${s.endpoint}`,
       `channel     ${s.channel} (policy ${this.opts.channelPolicy})`,

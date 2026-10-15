@@ -3,7 +3,7 @@ import { THEMES } from "@motifcode/tui";
 import type { StoredSettings } from "./settings.js";
 
 export interface ConfigField {
-  key: keyof StoredSettings;
+  key: keyof StoredSettings | "provider";
   label: string;
   detail: string;
   choices?: readonly string[];
@@ -21,6 +21,7 @@ export const CONFIG_FIELDS: readonly ConfigField[] = [
   { key: "maxOutputTokens", label: "Max output tokens", detail: "Positive integer per model step, or off to use the server default." },
   { key: "seed", label: "Sampling seed", detail: "Integer >= 0, or off. The endpoint must support seeded sampling." },
   { key: "compactAt", label: "Compact at", detail: "Context fraction from 0.1 to 1 at which automatic compaction runs." },
+  { key: "provider", label: "Provider", choices: ["infron", "morphfactory"], detail: "Infron or Morphfactory (BETA). Switches endpoint, model and the provider’s own API key; /login adds a missing key." },
   { key: "theme", label: "Theme", choices: Object.keys(THEMES), detail: "Terminal color palette. Applies immediately; NO_COLOR takes precedence." },
 ];
 

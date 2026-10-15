@@ -14,6 +14,10 @@ import { AgentRegistry, AgentScheduler, BUILTIN_AGENTS, concurrencyFor, parseAge
 import {
   DEFAULT_ENDPOINT,
   DEFAULT_MODEL,
+  PROVIDERS,
+  apiKeyEnvForEndpoint,
+  providerForEndpoint,
+  type ProviderId,
   HttpTransport,
   defaultDotenvPaths,
   defaultEnvPath,
@@ -68,7 +72,7 @@ import { balanceRows } from "./billing-view.js";
 import { describePlugins, loadPlugins, type LoadedPlugins } from "./plugins.js";
 import { loadSettings, saveUserSetting } from "./settings.js";
 import { commandOnPath, ranFromNpx } from "./install.js";
-import { KEY_PAGE, normaliseKeyInput, readSecret, verifyApiKey } from "./login.js";
+import { normaliseKeyInput, readSecret, verifyApiKey } from "./login.js";
 import { doctor, formatChecks, worstState } from "./doctor.js";
 import { ToolExecutor } from "./executor.js";
 import { policyForAgent } from "./policy.js";
@@ -386,7 +390,7 @@ const HELP = `motif ${VERSION} — a coding agent built for Motif-3 (unofficial;
   motif                     open the interactive session (a terminal is required)
   motif "<task>"            run one task and exit; add --interactive to stay
   motif -p "<question>"     print only the final reply, for scripts and pipes (also --print)
-  motif login               paste an Infron API key; it is checked and saved to ~/.motif/.env
+  motif login               paste the selected provider's API key; it is checked and saved to ~/.motif/.env
   motif logout              remove the saved key
   motif doctor              check the endpoint, the credentials and what the server produces
   motif sessions            list recorded sessions
@@ -414,6 +418,7 @@ const HELP = `motif ${VERSION} — a coding agent built for Motif-3 (unofficial;
   motif corpus-render       render a corpus JSONL to prompt text, as the harness would
 
 Flags
+  --provider <id>           infron | morphfactory (BETA); sets endpoint and model defaults
   --endpoint <url>          model server (default ${DEFAULT_ENDPOINT}; a trailing /v1 is accepted)
   --model <name>            model id to request (default ${DEFAULT_MODEL})
   --env-file <path>         read MOTIF_* settings from this file first
@@ -442,9 +447,11 @@ distil flags
   --include-children        also export subagent scopes
 
 Connection
-  The first session asks for an Infron API key, checks it against the endpoint
-  and saves it to ~/.motif/.env; 'motif login' does the same outside a session.
-  MOTIF_API_KEY, MOTIF_ENDPOINT and MOTIF_MODEL are read from the environment,
+  The first session offers Infron or Morphfactory (BETA), checks your API key
+  and saves it to ~/.motif/.env; use /provider to switch inside a session.
+  'motif login --provider morphfactory' signs in outside a session.
+  MOTIF_API_KEY (Infron), MOTIF_MORPHFACTORY_API_KEY, MOTIF_ENDPOINT and
+  MOTIF_MODEL are read from the environment,
   then from ./.env, then from ~/.motif/.env — MOTIF_* keys only, and never into
   the environment. The key is sent as a bearer token and is withheld from every
   command the agent runs.
@@ -476,7 +483,7 @@ because the transcript formats are not interchangeable.
 
 /** The hosted endpoint refuses unauthenticated requests; a local server may not need a key at all. */
 function keyRequired(endpoint: string): boolean {
-  return endpoint === DEFAULT_ENDPOINT;
+  return providerForEndpoint(endpoint) !== undefined;
 }
 
 /**
@@ -486,9 +493,10 @@ function keyRequired(endpoint: string): boolean {
  */
 async function loginAtTerminal(endpoint: string, model: string): Promise<string | null> {
   const path = defaultEnvPath();
+  const provider = providerForEndpoint(endpoint) ?? "infron";
   if (process.stdin.isTTY) {
     process.stdout.write(
-      `Paste your Infron API key. Get one at ${KEY_PAGE} — Motif-3 is free there through September 2026.\n` +
+      `Paste your ${PROVIDERS[provider].label} API key. Get one at ${PROVIDERS[provider].keyPage}.\n` +
         `It is checked against ${endpoint}, then saved to ${path} (readable only by you).\n`,
     );
   }
@@ -503,7 +511,7 @@ async function loginAtTerminal(endpoint: string, model: string): Promise<string 
     process.stderr.write(`${result.reason}\n`);
     return null;
   }
-  saveApiKey(key, path);
+  saveApiKey(key, path, provider);
   process.stdout.write(`signed in · the key is saved to ${path}\n`);
   const billing = new InfronBilling();
   try {
@@ -541,12 +549,17 @@ async function main(): Promise<number> {
     projectTrusted: (content) => projectTrusted(cwd, content, args.flags["trust-project-hooks"]),
     warn: (m) => process.stderr.write(`${m}\n`),
   });
+  const provider = args.flags["provider"] === undefined
+    ? undefined
+    : flagEnum(args.flags, "provider", ["infron", "morphfactory"] as const, "infron");
+  const dotenvPaths = [...(envFile ? [envFile] : []), ...defaultDotenvPaths()];
   const connection = resolveEndpointConfig({
     flags: {
+      ...(provider ? { endpoint: PROVIDERS[provider].endpoint, model: PROVIDERS[provider].model } : {}),
       ...(typeof args.flags["endpoint"] === "string" ? { endpoint: args.flags["endpoint"] } : {}),
       ...(typeof args.flags["model"] === "string" ? { model: args.flags["model"] } : {}),
     },
-    dotenvPaths: [...(envFile ? [envFile] : []), ...defaultDotenvPaths()],
+    dotenvPaths,
     defaults: {
       ...(stored.values.endpoint !== undefined ? { endpoint: stored.values.endpoint } : {}),
       ...(stored.values.model !== undefined ? { model: stored.values.model } : {}),
@@ -560,6 +573,14 @@ async function main(): Promise<number> {
   const compactAt = stored.values.compactAt ?? 0.75;
   const permissions = flagEnum(args.flags, "permissions", ["ask", "auto"] as const, stored.values.permissions ?? "ask");
   const { endpoint, model, apiKey } = connection;
+  const providerCredentials: Partial<Record<ProviderId, { apiKey?: string; source?: string }>> = {};
+  for (const id of Object.keys(PROVIDERS) as ProviderId[]) {
+    const credentials = resolveEndpointConfig({ flags: { endpoint: PROVIDERS[id].endpoint }, dotenvPaths });
+    providerCredentials[id] = {
+      ...(credentials.apiKey !== undefined ? { apiKey: credentials.apiKey } : {}),
+      ...(credentials.sources.apiKey !== undefined ? { source: credentials.sources.apiKey } : {}),
+    };
+  }
   // Read once, then gone: every command the agent runs inherits this process's
   // environment, and a credential in it is one `env` away from a tool result.
   withholdSecrets(process.env);
@@ -685,7 +706,7 @@ async function main(): Promise<number> {
 
     case "logout": {
       const path = defaultEnvPath();
-      process.stdout.write(forgetApiKey(path) ? `the key was removed from ${path}\n` : `no key in ${path}\n`);
+      process.stdout.write(forgetApiKey(path, providerForEndpoint(endpoint) ?? "infron") ? `the key was removed from ${path}\n` : `no key in ${path}\n`);
       return 0;
     }
 
@@ -727,7 +748,9 @@ async function main(): Promise<number> {
     }
 
     case "config": {
+      const selectedProvider = providerForEndpoint(endpoint);
       const rows: [string, string, string][] = [
+        ["provider", selectedProvider ? PROVIDERS[selectedProvider].label : "custom", connection.sources.endpoint],
         ["model", model, connection.sources.model],
         ["endpoint", endpoint, connection.sources.endpoint],
         ["channel", stored.values.channel ?? "toolcall", stored.sources.channel ?? "default"],
@@ -1005,6 +1028,8 @@ async function main(): Promise<number> {
       ...(apiKey !== undefined ? { apiKey } : {}),
       ...(connection.sources.apiKey !== undefined ? { apiKeySource: connection.sources.apiKey } : {}),
       requireKey: keyRequired(endpoint),
+      chooseProvider: apiKey === undefined && connection.sources.endpoint === "default" && stored.values.endpoint === undefined,
+      providerCredentials,
       envPath: defaultEnvPath(),
       offerInstall: ranFromNpx(process.argv[1]) && !commandOnPath("motif"),
       skills,
@@ -1057,7 +1082,7 @@ async function main(): Promise<number> {
   let sessionKey = apiKey;
   if (sessionKey === undefined && keyRequired(endpoint)) {
     if (!tty) {
-      process.stderr.write(`no API key: run 'motif login', or put MOTIF_API_KEY in ${defaultEnvPath()}\n`);
+      process.stderr.write(`no API key: run 'motif login${providerForEndpoint(endpoint) === "morphfactory" ? " --provider morphfactory" : ""}', or put ${apiKeyEnvForEndpoint(endpoint)} in ${defaultEnvPath()}\n`);
       return 2;
     }
     const key = await loginAtTerminal(endpoint, model);

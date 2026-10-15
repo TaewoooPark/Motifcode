@@ -4,7 +4,7 @@
 
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
-import { normaliseKeyInput, readSecret, verifyApiKey } from "../src/login.js";
+import { loginLines, normaliseKeyInput, readSecret, verifyApiKey } from "../src/login.js";
 
 function fakeFetch(status: number, body: unknown): typeof fetch {
   return (async () =>
@@ -60,6 +60,7 @@ describe("what was pasted", () => {
     expect(normaliseKeyInput("MOTIF_API_KEY=sk-abc123")).toBe("sk-abc123");
     expect(normaliseKeyInput('export MOTIF_API_KEY="sk-abc123"')).toBe("sk-abc123");
     expect(normaliseKeyInput("'sk-abc123'")).toBe("sk-abc123");
+    expect(normaliseKeyInput('export MOTIF_MORPHFACTORY_API_KEY="mf-abc123"')).toBe("mf-abc123");
     expect(normaliseKeyInput("")).toBe("");
   });
 });
@@ -76,5 +77,16 @@ describe("reading the key", () => {
     expect(await p).toBe("sk-piped");
     // Nothing is echoed into a pipe, not even the prompt.
     expect(out).toEqual([]);
+  });
+});
+
+
+describe("provider login guidance", () => {
+  it("shows the selected provider's key page", () => {
+    expect(loginLines("/home/user/.motif/.env", "/home/user").join("\n")).toContain("https://infron.ai/dashboard/apiKeys");
+    const lines = loginLines("/home/user/.motif/.env", "/home/user", "morphfactory").join("\n");
+    expect(lines).toContain("https://cbt.morphfactory.io/console?view=keys");
+    expect(lines).toContain("~/.motif/.env");
+    expect(lines).not.toContain("infron");
   });
 });

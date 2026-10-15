@@ -55,6 +55,9 @@ export interface CommandContext {
   /** Interactive dashboard; plain outputs remain available without a screen. */
   openPanel?(tab: "config" | "status" | "stats" | "usage"): void;
   configure?(args: string): CommandOutput;
+  provider?(args: string): Promise<CommandOutput>;
+  /** Update the endpoint and its credential together in an interactive session. */
+  setEndpoint?(endpoint: string): void;
   stats?(): string[];
   usage?(): string[];
   doctor(): Promise<string[]>;
@@ -201,8 +204,14 @@ export const COMMANDS: readonly SlashCommand[] = [
     run: async (ctx) => ok("/doctor", await ctx.doctor()),
   },
   {
+    name: "provider",
+    description: "choose Infron or Morphfactory (BETA)",
+    usage: "[infron|morphfactory]",
+    run: (ctx, args) => ctx.provider?.(args) ?? fail("/provider", "Provider selection requires an interactive session."),
+  },
+  {
     name: "login",
-    description: "paste an Infron API key; it is checked against the endpoint and saved to ~/.motif/.env",
+    description: "paste the selected provider’s API key; it is checked against the endpoint and saved to ~/.motif/.env",
     run: async (ctx) => ok("/login", await ctx.login()),
   },
   {
@@ -227,7 +236,9 @@ export const COMMANDS: readonly SlashCommand[] = [
     run: (ctx, args) => {
       if (args === "") return ok("/endpoint", [ctx.settings.endpoint]);
       if (!/^https?:\/\//.test(args)) return fail("/endpoint", `not a URL: ${args}`);
-      ctx.settings.endpoint = args.replace(/\/+$/, "").replace(/\/v1$/, "");
+      const endpoint = args.replace(/\/+$/, "").replace(/\/v1$/, "");
+      if (ctx.setEndpoint) ctx.setEndpoint(endpoint);
+      else ctx.settings.endpoint = endpoint;
       return ok("/endpoint", [
         `endpoint set to ${ctx.settings.endpoint} for the next task`,
         ...saved(ctx, "endpoint", ctx.settings.endpoint),

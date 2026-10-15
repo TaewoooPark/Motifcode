@@ -5,26 +5,33 @@ A Claude Code-style terminal session — transcript above, prompt below, `/` com
 a permission prompt, a `.motif/` directory behind it — whose tool set, prompt layout, parser and
 failure handling follow from what is measurably true about Motif-3.
 
-> **Free through September 2026.** Motif-3 is served by [Infron](https://infron.ai) at $0 per
-> million tokens, with free access announced through the end of September 2026. Terms can change;
-> the [model page](https://infron.ai/models/motif/motif-3) is the source of truth.
+> **Choose your provider.** First launch offers [Infron](https://infron.ai) or
+> [Morphfactory (BETA)](https://cbt.morphfactory.io/console?view=keys).
+> Switch later with `/provider` or `/config`; each provider keeps its own API key.
 
 > **Not an official Motif project.** Not certified, endorsed, sponsored or maintained by Motif
 > Technologies or by Infron. *Motif* and *Motif-3* are their names; this package is a client of the model.
 
 ```bash
 cd your-project
-npx motifcode                # asks for your Infron API key once, then offers to install the `motif` command
+npx motifcode                # choose a provider and enter its API key once, then offers to install the `motif` command
 ```
 
 Or `npm install -g motifcode` directly; either way `motif` (or `motifcode`) opens the session
 from any folder afterwards, with the key saved in `~/.motif/.env`.
 
-1. Sign in at [infron.ai/login](https://infron.ai/login), open [Dashboard → API Keys](https://infron.ai/dashboard/apiKeys), click **Add new key**.
-2. Run `motif` and paste the key when asked. It is checked against the endpoint, saved to
-   `~/.motif/.env` (readable only by you), and never shown to the model. `motif login` does the
-   same outside a session; `/login` and `/logout` inside one.
-3. `motif doctor` reports what the endpoint returns: structured tool calls, reasoning, prefix caching.
+1. Create an API key at [Infron's dashboard](https://infron.ai/dashboard/apiKeys) or
+   [Morphfactory's console](https://cbt.morphfactory.io/console?view=keys).
+2. Run `motif`, choose the provider and paste its key. It is checked against the endpoint,
+   saved to `~/.motif/.env` (readable only by you), and never shown to the model. Use
+   `/provider` to switch, or `/login` and `/logout` to manage the selected provider's key.
+3. Outside a session, use `motif login --provider morphfactory` and
+   `motif doctor --provider morphfactory`. `--provider infron` selects Infron.
+
+The environment keys are `MOTIF_API_KEY` for Infron and `MOTIF_MORPHFACTORY_API_KEY`
+for Morphfactory. Use `--provider morphfactory` for a single invocation, or choose
+with `/provider` to save the selection. Explicit `--endpoint` and `--model` flags
+still override a provider preset.
 
 ```bash
 motif                                   # interactive session in the current directory

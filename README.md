@@ -30,11 +30,9 @@
   <a href="https://discord.gg/5d99wCtzc"><img src="https://img.shields.io/badge/Join_OpenLab-Discord-5865F2?style=for-the-badge&amp;logo=discord&amp;logoColor=white&amp;labelColor=000000" alt="Join OpenLab on Discord"></a>
 </p>
 
-> **Free through September 2026.** Motif-3 is served by [Infron](https://infron.ai) as
-> **Motif: Motif 3 (Free)** — $0 per million tokens in and out, the full 262,144-token
-> window — and free access has been announced through the end of September 2026.
-> An account and an API key are all it takes: `npx motifcode` asks for the key, then installs the `motif` command.
-> Terms can change, and the [model page](https://infron.ai/models/motif/motif-3) is the source of truth.
+> **Choose your provider.** First launch offers [Infron](https://infron.ai) or
+> [Morphfactory (BETA)](https://cbt.morphfactory.io/console?view=keys).
+> Switch later with `/provider` or from `/config`; each provider keeps its own API key.
 
 > **Not an official Motif project.** Motifcode is an independent open-source project.
 > It is not certified, endorsed, sponsored or maintained by Motif Technologies or by
@@ -104,7 +102,7 @@ session checked feature by feature against Claude Code's.
   <tr>
     <td width="50%" align="center" valign="top">
       <img src="docs/screen-login.jpg" alt="the first run asks for the API key" width="100%"><br>
-      <sub><b>First run.</b> The Infron API key is asked for in place of the prompt, checked, and saved once.</sub>
+      <sub><b>First run.</b> Choose a provider, then paste an API key to check and save once.</sub>
     </td>
     <td width="50%" align="center" valign="top">
       <img src="docs/screen-skills.jpg" alt="the /skills list" width="100%"><br>
@@ -130,8 +128,8 @@ cd your-project
 npx motifcode          # first run: asks for your key, then offers to install the `motif` command
 ```
 
-The first session asks for your Infron API key, once, and saves it to
-`~/.motif/.env`. Because `npx` leaves no command behind, it then offers to run
+The first session lets you choose **Infron** or **Morphfactory (BETA)**, asks for
+your API key once, and saves it to `~/.motif/.env`. Because `npx` leaves no command behind, it then offers to run
 `npm install -g motifcode` for you; say yes and `motif` (or `motifcode`) opens
 the session from any folder from then on. `npm install -g motifcode` directly
 does the same without the question.
@@ -404,34 +402,32 @@ and a bundle being available does not mean its service is signed in. See
 
 ---
 
-## Get an API key from Infron
+## Choose a provider and get an API key
 
-Motif-3 is reached over Infron's OpenAI-compatible endpoint. The whole
-configuration is a base URL, a model id and a key:
+First launch offers Infron and Morphfactory (BETA). Existing sessions keep their
+current connection; use `/provider` or the provider row in `/config` to switch.
+Both use the model id `motif/motif-3` and an OpenAI-compatible endpoint:
 
-| | |
-|---|---|
-| base URL | `https://llm.onerouter.pro/v1` |
-| model | `motif/motif-3` |
-| key | `MOTIF_API_KEY` |
+| provider | base URL | API key environment variable |
+|---|---|---|
+| Infron | `https://llm.onerouter.pro/v1` | `MOTIF_API_KEY` |
+| Morphfactory (BETA) | `https://api-cbt.morphfactory.io/v1` | `MOTIF_MORPHFACTORY_API_KEY` |
 
-1. Sign in at **[infron.ai/login](https://infron.ai/login)** (email or Google).
-2. Open **[Dashboard → API Keys](https://infron.ai/dashboard/apiKeys)** and click **Add new key**.
-3. Run `motif` and paste the key when asked. It is checked against the
-   endpoint with a one-token request, saved to `~/.motif/.env` (readable only
-   by you), and never shown to the model. `motif login` does the same outside
-   a session, and `/login` and `/logout` inside one. A `MOTIF_API_KEY` in the
-   environment or in a `.env` next to the project works too; `--env-file
-   <path>` puts a file first.
-4. `motif doctor` confirms the connection and reports how the server returns
-   tool calls and reasoning and whether prefix caching is on.
+1. Create a key at [Infron's API Keys dashboard](https://infron.ai/dashboard/apiKeys)
+   or [Morphfactory's console](https://cbt.morphfactory.io/console?view=keys).
+2. Run `motif`, choose the provider and paste its key. A one-token request checks
+   it before saving it to `~/.motif/.env` (readable only by you). Provider keys
+   are stored separately, so switching or `/logout` preserves the other key.
+3. In a script, use `motif login --provider morphfactory`, then
+   `motif --provider morphfactory -p "your question"`. `--provider infron` selects
+   Infron; explicit `--endpoint` and `--model` flags override the preset.
+4. `motif doctor --provider morphfactory` checks the connection, tool calls,
+   reasoning and prefix caching. Infron's account balance is only available
+   with Infron; local session token usage remains available for both providers.
 
-**Free through September 2026.** At the time of writing Infron lists the model
-as *Motif: Motif 3 (Free)* at $0 per million tokens for input and output, and
-has announced free access through the end of September 2026. Check the
-[model page](https://infron.ai/models/motif/motif-3) and Infron's
-[free-model terms](https://infron.ai/docs/overview/free-models) for the current
-conditions.
+Environment variables or a project `.env` work too; `--env-file <path>` reads
+that file first. Set `MOTIF_ENDPOINT` to select a provider through an env file.
+Infron remains the default when no provider is configured.
 
 Only `MOTIF_*` keys are read from a `.env` file, none of them are exported, and
 the key is removed from the harness's own environment before anything is
@@ -451,7 +447,8 @@ spawned — the agent's `bash` cannot see it, and neither can a project hook.
 | `/doctor` | probe the endpoint: auth, parsers, cache, channels |
 | `/mcp [list\|connect NAME\|disconnect NAME\|reconnect NAME\|login NAME\|logout NAME]` | open the MCP manager to add a preset, or inspect, control and sign in to a connection |
 | `/mcp-setup <URL>` | use the built-in skill to register and check an MCP server |
-| `/login`, `/logout` | paste an Infron API key, checked and saved to `~/.motif/.env`; remove the saved key |
+| `/provider [infron\|morphfactory]` | choose a provider, preserving each provider's key |
+| `/login`, `/logout` | check and save the selected provider's key to `~/.motif/.env`; remove that saved key |
 | `/model [id]`, `/endpoint [url]` | show or set the model id or endpoint for the next task |
 | `/channel [toolcall\|object\|raw]` | show or set the action channel; changing it restarts the conversation |
 | `/max-turns [n]`, `/max-tokens [n\|off]`, `/seed [n\|off]` | per-task ceilings and the sampling seed |
