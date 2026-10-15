@@ -13,9 +13,13 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_ENDPOINT,
   DEFAULT_MODEL,
+  ENV_MORPHFACTORY_API_KEY,
+  PROVIDERS,
+  apiKeyEnvForEndpoint,
   forgetApiKey,
   normalizeEndpoint,
   parseDotenv,
+  providerForEndpoint,
   removeDotenvKey,
   resolveEndpointConfig,
   saveApiKey,
@@ -79,6 +83,35 @@ describe("resolution", () => {
     expect(c.sources.apiKey).toContain(join(d, ".env"));
   });
 
+  it("selects the credential for the resolved endpoint without crossing providers", () => {
+    const path = join(dir({ ".env": "MOTIF_API_KEY=sk-infron\nMOTIF_MORPHFACTORY_API_KEY=sk-morph\n" }), ".env");
+    const options = { env: {}, dotenvPaths: [path] };
+    expect(resolveEndpointConfig(options).apiKey).toBe("sk-infron");
+    const morph = resolveEndpointConfig({ ...options, flags: { endpoint: `${PROVIDERS.morphfactory.endpoint}/v1/` } });
+    expect(morph.endpoint).toBe(PROVIDERS.morphfactory.endpoint);
+    expect(morph.model).toBe(DEFAULT_MODEL);
+    expect(morph.apiKey).toBe("sk-morph");
+    expect(morph.sources.apiKey).toBe(`${path} (${ENV_MORPHFACTORY_API_KEY})`);
+    expect(providerForEndpoint("https://api-cbt.morphfactory.io:443/v1")).toBe("morphfactory");
+    expect(resolveEndpointConfig({ ...options, flags: { endpoint: "https://api-cbt.morphfactory.io:443/v1" } }).apiKey).toBe("sk-morph");
+    expect(resolveEndpointConfig({ ...options, flags: { endpoint: "http://localhost:8080" } }).apiKey).toBe("sk-infron");
+    expect(resolveEndpointConfig({
+      env: { MOTIF_API_KEY: "sk-infron" }, dotenvPaths: [], defaults: { endpoint: PROVIDERS.morphfactory.endpoint },
+    }).apiKey).toBeUndefined();
+  });
+
+  it("keeps environment and file precedence within the Morphfactory credential slot", () => {
+    const first = join(dir({ ".env": "MOTIF_API_KEY=sk-infron-first\n" }), ".env");
+    const second = join(dir({ ".env": "MOTIF_MORPHFACTORY_API_KEY=sk-morph-file\n" }), ".env");
+    const options = { dotenvPaths: [first, second], defaults: { endpoint: PROVIDERS.morphfactory.endpoint } };
+    expect(resolveEndpointConfig({ ...options, env: {} }).apiKey).toBe("sk-morph-file");
+    const fromEnv = resolveEndpointConfig({ ...options, env: { MOTIF_MORPHFACTORY_API_KEY: "sk-morph-env" } });
+    expect(fromEnv.apiKey).toBe("sk-morph-env");
+    expect(fromEnv.sources.apiKey).toBe(`environment ${ENV_MORPHFACTORY_API_KEY}`);
+    const overridden = resolveEndpointConfig({ ...options, env: { MOTIF_ENDPOINT: DEFAULT_ENDPOINT } });
+    expect(overridden.apiKey).toBe("sk-infron-first");
+  });
+
   it("prefers a flag over the environment over the file", () => {
     const d = dir({ ".env": "MOTIF_ENDPOINT=http://file\nMOTIF_MODEL=file-model\n" });
     const env = { MOTIF_ENDPOINT: "http://env", MOTIF_MODEL: "env-model" };
@@ -112,9 +145,30 @@ describe("resolution", () => {
   });
 
   it("withholds the key from an environment children will inherit", () => {
-    const env: NodeJS.ProcessEnv = { MOTIF_API_KEY: "sk-secret", PATH: "/bin" };
+    const env: NodeJS.ProcessEnv = { MOTIF_API_KEY: "sk-secret", MOTIF_MORPHFACTORY_API_KEY: "sk-morph-secret", PATH: "/bin" };
     withholdSecrets(env);
     expect(env).toEqual({ PATH: "/bin" });
+  });
+});
+
+describe("provider endpoints", () => {
+  it("accepts the documented base URLs with optional /v1 and trailing slash", () => {
+    for (const provider of ["infron", "morphfactory"] as const) {
+      for (const suffix of ["", "/", "/v1", "/v1/"]) {
+        const endpoint = `  ${PROVIDERS[provider].endpoint}${suffix}  `;
+        expect(providerForEndpoint(endpoint)).toBe(provider);
+        expect(apiKeyEnvForEndpoint(endpoint)).toBe(PROVIDERS[provider].apiKeyEnv);
+      }
+    }
+    expect(providerForEndpoint("https://API-CBT.MORPHFACTORY.IO/v1")).toBe("morphfactory");
+  });
+
+  it("does not recognize lookalike hosts or custom paths as a provider", () => {
+    for (const endpoint of [
+      "https://api-cbt.morphfactory.io.example.com", "https://api-cbt.morphfactory.io@evil.example",
+      "http://api-cbt.morphfactory.io", "https://api-cbt.morphfactory.io/proxy",
+      "https://api-cbt.morphfactory.io/v1?target=other", "http://localhost:8080",
+    ]) expect(providerForEndpoint(endpoint)).toBeUndefined();
   });
 });
 
@@ -150,5 +204,20 @@ describe("writing the key", () => {
     expect(forgetApiKey(path)).toBe(true);
     expect(forgetApiKey(path)).toBe(false);
     expect(resolveEndpointConfig({ env: {}, dotenvPaths: [path] }).apiKey).toBeUndefined();
+  });
+
+  it("saves and forgets one provider without replacing the other provider's key", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "motif-providers-")), ".env");
+    writeFileSync(path, "# keep my settings\nOTHER=1\n");
+    saveApiKey("sk-infron", path);
+    saveApiKey("sk-morph", path, "morphfactory");
+    expect(parseDotenv(readFileSync(path, "utf8"))).toEqual({ OTHER: "1", MOTIF_API_KEY: "sk-infron", MOTIF_MORPHFACTORY_API_KEY: "sk-morph" });
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(forgetApiKey(path, "morphfactory")).toBe(true);
+    expect(forgetApiKey(path, "morphfactory")).toBe(false);
+    expect(readFileSync(path, "utf8")).toBe("# keep my settings\nOTHER=1\nMOTIF_API_KEY=sk-infron\n");
+    saveApiKey("sk-morph-new", path, "morphfactory");
+    expect(forgetApiKey(path)).toBe(true);
+    expect(parseDotenv(readFileSync(path, "utf8"))).toEqual({ OTHER: "1", MOTIF_MORPHFACTORY_API_KEY: "sk-morph-new" });
   });
 });

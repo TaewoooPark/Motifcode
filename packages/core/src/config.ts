@@ -10,7 +10,7 @@
  * runs — `bash`, `term`, `git apply`, project hooks — inherits that
  * environment, and a model that runs `env` to look around would otherwise put
  * the credential into a tool result, and from there into the journal. The CLI
- * goes one step further and removes `MOTIF_API_KEY` from its own environment
+ * goes one step further and removes the provider keys from its own environment
  * once it has been read; see `withholdSecrets`.
  *
  * It has to be findable. A `.env` file next to where the command is typed, or
@@ -32,6 +32,26 @@ export const DEFAULT_MODEL = "motif/motif-3";
 export const ENV_ENDPOINT = "MOTIF_ENDPOINT";
 export const ENV_MODEL = "MOTIF_MODEL";
 export const ENV_API_KEY = "MOTIF_API_KEY";
+export const ENV_MORPHFACTORY_API_KEY = "MOTIF_MORPHFACTORY_API_KEY";
+
+export type ProviderId = "infron" | "morphfactory";
+
+export const PROVIDERS = {
+  infron: {
+    label: "Infron",
+    endpoint: DEFAULT_ENDPOINT,
+    model: DEFAULT_MODEL,
+    apiKeyEnv: ENV_API_KEY,
+    keyPage: "https://infron.ai/dashboard/apiKeys",
+  },
+  morphfactory: {
+    label: "Morphfactory (BETA)",
+    endpoint: "https://api-cbt.morphfactory.io",
+    model: DEFAULT_MODEL,
+    apiKeyEnv: ENV_MORPHFACTORY_API_KEY,
+    keyPage: "https://cbt.morphfactory.io/console?view=keys",
+  },
+} as const satisfies Record<ProviderId, { label: string; endpoint: string; model: string; apiKeyEnv: string; keyPage: string }>;
 
 export interface EndpointConfig {
   endpoint: string;
@@ -109,6 +129,22 @@ export function isInfronEndpoint(endpoint: string): boolean {
   return origin !== undefined && ["", "/", "/v1", "/v1/"].includes(value.slice(origin.length));
 }
 
+/** Identify a supported provider without matching lookalike hosts or custom paths. */
+export function providerForEndpoint(endpoint: string): ProviderId | undefined {
+  if (isInfronEndpoint(endpoint)) return "infron";
+  try {
+    const url = new URL(endpoint.trim());
+    if (url.origin === PROVIDERS.morphfactory.endpoint && !url.username && !url.password && !url.search && !url.hash
+      && ["/", "/v1", "/v1/"].includes(url.pathname)) return "morphfactory";
+  } catch { /* A custom or invalid endpoint is not a provider preset. */ }
+  return undefined;
+}
+
+/** Keep the legacy key for Infron and custom servers; never reuse it for Morphfactory. */
+export function apiKeyEnvForEndpoint(endpoint: string): string {
+  return providerForEndpoint(endpoint) === "morphfactory" ? ENV_MORPHFACTORY_API_KEY : ENV_API_KEY;
+}
+
 export function defaultDotenvPaths(cwd = process.cwd()): string[] {
   return [join(cwd, ".env"), join(homedir(), ".motif", ".env")];
 }
@@ -143,10 +179,11 @@ export function resolveEndpointConfig(opts: ResolveOptions = {}): EndpointConfig
 
   const endpoint = pick(opts.flags?.endpoint, ENV_ENDPOINT, opts.defaults?.endpoint ?? DEFAULT_ENDPOINT);
   const model = pick(opts.flags?.model, ENV_MODEL, opts.defaults?.model ?? DEFAULT_MODEL);
-  const apiKey = pick(undefined, ENV_API_KEY, undefined);
+  const normalizedEndpoint = normalizeEndpoint(endpoint.value!);
+  const apiKey = pick(undefined, apiKeyEnvForEndpoint(normalizedEndpoint), undefined);
 
   return {
-    endpoint: normalizeEndpoint(endpoint.value!),
+    endpoint: normalizedEndpoint,
     model: model.value!,
     ...(apiKey.value !== undefined ? { apiKey: apiKey.value } : {}),
     sources: {
@@ -166,6 +203,7 @@ export function resolveEndpointConfig(opts: ResolveOptions = {}): EndpointConfig
  */
 export function withholdSecrets(env: NodeJS.ProcessEnv): void {
   delete env[ENV_API_KEY];
+  delete env[ENV_MORPHFACTORY_API_KEY];
 }
 
 /* ------------------------------------------------------------------ */
@@ -214,19 +252,19 @@ export function removeDotenvKey(text: string, key: string): string {
  * this harness that must not be readable by another account on the machine.
  * An existing file keeps its other lines. Returns the path written.
  */
-export function saveApiKey(apiKey: string, path = defaultEnvPath()): string {
+export function saveApiKey(apiKey: string, path = defaultEnvPath(), provider: ProviderId = "infron"): string {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const existing = existsSync(path) ? readFileSync(path, "utf8") : "";
-  writeFileSync(path, upsertDotenv(existing, ENV_API_KEY, apiKey), { encoding: "utf8", mode: 0o600 });
+  writeFileSync(path, upsertDotenv(existing, PROVIDERS[provider].apiKeyEnv, apiKey), { encoding: "utf8", mode: 0o600 });
   chmodSync(path, 0o600);
   return path;
 }
 
 /** Remove the API key from the file; true when there was one to remove. */
-export function forgetApiKey(path = defaultEnvPath()): boolean {
+export function forgetApiKey(path = defaultEnvPath(), provider: ProviderId = "infron"): boolean {
   if (!existsSync(path)) return false;
   const existing = readFileSync(path, "utf8");
-  const next = removeDotenvKey(existing, ENV_API_KEY);
+  const next = removeDotenvKey(existing, PROVIDERS[provider].apiKeyEnv);
   if (next === existing) return false;
   writeFileSync(path, next, { encoding: "utf8", mode: 0o600 });
   return true;

@@ -30,11 +30,9 @@
   <a href="https://discord.gg/5d99wCtzc"><img src="https://img.shields.io/badge/Join_OpenLab-Discord-5865F2?style=for-the-badge&amp;logo=discord&amp;logoColor=white&amp;labelColor=000000" alt="OpenLab Discord 참여하기"></a>
 </p>
 
-> **2026년 9월까지 무료.** Motif-3는 [Infron](https://infron.ai)에서 **Motif: Motif 3 (Free)** 로
-> 제공됩니다. 입력·출력 모두 100만 토큰당 $0, 262,144 토큰 컨텍스트 전체가 열려 있고,
-> 2026년 9월 말까지 무료 제공이 공지되어 있습니다. 계정과 API 키만 있으면 됩니다.
-> `npx motifcode`가 키를 물어본 뒤 `motif` 명령까지 설치해 줍니다.
-> 조건은 바뀔 수 있으며, [모델 페이지](https://infron.ai/models/motif/motif-3)가 기준입니다.
+> **Provider를 선택하세요.** 처음 실행하면 [Infron](https://infron.ai) 또는
+> [Morphfactory (BETA)](https://cbt.morphfactory.io/console?view=keys)를 선택할 수 있습니다.
+> 이후에는 `/provider`나 `/config`에서 바꾸며, 각 provider의 API 키는 따로 보관합니다.
 
 > **Motif 공식 프로젝트가 아닙니다.** Motifcode는 독립적인 오픈소스 프로젝트입니다.
 > 모티프테크놀로지스(Motif Technologies)나 Infron이 인증·보증·후원·관리하는 저장소가
@@ -98,7 +96,7 @@ Motifcode는 Claude Code의 모양을 한 터미널 코딩 에이전트입니다
   <tr>
     <td width="50%" align="center" valign="top">
       <img src="docs/screen-login.jpg" alt="첫 실행에서 API 키를 묻는 화면" width="100%"><br>
-      <sub><b>첫 실행.</b> 프롬프트 자리에서 Infron API 키를 물어보고, 확인한 뒤 한 번만 저장합니다.</sub>
+      <sub><b>첫 실행.</b> Provider를 선택하고 API 키를 입력하면, 확인한 뒤 한 번만 저장합니다.</sub>
     </td>
     <td width="50%" align="center" valign="top">
       <img src="docs/screen-skills.jpg" alt="/skills 목록" width="100%"><br>
@@ -124,7 +122,7 @@ cd your-project
 npx motifcode          # 첫 실행: 키를 물어본 뒤 `motif` 명령 설치까지 해 줍니다
 ```
 
-첫 세션에서 Infron API 키를 한 번만 물어보고 `~/.motif/.env`에 저장합니다. `npx`는
+첫 세션에서 **Infron** 또는 **Morphfactory (BETA)** 를 선택하고, API 키를 한 번만 입력해 `~/.motif/.env`에 저장합니다. `npx`는
 명령을 남기지 않으므로 이어서 `npm install -g motifcode`를 대신 실행해 줄지
 물어봅니다. 예라고 하면 그다음부터는 어느 폴더에서든 `motif`(또는 `motifcode`)로
 세션을 엽니다. 처음부터 `npm install -g motifcode`를 직접 해도 같은 결과입니다.
@@ -388,32 +386,32 @@ motif plugins connect library-docs
 
 ---
 
-## Infron에서 API 키 발급하기
+## Provider 선택과 API 키 발급
 
-Motif-3는 Infron의 OpenAI 호환 엔드포인트로 접근합니다. 설정 전체는 base URL, 모델
-id, 키 세 가지입니다.
+처음 실행하면 Infron 또는 Morphfactory (BETA)를 선택합니다. 기존 사용자의 연결은
+유지되며, `/provider`나 `/config`의 provider 항목에서 바꿀 수 있습니다. 두 provider
+모두 `motif/motif-3` 모델과 OpenAI 호환 엔드포인트를 사용합니다.
 
-| | |
-|---|---|
-| base URL | `https://llm.onerouter.pro/v1` |
-| 모델 | `motif/motif-3` |
-| 키 | `MOTIF_API_KEY` |
+| provider | base URL | API 키 환경 변수 |
+|---|---|---|
+| Infron | `https://llm.onerouter.pro/v1` | `MOTIF_API_KEY` |
+| Morphfactory (BETA) | `https://api-cbt.morphfactory.io/v1` | `MOTIF_MORPHFACTORY_API_KEY` |
 
-1. **[infron.ai/login](https://infron.ai/login)** 에서 이메일이나 Google로 로그인합니다.
-2. **[Dashboard → API Keys](https://infron.ai/dashboard/apiKeys)** 를 열고 **Add new key** 를 누릅니다.
-3. `motif`를 실행하고, 물어볼 때 키를 붙여 넣습니다. 토큰 하나짜리 요청으로
-   엔드포인트에 확인한 뒤 `~/.motif/.env`에 저장되고(본인만 읽을 수 있는 권한),
-   모델에게는 절대 보여 주지 않습니다. 세션 밖에서는 `motif login`이 같은 일을
-   하고, 세션 안에서는 `/login`과 `/logout`이 있습니다. 환경 변수의
-   `MOTIF_API_KEY`나 프로젝트 옆의 `.env`도 되고, `--env-file <경로>`는 그 파일을
-   가장 먼저 읽게 합니다.
-4. `motif doctor`가 연결을 확인하고, 서버가 도구 호출과 추론을 어떤 형태로
-   돌려주는지와 프리픽스 캐시가 켜져 있는지를 보고합니다.
+1. [Infron API Keys 대시보드](https://infron.ai/dashboard/apiKeys) 또는
+   [Morphfactory 콘솔](https://cbt.morphfactory.io/console?view=keys)에서 키를 발급합니다.
+2. `motif`를 실행해 provider를 선택하고 키를 붙여 넣습니다. 토큰 하나짜리 요청으로
+   확인한 뒤 본인만 읽을 수 있는 `~/.motif/.env`에 저장합니다. 키는 따로 보관하므로
+   provider를 바꾸거나 `/logout`을 해도 다른 provider의 키는 유지됩니다.
+3. 스크립트에서는 `motif login --provider morphfactory`로 로그인하고
+   `motif --provider morphfactory -p "질문"`으로 실행합니다. `--provider infron`은
+   Infron을 선택하며, 명시한 `--endpoint`와 `--model`이 preset보다 우선합니다.
+4. `motif doctor --provider morphfactory`로 연결, 도구 호출, 추론과 프리픽스 캐시를
+   확인합니다. Infron 계정 잔액은 Infron에서만 지원하며, 로컬 세션 토큰 사용량은
+   두 provider 모두 볼 수 있습니다.
 
-**2026년 9월까지 무료.** 이 글을 쓰는 시점에 Infron은 이 모델을 *Motif: Motif 3
-(Free)* 로, 입력·출력 모두 100만 토큰당 $0로 올려 두었고, 2026년 9월 말까지 무료
-제공을 공지했습니다. 현재 조건은 [모델 페이지](https://infron.ai/models/motif/motif-3)와
-Infron의 [무료 모델 약관](https://infron.ai/docs/overview/free-models)에서 확인하세요.
+환경 변수나 프로젝트 `.env`도 지원하며 `--env-file <경로>`는 해당 파일을 먼저 읽습니다.
+환경 파일에서 provider를 지정하려면 `MOTIF_ENDPOINT`를 설정합니다. 별도 설정이 없으면
+기존과 같이 Infron을 사용합니다.
 
 `.env` 파일에서는 `MOTIF_*` 키만 읽고, 어느 것도 환경 변수로 내보내지 않으며, 무엇이든
 실행되기 전에 하네스 자신의 환경에서도 키를 지웁니다. 모델의 `bash`도, 프로젝트 훅도
@@ -433,7 +431,8 @@ Infron의 [무료 모델 약관](https://infron.ai/docs/overview/free-models)에
 | `/doctor` | 엔드포인트 점검: 인증, 파서, 캐시, 채널 |
 | `/mcp [list\|connect NAME\|disconnect NAME\|reconnect NAME\|login NAME\|logout NAME]` | MCP 관리 화면에서 프리셋 추가, 연결 상태 조회·제어와 로그인 |
 | `/mcp-setup <URL>` | 내장 스킬로 MCP 서버 등록과 연결 확인 |
-| `/login`, `/logout` | Infron API 키를 붙여 넣어 확인 후 `~/.motif/.env`에 저장; 저장된 키 삭제 |
+| `/provider [infron\|morphfactory]` | 각 provider의 키를 유지하며 provider 선택 |
+| `/login`, `/logout` | 선택한 provider의 키를 확인해 `~/.motif/.env`에 저장; 해당 키 삭제 |
 | `/model [id]`, `/endpoint [url]` | 다음 작업에 쓸 모델 id나 엔드포인트를 보거나 바꿈 |
 | `/channel [toolcall\|object\|raw]` | 행동 채널을 보거나 바꿈; 바꾸면 대화가 새로 시작됨 |
 | `/max-turns [n]`, `/max-tokens [n\|off]`, `/seed [n\|off]` | 작업당 상한과 샘플링 시드 |

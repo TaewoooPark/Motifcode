@@ -62,7 +62,7 @@ function session(extra: Partial<ChatOptions> = {}) {
   agents.registerAll(BUILTIN_AGENTS);
   const terminal = new Screen({ write: (text) => out.push(text), columns: () => 100, rows: () => 30, interactive: true, cwd });
   const persist = vi.fn((key: keyof StoredSettings, value: unknown) => saveUserSetting(key, value as StoredSettings[typeof key], cwd));
-  const makeTransport = vi.fn((_settings: ChatOptions["settings"]) => transport);
+  const makeTransport = vi.fn((_settings: ChatOptions["settings"], _apiKey?: string) => transport);
   const chat = new Chat({
     screen: terminal,
     stdin: stdin as unknown as NodeJS.ReadStream,
@@ -411,5 +411,115 @@ describe("account balance integration", () => {
     s.type("/usage\r");
     expect(s.value("Completion tokens")).toBe("10");
     expect(s.value("Balance status")).toBe("Could not reach the balance service.");
+  });
+});
+
+describe("provider selection", () => {
+  const morph = "https://api-cbt.morphfactory.io";
+  const infron = "https://llm.onerouter.pro";
+
+  it("offers a first-run choice, masks the selected provider key and persists the connection", async () => {
+    const verifyKey = vi.fn(async () => ({ ok: true as const }));
+    const s = session({ chooseProvider: true, requireKey: true, verifyKey });
+    expect(s.screen()).toContain("Choose a provider");
+    expect(s.screen()).toContain("Morphfactory (BETA)");
+    s.type("2");
+    await vi.waitFor(() => expect(s.screen()).toContain("Paste your Morphfactory (BETA) API key to get started"));
+    expect(s.screen()).toContain("https://cbt.morphfactory.io/console?view=keys");
+    s.type("mak-first\r");
+    await vi.waitFor(() => expect(s.screen()).toContain("signed in"));
+    expect(s.screen()).not.toContain("mak-first");
+    expect(s.saved()).toMatchObject({ endpoint: morph, model: "motif/motif-3" });
+    expect(readFileSync(join(s.cwd, ".motif", ".env"), "utf8")).toBe("MOTIF_MORPHFACTORY_API_KEY=mak-first\n");
+    s.type("go\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    expect(s.makeTransport.mock.calls.at(-1)).toEqual([expect.objectContaining({ endpoint: morph }), "mak-first"]);
+  });
+
+  it("round-trips separate keys through /provider, /config and /endpoint without crossing credentials", async () => {
+    const s = session({ apiKey: "infron-key", requireKey: true, providerCredentials: { morphfactory: { apiKey: "morph-key", source: "test" } } });
+    expect(s.screen()).not.toContain("Choose a provider");
+    const run = async (command: string, endpoint: string, key: string, task: number) => {
+      s.type(command + "\r");
+      await vi.waitFor(() => expect(s.screen()).toContain(command.startsWith("/endpoint") ? "endpoint set" : "Provider:"));
+      s.type("go\r");
+      await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(task));
+      // ChatSettings is mutable; assert each request before the next switch.
+      expect(s.makeTransport.mock.calls.at(-1)).toEqual([expect.objectContaining({ endpoint }), key]);
+    };
+    await run("/provider morphfactory", morph, "morph-key", 1);
+    await run("/config provider infron", infron, "infron-key", 2);
+    await run("/endpoint " + morph + "/v1", morph, "morph-key", 3);
+    await run("/provider infron", infron, "infron-key", 4);
+    await run("/config endpoint " + morph, morph, "morph-key", 5);
+    await run("/provider infron", infron, "infron-key", 6);
+  });
+
+  it("keeps endpoint and credentials together when multiple commands arrive in one input event", async () => {
+    const s = session({ apiKey: "infron-key", requireKey: true, providerCredentials: { morphfactory: { apiKey: "morph-key" } } });
+    s.type(`/endpoint ${morph}\r/provider infron\r/provider morphfactory\rgo\r`);
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    expect(s.makeTransport.mock.calls.at(-1)).toEqual([expect.objectContaining({ endpoint: morph }), "morph-key"]);
+    s.type("/provider infron\rgo\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(2));
+    expect(s.makeTransport.mock.calls.at(-1)).toEqual([expect.objectContaining({ endpoint: infron }), "infron-key"]);
+  });
+
+  it("does not verify a submitted key against a provider selected in the same input event", async () => {
+    const verifyKey = vi.fn(async () => ({ ok: true as const }));
+    const s = session({ apiKey: "infron-key", requireKey: true, verifyKey, providerCredentials: { morphfactory: { apiKey: "morph-key" } } });
+    s.type("/login\r");
+    await vi.waitFor(() => expect(s.screen()).toContain("Paste your Infron API key"));
+    s.type("infron-new\r/provider morphfactory\r");
+    await vi.waitFor(() => expect(s.screen()).toContain("login cancelled because the session or endpoint changed"));
+    expect(verifyKey).not.toHaveBeenCalled();
+    expect(existsSync(join(s.cwd, ".motif", ".env"))).toBe(false);
+    s.type("go\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    expect(s.makeTransport.mock.calls.at(-1)).toEqual([expect.objectContaining({ endpoint: morph }), "morph-key"]);
+  });
+
+  it("does not reuse an Infron key when Morphfactory login is cancelled or logged out", async () => {
+    const s = session({ apiKey: "infron-key", requireKey: true, verifyKey: async () => ({ ok: true }) });
+    s.type("/provider morphfactory\r");
+    await vi.waitFor(() => expect(s.screen()).toContain("Paste your Morphfactory (BETA) API key"));
+    s.type(ESC);
+    await vi.waitFor(() => expect(s.screen()).toContain("login cancelled"));
+    s.type("go\r");
+    await vi.waitFor(() => expect(s.screen()).toContain("An API key is needed before the task can run"));
+    expect(s.makeTransport).not.toHaveBeenCalled();
+    s.type("morph-new\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    s.type("/logout\r");
+    await vi.waitFor(() => expect(s.screen()).toContain("the key was removed"));
+    s.type("/provider infron\r");
+    await vi.waitFor(() => expect(s.saved().endpoint).toBe(infron));
+    s.type("go\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(2));
+    expect(s.makeTransport.mock.calls.at(-1)?.[1]).toBe("infron-key");
+    s.type("/provider morphfactory\r");
+    await vi.waitFor(() => expect(s.current().secret?.title).toContain("Morphfactory"));
+    expect(readFileSync(join(s.cwd, ".motif", ".env"), "utf8")).not.toContain("morph-new");
+  });
+
+  it("changes provider from the Config panel and refuses a change while a task is running", async () => {
+    const s = session({ apiKey: "infron-key", providerCredentials: { morphfactory: { apiKey: "morph-key" } } });
+    s.type("/config\r");
+    const row = s.panel().rows.findIndex((r) => r.label === "Provider");
+    expect(row).toBeGreaterThanOrEqual(0);
+    s.type(DOWN.repeat(row) + RIGHT);
+    expect(s.value("Provider")).toBe("Morphfactory (BETA)");
+    expect(s.saved().endpoint).toBe(morph);
+    s.type(ESC);
+    s.transport.gated = true;
+    s.type("go\r");
+    await vi.waitFor(() => expect(s.transport.seen).toHaveLength(1));
+    s.type("/provider infron\r");
+    await vi.waitFor(() => expect(s.screen()).toContain("wait for the running task"));
+    s.type("/config provider infron\r");
+    await vi.waitFor(() => expect(s.screen()).toContain("Wait for the running task"));
+    expect(s.saved().endpoint).toBe(morph);
+    s.transport.open();
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
   });
 });

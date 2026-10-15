@@ -38,7 +38,7 @@ import {
   type StreamDelta,
   type ToolCall,
 } from "@motifcode/protocol";
-import { isInfronEndpoint, normalizeEndpoint } from "./config.js";
+import { apiKeyEnvForEndpoint, isInfronEndpoint, normalizeEndpoint } from "./config.js";
 
 export type { CompletionRequest, CompletionResponse };
 
@@ -393,9 +393,10 @@ export class HttpTransport implements Transport {
       if (res.status === 401 || res.status === 403) {
         // The one failure whose fix is never on the server. Say which side of
         // it the user is on: no key at all, or a key the endpoint refused.
+        const keyEnv = apiKeyEnvForEndpoint(this.endpoint);
         message += this.apiKey
-          ? " (the endpoint rejected the API key that was sent; check MOTIF_API_KEY)"
-          : " (no API key was sent; set MOTIF_API_KEY in the environment or in .env)";
+          ? ` (the endpoint rejected the API key that was sent; check ${keyEnv})`
+          : ` (no API key was sent; set ${keyEnv} in the environment or in .env)`;
       }
       const retryAfterMs =
         res.status === 429

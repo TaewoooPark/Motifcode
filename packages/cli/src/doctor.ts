@@ -15,6 +15,7 @@
  * it produces is not.
  */
 
+import { apiKeyEnvForEndpoint } from "@motifcode/core";
 import { MAX_CONTEXT, SAMPLING_DEFAULTS } from "@motifcode/protocol";
 import { detectSandbox } from "./sandbox.js";
 
@@ -85,6 +86,7 @@ export async function doctor(opts: DoctorOptions): Promise<Check[]> {
   const fetchImpl = opts.fetchImpl ?? globalThis.fetch;
   const endpoint = opts.endpoint.replace(/\/+$/, "").replace(/\/v1$/, "");
   const checks: Check[] = [];
+  const apiKeyEnv = apiKeyEnvForEndpoint(endpoint);
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (opts.apiKey) headers["authorization"] = `Bearer ${opts.apiKey}`;
 
@@ -113,7 +115,7 @@ export async function doctor(opts: DoctorOptions): Promise<Check[]> {
           name: "api key",
           state: "warn",
           detail: "none — requests go out unauthenticated",
-          fix: "set MOTIF_API_KEY in the environment or in a .env file (not needed for a local server without auth)",
+          fix: `set ${apiKeyEnv} in the environment or in a .env file (not needed for a local server without auth)`,
         },
   );
 
@@ -130,7 +132,7 @@ export async function doctor(opts: DoctorOptions): Promise<Check[]> {
         detail: `${endpoint} returned ${res.status}`,
         fix:
           res.status === 401 || res.status === 403
-            ? "the endpoint refused the credentials; check MOTIF_API_KEY"
+            ? `the endpoint refused the credentials; check ${apiKeyEnv}`
             : "start the server, or point --endpoint somewhere else",
       });
       return checks;
@@ -236,7 +238,7 @@ export async function doctor(opts: DoctorOptions): Promise<Check[]> {
         name: "authentication",
         state: "fail",
         detail: `the endpoint refused the request (${res.status}${text ? `: ${text}` : ""})`,
-        fix: opts.apiKey ? "the key was sent and rejected; check MOTIF_API_KEY" : "set MOTIF_API_KEY",
+        fix: opts.apiKey ? `the key was sent and rejected; check ${apiKeyEnv}` : `set ${apiKeyEnv}`,
       });
       return checks;
     }

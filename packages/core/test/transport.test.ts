@@ -110,6 +110,19 @@ describe("failure kinds", () => {
     expect(k.message).not.toContain("sk-bad");
   });
 
+  it.each([401, 403])("names the Morphfactory credential slot for a %s", async (status) => {
+    for (const apiKey of [undefined, "mf-rejected-key"]) {
+      const transport = new HttpTransport({
+        endpoint: "https://api-cbt.morphfactory.io/v1/", model: "motif/motif-3", apiKey,
+        fetchImpl: async () => new Response("Unauthorized", { status }),
+      });
+      const error = await transport.complete(req).catch((cause: unknown) => cause) as TransportError;
+      expect(error.message).toContain(apiKey ? "check MOTIF_MORPHFACTORY_API_KEY" : "set MOTIF_MORPHFACTORY_API_KEY");
+      expect(error.message).not.toContain("mf-rejected-key");
+      expect(error.retryable).toBe(false);
+    }
+  });
+
   it("treats a 2xx that is not a completion as a protocol error", async () => {
     // Reaching into `undefined` here used to produce an empty completion, which
     // reads as a model that said nothing rather than a server that answered

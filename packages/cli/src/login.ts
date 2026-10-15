@@ -15,10 +15,10 @@
  */
 
 import { homedir } from "node:os";
-import { ENV_API_KEY, normalizeEndpoint } from "@motifcode/core";
+import { ENV_API_KEY, ENV_MORPHFACTORY_API_KEY, PROVIDERS, normalizeEndpoint, type ProviderId } from "@motifcode/core";
 
 /** Where a key comes from, for the prompt. */
-export const KEY_PAGE = "https://infron.ai/dashboard/apiKeys";
+export const KEY_PAGE = PROVIDERS.infron.keyPage;
 
 export type VerifyResult = { ok: true } | { ok: false; reason: string };
 
@@ -83,24 +83,23 @@ async function serverMessage(res: Response): Promise<string> {
  * What was pasted, as a key.
  *
  * People paste the whole line from a dashboard or a `.env`: quotes, a
- * `MOTIF_API_KEY=` prefix, an `export`, a trailing newline. All of that is
- * the key's packaging, not the key.
+ * `MOTIF_API_KEY=` or `MOTIF_MORPHFACTORY_API_KEY=` prefix, an `export`, a
+ * trailing newline. All of that is the key's packaging, not the key.
  */
 export function normaliseKeyInput(raw: string): string {
   let s = raw.trim();
-  s = s.replace(new RegExp(`^(?:export\\s+)?${ENV_API_KEY}\\s*=\\s*`), "");
+  s = s.replace(new RegExp(`^(?:export\\s+)?(?:${ENV_API_KEY}|${ENV_MORPHFACTORY_API_KEY})\\s*=\\s*`), "");
   if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) s = s.slice(1, -1);
   return s.trim();
 }
 
 /** The lines the login prompt shows above the input. */
-export function loginLines(envPath: string, home = homedir()): string[] {
+export function loginLines(envPath: string, home = homedir(), provider: ProviderId = "infron"): string[] {
   const shown = envPath.startsWith(home + "/") ? `~${envPath.slice(home.length)}` : envPath;
   // Short lines: the box hard-wraps at its width, and a URL or a path cut
   // mid-word cannot be copied.
   return [
-    `Get one at ${KEY_PAGE}`,
-    "Motif-3 is free there through September 2026.",
+    `Get one at ${PROVIDERS[provider].keyPage}`,
     `The key is checked with the endpoint and saved to ${shown},`,
     "readable only by you and never shown to the model.",
   ];
