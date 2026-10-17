@@ -103,8 +103,12 @@ export interface SummarizeOptions {
  *
  * The transcript goes as is, with the prompt as one more user turn. No tool
  * may be called — the prompt says so and the reply is read as text; a model
- * that answers with a tool call has produced an empty summary, and the caller
+ * that answers with a tool call has not written the handoff, and the caller
  * treats that as a failed compaction rather than as a history of nothing.
+ * That holds whatever prose came with the call: a model that carries on
+ * working opens with a line like "Let me check the current state first",
+ * and taking that line as the summary would replace the whole transcript
+ * with it.
  */
 export async function summarizeTranscript(opts: SummarizeOptions): Promise<string> {
   const prompt = opts.focus
@@ -119,7 +123,10 @@ export async function summarizeTranscript(opts: SummarizeOptions): Promise<strin
   // Reasoning is separated the way the loop separates it: by the server when
   // it does, and by the scrubber when the body carries the think block itself.
   const body = response.reasoningContent !== undefined ? response.content : splitThinking(response.rawText).content;
-  const text = body.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, "").trim();
+  if ((response.toolCalls?.length ?? 0) > 0 || body.includes("<tool_call>")) {
+    throw new Error("the model called a tool instead of writing a summary; the context was left as it was");
+  }
+  const text = body.trim();
   if (text === "") throw new Error("the model returned no summary; the context was left as it was");
   return text;
 }

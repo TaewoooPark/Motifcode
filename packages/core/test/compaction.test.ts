@@ -58,13 +58,25 @@ describe("the summary request", () => {
     expect(String(last.content)).toContain("concentrate on: the failing test");
   });
 
-  it("refuses an empty summary, and drops a tool call the model made anyway", async () => {
+  it("refuses an empty summary, and a reply that calls a tool", async () => {
     const empty = new ScriptedTransport(["</think>"]);
     await expect(
       summarizeTranscript({ transport: empty, messages: [{ role: "user", content: "t" }], tools: [] }),
     ).rejects.toThrow(/no summary/);
-    const withCall = new ScriptedTransport([`</think>Summary here<tool_call>{"name":"bash","arguments":{"command":"ls"}}</tool_call>`]);
-    expect(await summarizeTranscript({ transport: withCall, messages: [{ role: "user", content: "t" }], tools: [] })).toBe("Summary here");
+    // The prose that comes with a call opens a working turn; it is not a handoff.
+    const inline = new ScriptedTransport([`</think>Let me check the state first.<tool_call>{"name":"bash","arguments":{"command":"ls"}}</tool_call>`]);
+    await expect(
+      summarizeTranscript({ transport: inline, messages: [{ role: "user", content: "t" }], tools: [] }),
+    ).rejects.toThrow(/called a tool/);
+    const parsed = new ScriptedTransport([{
+      content: "Let me check the state first.",
+      rawText: "Let me check the state first.",
+      toolCalls: [{ function: { name: "bash", arguments: { command: "git status" } } }],
+      ms: 1,
+    }]);
+    await expect(
+      summarizeTranscript({ transport: parsed, messages: [{ role: "user", content: "t" }], tools: [] }),
+    ).rejects.toThrow(/called a tool/);
   });
 });
 
@@ -136,5 +148,39 @@ describe("in the loop", () => {
     expect(notices.some((n) => n.includes("compaction failed"))).toBe(true);
     // The tool result is still there.
     expect(t.seen[2]!.messages.some((m) => m.role === "tool")).toBe(true);
+  });
+
+  it("keeps the transcript when the model starts working instead, and compacts on the next turn", async () => {
+    const t = new ScriptedTransport([
+      withUsage(toolCallBody("bash", { command: "ls" }), 5000),
+      {
+        content: "Let me check the current state first.",
+        rawText: "Let me check the current state first.",
+        toolCalls: [{ function: { name: "bash", arguments: { command: "git status" } } }],
+        ms: 1,
+      },
+      withUsage(toolCallBody("bash", { command: "pwd" }), 5000),
+      "</think>HANDOFF SUMMARY",
+      withUsage(doneBody("d"), 100),
+      withUsage(doneBody("d", { confirm: true }), 100),
+    ]);
+    const summaries: string[] = [];
+    const notices: string[] = [];
+    const r = await runLoop({
+      ...base,
+      transport: t,
+      emit: (e) => {
+        if (e.type === "compaction") summaries.push(e.summary);
+        if (e.type === "notice") notices.push(e.text);
+      },
+      compaction: { limitTokens: 4000 },
+    });
+    expect(r.reason).toBe("done");
+    expect(notices.some((n) => n.includes("called a tool"))).toBe(true);
+    expect(summaries).toEqual(["HANDOFF SUMMARY"]);
+    // After the refused reply the transcript is whole; after the real summary it is replaced.
+    expect(t.seen[2]!.messages.some((m) => m.role === "tool")).toBe(true);
+    expect(t.seen[4]!.messages.some((m) => m.role === "tool")).toBe(false);
+    expect(String(t.seen[4]!.messages.at(-1)!.content)).toContain("HANDOFF SUMMARY");
   });
 });
