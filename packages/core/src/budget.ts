@@ -143,7 +143,7 @@ export function nextChannel(current: ChannelId): ChannelId | null {
 /* ------------------------------------------------------------------ */
 
 export interface LoopGuardOptions {
-  /** Identical action signatures in a row before we stop. */
+  /** Turns in a row with identical actions and identical output before we stop. */
   repeatLimit?: number;
   /** Turns with no tool output change before we stop. */
   stallLimit?: number;
@@ -182,13 +182,17 @@ export class LoopGuard {
   }
 
   observe(signature: string, output: string): LoopVerdict {
-    if (signature !== "" && signature === this.lastSignature) this.repeats++;
+    // A repeat needs the same result as well as the same call. A resumable job
+    // or a poll is driven by repeating one command whose output moves on; that
+    // is progress, and stopping it ended long sessions that still had work to do.
+    const sameOutput = output === this.lastOutput;
+    if (signature !== "" && signature === this.lastSignature && sameOutput) this.repeats++;
     else {
       this.lastSignature = signature;
       this.repeats = 1;
     }
 
-    if (output === this.lastOutput && output !== "") this.stalls++;
+    if (sameOutput && output !== "") this.stalls++;
     else {
       this.lastOutput = output;
       this.stalls = 0;
