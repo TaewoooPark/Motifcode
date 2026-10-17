@@ -13,6 +13,7 @@ import { CORE_TOOLS } from "@motifcode/tools";
 import { FaultTransport, ScriptedTransport, doneBody, toolCallBody } from "@motifcode/replay";
 import {
   EmptyTaskError,
+  LoopGuard,
   TransportError,
   runLoop,
   resetIds,
@@ -594,6 +595,39 @@ describe("loop detection", () => {
     const r = await runLoop({ ...base, transport, executor: okExecutor, emit, maxTurns: 20 });
     expect(r.reason).toBe("loop_detected");
     expect(kinds(events, "loop_detected")).toHaveLength(1);
+  });
+
+  it("keeps going when the same action makes progress", async () => {
+    // A resumable fit is driven by one command, run again until it says done.
+    // Two long benchmark sessions were stopped at its third call, though each
+    // call had run new evaluations.
+    const { events, emit } = collect();
+    const step = toolCallBody("bash", { command: "python3 fit.py step spec.json --budget 600" });
+    const transport = new ScriptedTransport([
+      step, step, step, step, step,
+      doneBody("fit converged"),
+      doneBody("fit converged", { confirm: true }),
+    ]);
+    let calls = 0;
+    const executor: Executor = {
+      run: async () => ({ ok: true, output: `e00${++calls} chi2 ${(60 / calls).toFixed(1)}` }),
+    };
+    const r = await runLoop({ ...base, transport, executor, emit });
+    expect(r.reason).toBe("done");
+    expect(calls).toBe(5);
+    expect(kinds(events, "loop_detected")).toHaveLength(0);
+  });
+
+  it("counts a repeat only when the output repeats too", () => {
+    const sig = (command: string) => LoopGuard.signature([{ name: "bash", arguments: { command } }]);
+    const stuck = new LoopGuard();
+    expect([1, 2, 3].map(() => stuck.observe(sig("make"), "error: x").tripped)).toEqual([false, false, true]);
+    const moving = new LoopGuard();
+    expect([1, 2, 3, 4, 5, 6].some((i) => moving.observe(sig("make"), `step ${i}`).tripped)).toBe(false);
+    // Different calls that keep producing the same output are still a stall.
+    const stalled = new LoopGuard();
+    expect([1, 2, 3, 4, 5].map((i) => stalled.observe(sig(`try ${i}`), "no such file").tripped))
+      .toEqual([false, false, false, false, true]);
   });
 });
 
