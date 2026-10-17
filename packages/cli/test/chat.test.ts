@@ -864,6 +864,17 @@ describe("interactive session", () => {
     expectNoRepaintSince(s, before);
   });
 
+  it("still deletes forward and refreshes on Ctrl-D in a nonempty draft", async () => {
+    const t = new GateTransport(reply("done"));
+    const s = session(t);
+    open.push(s);
+    s.type("abxc\x1b[D\x1b[D\x04");
+    expect(s.screen()).toContain("> abc");
+    s.type("\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    expect(t.seen[0]!.messages[1]!.content).toBe("abc");
+  });
+
   it("asks before a command runs, and a yes runs it", async () => {
     const t = new GateTransport([toolCallBody("bash", { command: "echo allowed-output" }), ...reply("done")]);
     const s = session(t, { settings: { model: "m", endpoint: "https://x", channel: "toolcall", maxTurns: 20, cwd: mkdtempSync(join(tmpdir(), "motif-chat-")), theme: "motif", compactAt: 0.75, permissions: "ask" } });
