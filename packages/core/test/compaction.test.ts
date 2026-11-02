@@ -58,25 +58,61 @@ describe("the summary request", () => {
     expect(String(last.content)).toContain("concentrate on: the failing test");
   });
 
-  it("refuses an empty summary, and a reply that calls a tool", async () => {
+  it("refuses an empty summary", async () => {
     const empty = new ScriptedTransport(["</think>"]);
     await expect(
       summarizeTranscript({ transport: empty, messages: [{ role: "user", content: "t" }], tools: [] }),
     ).rejects.toThrow(/no summary/);
-    // The prose that comes with a call opens a working turn; it is not a handoff.
-    const inline = new ScriptedTransport([`</think>Let me check the state first.<tool_call>{"name":"bash","arguments":{"command":"ls"}}</tool_call>`]);
+  });
+
+  it.each([
+    'Let me check first.<tool_call>{"name":"bash","arguments":{"command":"ls"}}</tool_call>',
+    'Let me check first.<tool_call>{"name":"bash","arguments":',
+    'Let me check first.<tool_call>',
+    'Let me check first.<tool_call>not JSON</tool_call>',
+    '```json\n<tool_call>{"name":"bash","arguments":{"command":"ls"}}</tool_call>\n```',
+    '`<tool_call>{"name":"bash","arguments":{"command":"ls"}}</tool_call>`',
+    'The parser recognizes `<tool_call>`. Now inspect.<tool_call>{"name":"bash","arguments":',
+  ])("refuses an inline call without stripping it into a summary: %s", async (body) => {
+    const inline = new ScriptedTransport([`</think>${body}`]);
     await expect(
       summarizeTranscript({ transport: inline, messages: [{ role: "user", content: "t" }], tools: [] }),
     ).rejects.toThrow(/called a tool/);
+  });
+
+  it("refuses a parsed call even when the server provides nonempty summary text", async () => {
     const parsed = new ScriptedTransport([{
       content: "Let me check the state first.",
       rawText: "Let me check the state first.",
+      reasoningContent: "",
       toolCalls: [{ function: { name: "bash", arguments: { command: "git status" } } }],
       ms: 1,
     }]);
     await expect(
       summarizeTranscript({ transport: parsed, messages: [{ role: "user", content: "t" }], tools: [] }),
     ).rejects.toThrow(/called a tool/);
+  });
+
+  it.each([
+    'FILES AND CODE: the parser recognizes `<tool_call>`. NEXT STEPS: test it.',
+    'FILES AND CODE: the parser recognizes ``<tool_call>``. NEXT STEPS: test it.',
+    'FILES AND CODE: the opener is "<tool_call>". NEXT STEPS: test it.',
+    "FILES AND CODE: the opener is '<tool_call>'. NEXT STEPS: test it.",
+    'FILES AND CODE:\n```ts\nbody.includes("<tool_call>")\n```\nNEXT STEPS: test it.',
+  ])("preserves a handoff that quotes a marker instead of calling a tool: %s", async (summary) => {
+    for (const separated of [false, true]) {
+      const body = separated ? summary : `</think>${summary}`;
+      const t = new ScriptedTransport([{
+        content: body, rawText: body, ms: 1,
+        ...(separated ? { reasoningContent: "", toolCalls: [] } : {}),
+      }]);
+      expect(await summarizeTranscript({ transport: t, messages: [{ role: "user", content: "fix the parser" }], tools: [] })).toBe(summary);
+    }
+  });
+
+  it("does not treat a marker in reasoning as a tool call", async () => {
+    const t = new ScriptedTransport(["Do not emit <tool_call> here.</think>HANDOFF SUMMARY"]);
+    expect(await summarizeTranscript({ transport: t, messages: [{ role: "user", content: "t" }], tools: [] })).toBe("HANDOFF SUMMARY");
   });
 });
 
@@ -156,6 +192,7 @@ describe("in the loop", () => {
       {
         content: "Let me check the current state first.",
         rawText: "Let me check the current state first.",
+        reasoningContent: "",
         toolCalls: [{ function: { name: "bash", arguments: { command: "git status" } } }],
         ms: 1,
       },
@@ -166,9 +203,14 @@ describe("in the loop", () => {
     ]);
     const summaries: string[] = [];
     const notices: string[] = [];
+    const executed: string[] = [];
     const r = await runLoop({
       ...base,
       transport: t,
+      executor: { run: async (call) => {
+        executed.push(String(call.arguments.command));
+        return { ok: true, output: "ORIGINAL TOOL RESULT" };
+      } },
       emit: (e) => {
         if (e.type === "compaction") summaries.push(e.summary);
         if (e.type === "notice") notices.push(e.text);
@@ -178,7 +220,9 @@ describe("in the loop", () => {
     expect(r.reason).toBe("done");
     expect(notices.some((n) => n.includes("called a tool"))).toBe(true);
     expect(summaries).toEqual(["HANDOFF SUMMARY"]);
+    expect(executed).toEqual(["ls", "pwd"]);
     // After the refused reply the transcript is whole; after the real summary it is replaced.
+    expect(t.seen[2]!.messages).toEqual(t.seen[1]!.messages.slice(0, -1));
     expect(t.seen[2]!.messages.some((m) => m.role === "tool")).toBe(true);
     expect(t.seen[4]!.messages.some((m) => m.role === "tool")).toBe(false);
     expect(String(t.seen[4]!.messages.at(-1)!.content)).toContain("HANDOFF SUMMARY");

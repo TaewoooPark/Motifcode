@@ -123,7 +123,12 @@ export async function summarizeTranscript(opts: SummarizeOptions): Promise<strin
   // Reasoning is separated the way the loop separates it: by the server when
   // it does, and by the scrubber when the body carries the think block itself.
   const body = response.reasoningContent !== undefined ? response.content : splitThinking(response.rawText).content;
-  if ((response.toolCalls?.length ?? 0) > 0 || body.includes("<tool_call>")) {
+  // A handoff about the parser can quote the marker itself, including in a
+  // source string. Exclude only that quoted token from detection; a quoted or
+  // fenced call with a payload still counts, as does an unfinished call.
+  // Keep the original body intact for the summary.
+  const callBody = body.replace(/(["'`])<tool_call>\1/g, "");
+  if ((response.toolCalls?.length ?? 0) > 0 || callBody.includes("<tool_call>")) {
     throw new Error("the model called a tool instead of writing a summary; the context was left as it was");
   }
   const text = body.trim();
