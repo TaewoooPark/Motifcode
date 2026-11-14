@@ -106,6 +106,8 @@ export const term = {
   clearScreen: `${ESC}2J`,
   /** Top-left of the visible screen. */
   home: `${ESC}H`,
+  /** Erase from the cursor to the end of the screen; scrollback is untouched. */
+  clearBelow: `${ESC}J`,
   lineStart: "\r",
   /** Reserve a blank row before painting live content; may scroll at the bottom. */
   index: "\x1bD",
