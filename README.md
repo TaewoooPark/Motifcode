@@ -644,6 +644,23 @@ science and code. [taewoopark.com](https://taewoopark.com) ·
 
 ---
 
+## Contributors
+
+[![Motifcode contributors](https://contrib.rocks/image?repo=TaewoooPark/Motifcode)](https://github.com/TaewoooPark/Motifcode/graphs/contributors)
+
+---
+
+## Star History
+
+<a href="https://simrepo.dera.page/TaewoooPark/Motifcode">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=TaewoooPark/Motifcode&amp;type=date&amp;theme=dark&amp;legend=top-left">
+    <img src="https://star-history.dera.page/svg?repos=TaewoooPark/Motifcode&amp;type=date&amp;legend=top-left" alt="Motifcode’s GitHub stars over time">
+  </picture>
+</a>
+
+---
+
 ## Licence
 
 Apache-2.0. The Motif-3 weights and chat template are MIT, from

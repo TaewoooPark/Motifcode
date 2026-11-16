@@ -623,6 +623,23 @@ pnpm lint:tools    # 스키마 린터 — 느슨한 스키마가 있으면 빌�
 
 ---
 
+## 기여자
+
+[![Motifcode 기여자](https://contrib.rocks/image?repo=TaewoooPark/Motifcode)](https://github.com/TaewoooPark/Motifcode/graphs/contributors)
+
+---
+
+## 스타 히스토리
+
+<a href="https://simrepo.dera.page/TaewoooPark/Motifcode">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=TaewoooPark/Motifcode&amp;type=date&amp;theme=dark&amp;legend=top-left">
+    <img src="https://star-history.dera.page/svg?repos=TaewoooPark/Motifcode&amp;type=date&amp;legend=top-left" alt="시간에 따른 Motifcode의 GitHub 스타 수">
+  </picture>
+</a>
+
+---
+
 ## 라이선스
 
 Apache-2.0. Motif-3의 가중치와 채팅 템플릿은
