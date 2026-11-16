@@ -49,7 +49,7 @@ import {
 } from "./render.js";
 import { compactReadings, readings, statusLine } from "./statusline.js";
 import { NO_COLOR, paint, severityColor, style, term } from "./theme.js";
-import { displayWidth, truncateToWidth, wrapToWidth } from "./width.js";
+import { displayWidth, expandTabs, truncateToWidth, wrapToWidth } from "./width.js";
 import type { LoopEvent } from "@motifcode/core";
 
 export interface ScreenOptions {
@@ -142,6 +142,15 @@ export class Screen {
   private state: ViewState = initialState();
   /** Cells, not rendered rows: wrapping changes on resize without new output. */
   private committedCells = 0;
+  /**
+   * Physical rows of committed lines still on the visible screen, directly
+   * above the footer, and the width they were written at. Rows above them
+   * are in scrollback, which can only be appended to.
+   */
+  private committedOnScreen = 0;
+  private committedOnScreenWidth = 0;
+  /** Render options in effect when a change arrived while the output viewer was open. */
+  private staleSince: RenderOptions | null = null;
   /** The rows of the last painted footer, top to bottom. */
   private footer: Row[] = [];
   /** Where the cursor was left: the footer row index and column, or null when below the footer. */
@@ -401,11 +410,9 @@ export class Screen {
   }
 
   toggleThinking(): void {
+    const before = this.renderOptions;
     this.showThinking = !this.showThinking;
-    // Showing rewrites lines already committed to scrollback, so the stable
-    // region has to be rebuilt rather than appended to.
-    this.committedCells = 0;
-    this.paint();
+    this.rerender(before);
   }
 
   /* ---------------------------------------------------------------- */
@@ -446,18 +453,60 @@ export class Screen {
     return code ? paint(l.text, code) : l.text;
   }
 
+  /** Each entry is one physical row, including its style and line ending. */
+  private transcriptRows(cell: Cell, opts: RenderOptions): string[] {
+    const width = Math.max(1, opts.width);
+    const rows: string[] = [];
+    for (const line of renderCellStyled(cell, opts)) {
+      // Apply inline Markdown before measuring. Only our own SGR escapes can
+      // occur here because renderCellStyled sanitises the cell's text.
+      const coloured = this.colour({ ...line, text: expandTabs(line.text) });
+      let row = "";
+      let activeStyle = "";
+      let used = 0;
+      let asciiOnly = true;
+      const endRow = (softWrap = false): void => {
+        rows.push(row + (activeStyle ? style.reset : "") + (softWrap ? "" : "\n"));
+        row = activeStyle; // A redraw may start on a continuation row.
+        used = 0;
+        asciiOnly = true;
+      };
+      for (const [token] of coloured.matchAll(/\x1b\[[0-9;]*m|[\s\S]/gu)) {
+        if (token.startsWith("\x1b")) {
+          row += token;
+          activeStyle = token === style.reset ? "" : activeStyle + token;
+        } else if (token === "\n") {
+          endRow();
+        } else {
+          const columns = displayWidth(token);
+          const shown = columns > width ? "?" : token;
+          const size = columns > width ? 1 : columns;
+          const ascii = shown >= " " && shown <= "~";
+          // Leave ordinary ASCII wraps to the terminal so it can reflow them
+          // on widening. Use explicit rows where Unicode width policies vary.
+          if (used + size > width) endRow(asciiOnly && ascii && used === width);
+          row += shown;
+          used += size;
+          asciiOnly &&= ascii;
+        }
+      }
+      endRow();
+    }
+    return rows;
+  }
+
   /** Paths under this directory are shown relative to it from now on. */
   setCwd(cwd: string): void {
+    const before = this.renderOptions;
     this.cwd = cwd;
-    this.committedCells = 0;
-    this.paint();
+    this.rerender(before);
   }
 
   /** Change the inline output setting; Ctrl-O opens the independent viewer. */
   toggleVerbose(): void {
+    const before = this.renderOptions;
     this.verbose = !this.verbose;
-    this.committedCells = 0;
-    this.paint();
+    this.rerender(before);
   }
 
   get verboseOutput(): boolean {
@@ -479,7 +528,10 @@ export class Screen {
     if (!this.outputView) return;
     this.outputView = null;
     this.write(term.leaveAlternate + (this.cursorAt || !this.composer ? term.showCursor : term.hideCursor));
-    this.paint();
+    const stale = this.staleSince;
+    this.staleSince = null;
+    if (stale) this.rerender(stale);
+    else this.paint();
   }
 
   /** Consume navigation/pastes without editing the draft or submitting a task. */
@@ -562,12 +614,17 @@ export class Screen {
       // Only settled cells go to scrollback. A tool cell between `tool_start` and
       // `tool_end` is still growing, and committing it there would print a tool
       // that appears to have produced nothing.
-      for (const cell of this.state.cells.slice(this.committedCells, settledEnd)) {
-        for (const line of renderCellStyled(cell, this.renderOptions)) this.write(this.colour(line) + "\n");
-      }
+      const cells = this.state.cells.slice(this.committedCells, settledEnd);
+      const opts = this.renderOptions;
+      const output = next
+        ? cells.flatMap((cell) => this.transcriptRows(cell, opts))
+        : cells.flatMap((cell) => renderCellStyled(cell, opts).map((line) => this.colour(line) + "\n"));
+      for (const row of output) this.write(row);
       this.committedCells = settledEnd;
-      if (next) this.writeFooter(next, width);
-      else this.paintFooter();
+      if (next) {
+        this.writeFooter(next, width);
+        this.noteCommittedOnScreen(this.onScreenAt(width) + output.length, next.rows.length);
+      } else this.paintFooter();
     });
   }
 
@@ -632,22 +689,91 @@ export class Screen {
     if (this.outputView) { this.outputView.painted = ""; this.paintOutputView(); return; }
     const width = this.columns();
     const settledEnd = settledCount(this.state);
-    const previous = this.state.cells.slice(0, this.committedCells).flatMap((cell) => renderCellStyled(cell, this.renderOptions));
-    const fresh = this.state.cells.slice(this.committedCells, settledEnd).flatMap((cell) => renderCellStyled(cell, this.renderOptions));
+    const opts = this.renderOptions;
+    const previous = this.state.cells.slice(0, this.committedCells).flatMap((cell) => this.transcriptRows(cell, opts));
+    const fresh = this.state.cells.slice(this.committedCells, settledEnd).flatMap((cell) => this.transcriptRows(cell, opts));
     this.committedCells = settledEnd;
     const footer = this.buildFooter(width);
-    const physical: string[] = [];
-    for (const l of previous) for (const t of wrapToWidth(l.text, width)) physical.push(this.colour({ ...l, text: t }));
     const keep = Math.max(0, this.rowCount() - footer.rows.length - 1);
     this.withSync(() => {
       this.footer = [];
       this.cursorAt = null;
       this.write(term.clearScreen + term.home);
-      for (const line of physical.slice(Math.max(0, physical.length - keep))) this.write(line + "\n");
+      for (const row of previous.slice(Math.max(0, previous.length - keep))) this.write(row);
       // Commit newly settled text even when completion raced the resize.
-      for (const line of fresh) this.write(this.colour(line) + "\n");
+      for (const row of fresh) this.write(row);
       this.writeFooter(footer, width);
     });
+    this.noteCommittedOnScreen(Math.min(previous.length, keep) + fresh.length, footer.rows.length);
+  }
+
+  /**
+   * Show the transcript under changed render options. Appending the settled
+   * cells again would put a second copy of every message into scrollback, so
+   * only the committed rows still on screen are erased and redrawn, from the
+   * first of them down; the hero, shell output and scrollback above stay.
+   */
+  private rerender(before: RenderOptions): void {
+    if (!this.interactive) { this.paint(); return; }
+    if (this.outputView) {
+      this.staleSince ??= before;
+      this.paintOutputView();
+      return;
+    }
+    const width = this.columns();
+    if (this.footer.length > 0 && (width < this.paintedWidth || this.rowCount() !== this.paintedHeight)) {
+      this.repaintAll();
+      return;
+    }
+    const committed = this.state.cells.slice(0, this.committedCells);
+    const onScreen = this.onScreenAt(width);
+    // Walk up from the newest committed cell through the rows on screen. A
+    // cell that drew nothing (hidden reasoning) exactly at the top edge is
+    // included: drawing it now duplicates nothing in scrollback.
+    let left = onScreen;
+    let first = committed.length;
+    while (first > 0 && left >= 0) {
+      const height = this.transcriptRows(committed[first - 1]!, before).length;
+      if (left === 0 && height > 0) break;
+      first -= 1;
+      left -= height;
+    }
+    const redraw = committed.slice(first).flatMap((cell, i) => {
+      const now = this.transcriptRows(cell, this.renderOptions);
+      const scrolled = i === 0 ? Math.max(0, -left) : 0;
+      if (scrolled === 0) return now;
+      // The top of this cell is already in scrollback. Skip those rows only
+      // if they would be drawn the same way; a partial repeat beats a lost line.
+      const old = this.transcriptRows(cell, before);
+      return now.length >= scrolled && now.slice(0, scrolled).every((r, j) => r === old[j]) ? now.slice(scrolled) : now;
+    });
+    const settledEnd = settledCount(this.state);
+    const fresh = this.state.cells.slice(this.committedCells, settledEnd).flatMap((cell) => this.transcriptRows(cell, this.renderOptions));
+    this.committedCells = settledEnd;
+    const footer = this.buildFooter(width);
+    this.withSync(() => {
+      this.clearFooter();
+      this.write(term.up(onScreen) + term.lineStart + term.clearBelow);
+      for (const row of [...redraw, ...fresh]) this.write(row);
+      this.writeFooter(footer, width);
+    });
+    this.noteCommittedOnScreen(redraw.length + fresh.length, footer.rows.length);
+  }
+
+  /**
+   * Committed rows on screen that were written at this width. Rows written at
+   * another width may have been reflowed by the terminal, so their positions
+   * are unknown: they are left as they are, never erased or repeated.
+   */
+  private onScreenAt(width: number): number {
+    return width === this.committedOnScreenWidth ? this.committedOnScreen : 0;
+  }
+
+  /** Rows written above a footer of `footerRows` rows; overflow scrolled into scrollback. */
+  private noteCommittedOnScreen(rows: number, footerRows: number): void {
+    // The cursor rests on the line below the footer, so it needs a row too.
+    this.committedOnScreen = Math.max(0, Math.min(rows, this.rowCount() - footerRows - 1));
+    this.committedOnScreenWidth = this.columns();
   }
 
   /** Footer rows from text that may be longer than the width: split here, never wrapped by the terminal. */

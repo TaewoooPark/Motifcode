@@ -121,6 +121,256 @@ describe("physical footer viewport", () => {
     } finally { terminal.dispose(); }
   });
 
+  it.each([
+    ["reasoning while streaming", true, (s: Screen) => s.toggleThinking()],
+    ["reasoning after completion", false, (s: Screen) => s.toggleThinking()],
+    ["verbose output", false, (s: Screen) => s.toggleVerbose()],
+    ["working directory", false, (s: Screen) => s.setCwd("/tmp/elsewhere")],
+  ] as const)("redraws instead of re-emitting settled transcript when toggling %s", async (_name, streaming, toggle) => {
+    for (const earlier of [0, 30]) await toggledTranscript(earlier, streaming, toggle, _name.startsWith("reasoning"));
+  });
+
+  it("keeps settled messages once when tall reasoning straddles the top of the screen", async () => {
+    const reasoning = Array.from({ length: 15 }, (_, i) => `REASONING_LINE_${String(i).padStart(2, "0")}`).join("\n");
+    const frames = recording(40, 12, (screen, frame) => {
+      screen.setComposer({ draft: { text: "keep", cursor: 2 } });
+      screen.append({ kind: "user", text: "CASE_REASONING" });
+      screen.apply({ type: "reasoning_delta", text: reasoning });
+      screen.apply({ type: "reasoning_end", chars: reasoning.length, ms: 8100 });
+      screen.apply({ type: "content_delta", text: "FINAL_ANSWER" });
+      frame();
+      for (let i = 0; i < 4; i++) {
+        screen.toggleThinking();
+        frame();
+      }
+    });
+    const terminal = new Terminal({ convertEol: true, allowProposedApi: true, cols: 40, rows: 12, scrollback: 2000 });
+    try {
+      for (const [i, frame] of frames.entries()) {
+        await write(terminal, frame);
+        const buffer = terminal.buffer.active;
+        const all = lines(terminal).join("\n");
+        const visible = lines(terminal).slice(buffer.baseY).join("\n");
+        expect(all.split("CASE_REASONING"), `user after frame ${i}`).toHaveLength(2);
+        expect(all.split("FINAL_ANSWER"), `answer after frame ${i}`).toHaveLength(2);
+        expect(visible, `answer on screen after frame ${i}`).toContain("FINAL_ANSWER");
+        // Odd frames follow an odd number of toggles: the end of the reasoning is on screen.
+        expect(visible.includes("REASONING_LINE_14"), `reasoning shown after frame ${i}`).toBe(i % 2 === 1);
+        expect(buffer.getLine(buffer.baseY + buffer.cursorY)!.translateToString(true)).toContain("keep");
+      }
+    } finally { terminal.dispose(); }
+  });
+
+  it.each([
+    ["inline Markdown", { kind: "assistant", text: `**${"x".repeat(19)}**\n**${"B".repeat(28)}**` }],
+    ["embedded newlines", { kind: "notice", level: "error", text: "notice A\nnotice B\nnotice C\nnotice D" }],
+    ["tabs", { kind: "user", text: "\t".repeat(5) + "TAB_END" }],
+  ] as const)("preserves physical transcript rows containing %s across toggles", async (kind, cell) => {
+    vi.stubEnv("NO_COLOR", undefined);
+    vi.stubEnv("TERM", "xterm-256color");
+    vi.resetModules();
+    const { Screen: ColourScreen } = await import("../src/screen.js");
+    const terminal = new Terminal({ convertEol: true, allowProposedApi: true, cols: 24, rows: 24 });
+    const chunks = ["SHELL_OUTPUT\n"];
+    const screen = new ColourScreen({ write: (text) => chunks.push(text), columns: () => 24, rows: () => 24, interactive: true });
+    try {
+      screen.setComposer({ draft: { text: "keep", cursor: 2 } });
+      screen.append({ kind: "user", text: "FIRST_USER" });
+      screen.append(cell);
+      await write(terminal, chunks.splice(0).join(""));
+      const before = lines(terminal);
+      expect(before[0]).toBe("SHELL_OUTPUT");
+      for (let i = 0; i < 2; i++) {
+        screen.toggleThinking();
+        await write(terminal, chunks.splice(0).join(""));
+        expect(lines(terminal)).toEqual(before);
+        const buffer = terminal.buffer.active;
+        expect(buffer.cursorX).toBe(6);
+        expect(buffer.getLine(buffer.baseY + buffer.cursorY)!.translateToString(true)).toContain("keep");
+        if (kind === "inline Markdown") {
+          expect(before).toContain("⏺ " + "x".repeat(19));
+          const start = before.indexOf("  " + "B".repeat(22));
+          expect(start).toBeGreaterThan(0);
+          // The opening and closing markup delimiters are on different rows.
+          expect(buffer.getLine(start)!.getCell(2)!.isBold()).toBeTruthy();
+          expect(buffer.getLine(start + 1)!.getCell(0)!.isBold()).toBeTruthy();
+        } else if (kind === "tabs") {
+          const end = before.indexOf("B_END");
+          expect(end).toBeGreaterThan(0);
+          expect(before[end - 1]).toBe(">" + " ".repeat(21) + "TA");
+          expect(buffer.getLine(end)!.isWrapped).toBe(true);
+        }
+      }
+    } finally { screen.finish(); terminal.dispose(); }
+  });
+
+  it("leaves the splash above the transcript in place when toggling", async () => {
+    const frames = recording(60, 30, (screen, frame) => {
+      screen.splash({ model: "SPLASH_MODEL", endpoint: "http://fixture", channel: "chat" });
+      screen.setComposer({ draft: { text: "keep", cursor: 2 } });
+      screen.append({ kind: "user", text: "CASE_REASONING" });
+      screen.apply({ type: "reasoning_delta", text: "THINKING_TEXT" });
+      screen.apply({ type: "reasoning_end", chars: 13, ms: 900 });
+      screen.apply({ type: "content_delta", text: "FINAL_ANSWER" });
+      frame();
+      for (let i = 0; i < 3; i++) { screen.toggleThinking(); frame(); }
+    });
+    const terminal = new Terminal({ convertEol: true, allowProposedApi: true, cols: 60, rows: 30, scrollback: 2000 });
+    try {
+      for (const frame of frames) await write(terminal, frame);
+      const all = lines(terminal).join("\n");
+      expect(all.split("SPLASH_MODEL")).toHaveLength(2);
+      expect(all.split("CASE_REASONING")).toHaveLength(2);
+      expect(all.split("FINAL_ANSWER")).toHaveLength(2);
+      expect(all).toContain("THINKING_TEXT");
+    } finally { terminal.dispose(); }
+  });
+
+  it("leaves rows from before a widening resize alone and toggles later ones", async () => {
+    let cols = 40;
+    const chunks: string[] = [];
+    const screen = new Screen({ write: (text) => chunks.push(text), columns: () => cols, rows: () => 12, interactive: true });
+    const terminal = new Terminal({ convertEol: true, allowProposedApi: true, cols, rows: 12, scrollback: 2000 });
+    const messages = Array.from({ length: 8 }, (_, i) => `WIDE_${i}_${"x".repeat(50)}`);
+    try {
+      screen.setComposer({ draft: { text: "keep", cursor: 2 } });
+      for (const text of messages) screen.append({ kind: "user", text });
+      screen.apply({ type: "reasoning_delta", text: "THINKING_TEXT" });
+      screen.apply({ type: "reasoning_end", chars: 13, ms: 900 });
+      screen.apply({ type: "content_delta", text: "FINAL_ANSWER" });
+      await write(terminal, chunks.splice(0).join(""));
+      cols = 80;
+      terminal.resize(cols, 12);
+      screen.setHint("after widening");
+      // Rows laid out at the old width are left alone (their reflow is the
+      // terminal's); nothing settled may be erased or repeated. A turn settled
+      // after the widening is tracked again, so the toggle applies to it.
+      screen.append({ kind: "user", text: "NEW_USER" });
+      screen.apply({ type: "reasoning_delta", text: "NEW_THINKING" });
+      screen.apply({ type: "reasoning_end", chars: 12, ms: 900 });
+      screen.apply({ type: "content_delta", text: "NEW_ANSWER" });
+      await write(terminal, chunks.splice(0).join(""));
+      for (const shown of [true, false]) {
+        screen.toggleThinking();
+        await write(terminal, chunks.splice(0).join(""));
+        const visible = lines(terminal).slice(terminal.buffer.active.baseY).join("\n");
+        expect(visible.includes("NEW_THINKING"), `new turn reasoning shown=${shown}`).toBe(shown);
+      }
+      const all = lines(terminal).join("\n").replace(/\n/g, "");
+      for (const text of [...messages, "FINAL_ANSWER", "NEW_USER", "NEW_ANSWER"]) expect(all.split(text), text).toHaveLength(2);
+    } finally { screen.finish(); terminal.dispose(); }
+  });
+
+  it("applies a toggle made while the output viewer is open once it closes", async () => {
+    const frames = recording(40, 12, (screen, frame) => {
+      screen.setComposer({ draft: { text: "keep", cursor: 2 } });
+      screen.append({ kind: "user", text: "CASE_REASONING" });
+      screen.apply({ type: "reasoning_delta", text: "THINKING_TEXT" });
+      screen.apply({ type: "reasoning_end", chars: 13, ms: 900 });
+      screen.apply({ type: "content_delta", text: "FINAL_ANSWER" });
+      frame();
+      screen.toggleOutputView();
+      screen.toggleThinking();
+      screen.toggleOutputView();
+      frame();
+      screen.toggleThinking();
+      frame();
+    });
+    const terminal = new Terminal({ convertEol: true, allowProposedApi: true, cols: 40, rows: 12, scrollback: 2000 });
+    try {
+      for (const [i, frame] of frames.entries()) {
+        await write(terminal, frame);
+        const buffer = terminal.buffer.active;
+        const all = lines(terminal).join("\n");
+        const visible = lines(terminal).slice(buffer.baseY).join("\n");
+        expect(all.split("CASE_REASONING"), `frame ${i}`).toHaveLength(2);
+        expect(all.split("FINAL_ANSWER"), `frame ${i}`).toHaveLength(2);
+        expect(visible.includes("THINKING_TEXT"), `reasoning after frame ${i}`).toBe(i === 1);
+      }
+    } finally { terminal.dispose(); }
+  });
+
+  it.each([
+    ["reasoning", (s: Screen) => s.toggleThinking()],
+    ["verbose output", (s: Screen) => s.toggleVerbose()],
+  ] as const)("keeps a tall answer once when toggling %s with hidden reasoning above it", async (_name, toggle) => {
+    const answer = Array.from({ length: 15 }, (_, i) => `ANSWER_LINE_${String(i).padStart(2, "0")}`).join("\n\n");
+    const frames = recording(40, 12, (screen, frame) => {
+      screen.setComposer({ draft: { text: "keep", cursor: 2 } });
+      screen.append({ kind: "user", text: "CASE_REASONING" });
+      screen.apply({ type: "reasoning_delta", text: "THINKING_TEXT" });
+      screen.apply({ type: "reasoning_end", chars: 13, ms: 900 });
+      screen.apply({ type: "content_delta", text: answer });
+      frame();
+      for (let i = 0; i < 4; i++) { toggle(screen); frame(); }
+    });
+    const terminal = new Terminal({ convertEol: true, allowProposedApi: true, cols: 40, rows: 12, scrollback: 2000 });
+    try {
+      for (const [i, frame] of frames.entries()) {
+        await write(terminal, frame);
+        const all = lines(terminal).join("\n");
+        for (let j = 0; j < 15; j++) {
+          const text = `ANSWER_LINE_${String(j).padStart(2, "0")}`;
+          expect(all.split(text), `${text} after frame ${i}`).toHaveLength(2);
+        }
+        expect(all.split("CASE_REASONING")).toHaveLength(2);
+      }
+    } finally { terminal.dispose(); }
+  });
+
+  async function toggledTranscript(earlier: number, streaming: boolean, toggle: (s: Screen) => void, reasoning: boolean): Promise<void> {
+    // `earlier` settled messages first, so the case below also runs with part of the transcript in scrollback.
+    const history = Array.from({ length: earlier }, (_, i) => `EARLIER_${String(i).padStart(2, "0")}`);
+    const frames = recording(40, 12, (screen, frame) => {
+      screen.setComposer({ draft: { text: "keep", cursor: 2 } });
+      for (const text of history) screen.append({ kind: "user", text });
+      screen.append({ kind: "user", text: "CASE_REASONING" });
+      screen.append({ kind: "assistant", text: "SETTLED_ANSWER" });
+      screen.append({ kind: "user", text: "SECOND_USER" });
+      screen.setWorking(true);
+      screen.apply({ type: "stream", reasoning: "THINKING_TEXT" });
+      if (!streaming) {
+        screen.apply({ type: "reasoning_end", chars: 13, ms: 1200 });
+        screen.apply({ type: "content_delta", text: "FINAL_ANSWER" });
+        screen.setWorking(false);
+      }
+      vi.advanceTimersByTime(40);
+      frame();
+      toggle(screen);
+      frame();
+      toggle(screen);
+      frame();
+      toggle(screen);
+      frame();
+      if (streaming) {
+        screen.apply({ type: "content_delta", text: "FINAL_ANSWER" });
+        screen.setWorking(false);
+      }
+      screen.append({ kind: "user", text: "AFTER_TOGGLE" });
+      frame();
+    });
+    const terminal = new Terminal({ convertEol: true, allowProposedApi: true, cols: 40, rows: 12, scrollback: 2000 });
+    try {
+      for (const [i, frame] of frames.entries()) {
+        await write(terminal, frame);
+        const buffer = terminal.buffer.active;
+        const all = lines(terminal).join("\n");
+        for (const text of [...history, "CASE_REASONING", "SETTLED_ANSWER", "SECOND_USER"]) {
+          expect(all.split(text), `${text} after frame ${i} (${earlier} earlier)`).toHaveLength(2);
+        }
+        expect(buffer.getLine(buffer.baseY + buffer.cursorY)!.translateToString(true)).toContain("keep");
+        // Frames 1 and 3 follow an odd number of toggles: reasoning is shown on screen, then hidden again.
+        if (reasoning && i < 4) {
+          const visible = lines(terminal).slice(buffer.baseY).join("\n");
+          expect(visible.includes("THINKING_TEXT"), `reasoning visible after frame ${i}`).toBe(i % 2 === 1);
+        }
+      }
+      const all = lines(terminal).join("\n");
+      expect(all.split("FINAL_ANSWER")).toHaveLength(2);
+      expect(all.split("AFTER_TOGGLE")).toHaveLength(2);
+    } finally { terminal.dispose(); }
+  }
+
   it.each([["height", 40, 12], ["narrowing", 20, 8]] as const)(
     "commits the entire answer when completion coincides with %s resize",
     async (_kind, nextCols, nextRows) => {
