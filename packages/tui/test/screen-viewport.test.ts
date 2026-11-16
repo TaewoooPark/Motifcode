@@ -161,6 +161,49 @@ describe("physical footer viewport", () => {
     } finally { terminal.dispose(); }
   });
 
+  it.each([
+    ["inline Markdown", { kind: "assistant", text: `**${"x".repeat(19)}**\n**${"B".repeat(28)}**` }],
+    ["embedded newlines", { kind: "notice", level: "error", text: "notice A\nnotice B\nnotice C\nnotice D" }],
+    ["tabs", { kind: "user", text: "\t".repeat(5) + "TAB_END" }],
+  ] as const)("preserves physical transcript rows containing %s across toggles", async (kind, cell) => {
+    vi.stubEnv("NO_COLOR", undefined);
+    vi.stubEnv("TERM", "xterm-256color");
+    vi.resetModules();
+    const { Screen: ColourScreen } = await import("../src/screen.js");
+    const terminal = new Terminal({ convertEol: true, allowProposedApi: true, cols: 24, rows: 24 });
+    const chunks = ["SHELL_OUTPUT\n"];
+    const screen = new ColourScreen({ write: (text) => chunks.push(text), columns: () => 24, rows: () => 24, interactive: true });
+    try {
+      screen.setComposer({ draft: { text: "keep", cursor: 2 } });
+      screen.append({ kind: "user", text: "FIRST_USER" });
+      screen.append(cell);
+      await write(terminal, chunks.splice(0).join(""));
+      const before = lines(terminal);
+      expect(before[0]).toBe("SHELL_OUTPUT");
+      for (let i = 0; i < 2; i++) {
+        screen.toggleThinking();
+        await write(terminal, chunks.splice(0).join(""));
+        expect(lines(terminal)).toEqual(before);
+        const buffer = terminal.buffer.active;
+        expect(buffer.cursorX).toBe(6);
+        expect(buffer.getLine(buffer.baseY + buffer.cursorY)!.translateToString(true)).toContain("keep");
+        if (kind === "inline Markdown") {
+          expect(before).toContain("⏺ " + "x".repeat(19));
+          const start = before.indexOf("  " + "B".repeat(22));
+          expect(start).toBeGreaterThan(0);
+          // The opening and closing markup delimiters are on different rows.
+          expect(buffer.getLine(start)!.getCell(2)!.isBold()).toBeTruthy();
+          expect(buffer.getLine(start + 1)!.getCell(0)!.isBold()).toBeTruthy();
+        } else if (kind === "tabs") {
+          const end = before.indexOf("B_END");
+          expect(end).toBeGreaterThan(0);
+          expect(before[end - 1]).toBe(">" + " ".repeat(21) + "TA");
+          expect(buffer.getLine(end)!.isWrapped).toBe(true);
+        }
+      }
+    } finally { screen.finish(); terminal.dispose(); }
+  });
+
   it("leaves the splash above the transcript in place when toggling", async () => {
     const frames = recording(60, 30, (screen, frame) => {
       screen.splash({ model: "SPLASH_MODEL", endpoint: "http://fixture", channel: "chat" });
