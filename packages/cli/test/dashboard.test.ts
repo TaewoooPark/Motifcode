@@ -1,5 +1,5 @@
 /** Exercise the dashboard through the same raw keys and persistence path as an interactive session. */
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -480,7 +480,7 @@ describe("provider selection", () => {
   });
 
   it("preserves an explicit model when changing endpoint by hand", async () => {
-    const s = session({ explicitModel: "motif/motif-3" });
+    const s = session({ explicitModel: "motif/motif-3", apiKey: "infron-key", providerCredentials: { openrouter: { apiKey: "or-key" } } });
     s.type(`/endpoint ${openRouter}\r`);
     await vi.waitFor(() => expect(s.saved().endpoint).toBe(openRouter));
     s.type("/config\r");
@@ -515,27 +515,152 @@ describe("provider selection", () => {
     expect(s.makeTransport.mock.calls.at(-1)).toEqual([expect.objectContaining({ endpoint: morph }), "morph-key"]);
   });
 
-  it("does not reuse an Infron key when Morphfactory login is cancelled or logged out", async () => {
-    const s = session({ apiKey: "infron-key", requireKey: true, verifyKey: async () => ({ ok: true }) });
-    s.type("/provider morphfactory\r");
-    await vi.waitFor(() => expect(s.screen()).toContain("Paste your Morphfactory (BETA) API key"));
-    s.type(ESC);
-    await vi.waitFor(() => expect(s.screen()).toContain("login cancelled"));
-    s.type("go\r");
-    await vi.waitFor(() => expect(s.screen()).toContain("An API key is needed before the task can run"));
+  it.each(["/provider openrouter", "/config provider openrouter", "/endpoint " + openRouter, "/config endpoint " + openRouter])(
+    "%s preserves the old session and defaults after a rejected key and Escape", async command => {
+      const verifyKey = vi.fn(async () => ({ ok: false as const, reason: "401 Unauthorized" }));
+      const s = session({ apiKey: "infron-key", requireKey: true, verifyKey });
+      saveUserSettings({ endpoint: infron, model: "motif/motif-3", maxTurns: 27 }, s.cwd);
+      s.type(command + "\r");
+      expect(s.current().secret?.title).toContain("OpenRouter");
+      s.type("\x1b[200~OPENROUTER_API_KEY=or-invalid\n\x1b[201~\r");
+      await vi.waitFor(() => expect(s.screen()).toContain("401 Unauthorized"));
+      s.type(ESC);
+      await vi.waitFor(() => expect(s.screen()).toContain("login cancelled"));
+      expect(s.saved()).toMatchObject({ endpoint: infron, model: "motif/motif-3", maxTurns: 27 });
+      expect(s.screen()).not.toContain("or-invalid");
+      expect(existsSync(join(s.cwd, ".motif", ".env"))).toBe(false);
+      s.type("continue\r");
+      await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+      expect(s.makeTransport.mock.calls.at(-1)).toEqual([expect.objectContaining({ endpoint: infron }), "infron-key"]);
+    },
+  );
+
+  it("ignores a late key verification after a second provider is selected", async () => {
+    let accept!: (value: { ok: true }) => void;
+    const verifyKey = vi.fn(() => new Promise<{ ok: true }>(resolve => { accept = resolve; }));
+    const s = session({ apiKey: "infron-key", requireKey: true, verifyKey, providerCredentials: { morphfactory: { apiKey: "morph-key" } } });
+    s.type("/provider\r");
+    expect(s.screen()).toContain("Infron (current)");
+    s.type("\r");
+    await vi.waitFor(() => expect(s.current().panel).toBeUndefined());
+    // Key and selection delivered together. Only the masked input sees the key.
+    s.type("/provider\r1or-pending\r");
+    await vi.waitFor(() => expect(verifyKey).toHaveBeenCalledWith("or-pending"));
+    s.type("unverified task\r");
     expect(s.makeTransport).not.toHaveBeenCalled();
-    s.type("morph-new\r");
-    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
-    s.type("/logout\r");
-    await vi.waitFor(() => expect(s.screen()).toContain("the key was removed"));
-    s.type("/provider infron\r");
-    await vi.waitFor(() => expect(s.saved().endpoint).toBe(infron));
+    s.type("/endpoint " + morph + "\r");
+    await vi.waitFor(() => expect(s.saved().endpoint).toBe(morph));
+    accept({ ok: true });
+    await vi.waitFor(() => expect(s.screen()).toContain("login cancelled because"));
+    expect(s.screen()).not.toContain("or-pending");
+    expect(existsSync(join(s.cwd, ".motif", ".env"))).toBe(false);
     s.type("go\r");
-    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(2));
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    expect(s.makeTransport.mock.calls.at(-1)).toEqual([expect.objectContaining({ endpoint: morph }), "morph-key"]);
+  });
+
+  it("verifies the candidate on its official endpoint before switching from the Config panel", async () => {
+    const verify = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ data: {} }));
+    const s = session({ apiKey: "infron-key", settingSources: { endpoint: "/trusted/.env (MOTIF_ENDPOINT)", model: "environment MOTIF_MODEL" } });
+    try {
+      s.type("/config\r");
+      const row = s.panel().rows.findIndex(r => r.label === "Provider");
+      s.type(DOWN.repeat(row) + LEFT);
+      expect(s.current().secret?.title).toContain("OpenRouter");
+      expect(existsSync(userSettingsPath(s.cwd))).toBe(false);
+      s.type("\x1b[200~OPENROUTER_API_KEY=or-saved\n\x1b[201~\r");
+      await vi.waitFor(() => expect(s.saved()).toMatchObject({ endpoint: openRouter, model: "motif-technologies/motif-3" }));
+      expect(verify).toHaveBeenCalledWith(openRouter + "/v1/key", expect.objectContaining({ headers: expect.objectContaining({ authorization: "Bearer or-saved" }) }));
+      expect(s.panel().message).toContain("/trusted/.env (MOTIF_ENDPOINT)");
+      expect(s.panel().message).toContain("environment MOTIF_MODEL");
+      expect(s.panel().message).toContain("/config show");
+      expect(s.screen()).not.toContain("or-saved");
+      s.type(ESC + "go\r");
+      await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+      expect(s.makeTransport.mock.calls.at(-1)).toEqual([expect.objectContaining({ endpoint: openRouter }), "or-saved"]);
+    } finally { verify.mockRestore(); }
+  });
+
+  it("restores only the candidate key when writing provider defaults fails", async () => {
+    const s = session({
+      apiKey: "infron-key", requireKey: true, verifyKey: async () => ({ ok: true }),
+      persistConnection: () => {
+        const env = join(s.cwd, ".motif", ".env");
+        writeFileSync(env, readFileSync(env, "utf8") + "OTHER_APP_KEY=concurrent\n");
+        throw new Error("settings read-only");
+      },
+    });
+    saveUserSettings({ endpoint: infron, model: "motif/motif-3" }, s.cwd);
+    const env = join(s.cwd, ".motif", ".env");
+    writeFileSync(env, "MOTIF_API_KEY=existing\nOPENROUTER_API_KEY=previous\n");
+    s.type("/provider openrouter\ror-candidate\r");
+    await vi.waitFor(() => expect(s.screen()).toContain("settings read-only"));
+    expect(readFileSync(env, "utf8")).toBe("MOTIF_API_KEY=existing\nOPENROUTER_API_KEY=previous\nOTHER_APP_KEY=concurrent\n");
+    expect(s.saved().endpoint).toBe(infron);
+    s.type("go\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
     expect(s.makeTransport.mock.calls.at(-1)?.[1]).toBe("infron-key");
-    s.type("/provider morphfactory\r");
-    await vi.waitFor(() => expect(s.current().secret?.title).toContain("Morphfactory"));
-    expect(readFileSync(join(s.cwd, ".motif", ".env"), "utf8")).not.toContain("morph-new");
+  });
+
+  it("treats Escape from either picker as a normal cancellation and does not start an initial task", async () => {
+    const startup = session({ chooseProvider: true, requireKey: true, initialTask: "must wait" });
+    startup.type(ESC);
+    await vi.waitFor(() => expect(startup.screen()).toContain("Provider selection cancelled."));
+    expect(startup.current().secret).toBeUndefined();
+    expect(startup.makeTransport).not.toHaveBeenCalled();
+    expect(existsSync(userSettingsPath(startup.cwd))).toBe(false);
+
+    const s = session({ apiKey: "infron-key" });
+    const appended = vi.spyOn(s.terminal, "append");
+    s.type("/provider\r");
+    s.type(ESC);
+    await vi.waitFor(() => expect(appended).toHaveBeenCalledWith(expect.objectContaining({ kind: "system", lines: ["Provider selection cancelled."] })));
+    s.type("/provider openrouter\r");
+    s.type(ESC);
+    await vi.waitFor(() => expect(appended).toHaveBeenCalledWith(expect.objectContaining({ kind: "system", lines: ["login cancelled"] })));
+  });
+
+  it("returns control to the old session when verification itself is cancelled", async () => {
+    let finish!: (value: { ok: true }) => void;
+    const verifyKey = vi.fn(() => new Promise<{ ok: true }>(resolve => { finish = resolve; }));
+    const s = session({ apiKey: "infron-key", requireKey: true, verifyKey });
+    saveUserSettings({ endpoint: infron }, s.cwd);
+    s.type("/config endpoint " + openRouter + "\ror-late\r");
+    await vi.waitFor(() => expect(verifyKey).toHaveBeenCalledOnce());
+    s.type(ESC);
+    s.type("use current session\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    expect(s.makeTransport.mock.calls.at(-1)).toEqual([expect.objectContaining({ endpoint: infron }), "infron-key"]);
+    finish({ ok: true });
+    await vi.waitFor(() => expect(s.screen()).toContain("login cancelled"));
+    expect(s.saved().endpoint).toBe(infron);
+    expect(existsSync(join(s.cwd, ".motif", ".env"))).toBe(false);
+  });
+
+  it("keeps the previous defaults and active key if the verified key cannot be saved", async () => {
+    const s = session({ apiKey: "infron-key", envPath: tmpdir(), verifyKey: async () => ({ ok: true }) });
+    saveUserSettings({ endpoint: infron, model: "motif/motif-3" }, s.cwd);
+    s.type("/provider openrouter\ror-cannot-save\r");
+    await vi.waitFor(() => expect(s.current().secret).toBeUndefined());
+    await new Promise(resolve => setImmediate(resolve));
+    s.type("go\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    expect(s.makeTransport.mock.calls.at(-1)).toEqual([expect.objectContaining({ endpoint: infron }), "infron-key"]);
+    expect(s.saved().endpoint).toBe(infron);
+    expect(s.screen()).not.toContain("or-cannot-save");
+  });
+
+  it("does not send a task after Escape skips its login", async () => {
+    const s = session({ requireKey: true });
+    s.type(ESC);
+    await vi.waitFor(() => expect(s.screen()).toContain("no key entered"));
+    s.type("go\r");
+    expect(s.current().secret?.title).toContain("before the task can run");
+    s.type(ESC);
+    await vi.waitFor(() => expect(s.current().secret).toBeUndefined());
+    await new Promise(resolve => setImmediate(resolve));
+    expect(s.makeTransport).not.toHaveBeenCalled();
+    expect(s.chat.tasksCompleted).toBe(0);
   });
 
   it("changes provider from the Config panel and refuses a change while a task is running", async () => {

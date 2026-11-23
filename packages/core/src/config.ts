@@ -20,9 +20,10 @@
  * files in order.
  */
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
+import { updatePrivateFile } from "./private-file.js";
 
 /** The hosted endpoint Motif-3 is served from. The `/v1` is added per request. */
 export const DEFAULT_ENDPOINT = "https://openrouter.ai/api";
@@ -258,30 +259,29 @@ function quoteDotenvValue(value: string): string {
   return /[\s#"'\\]/.test(value) ? `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"` : value;
 }
 
-/**
- * Set one key in a dotenv file's text and leave everything else as it was.
- *
- * The first uncommented `KEY=` line is replaced in place; a file without one
- * gets the line appended. Comments and other keys are kept verbatim — the
- * file is the person's, and a login must not rewrite their notes.
- */
-export function upsertDotenv(text: string, key: string, value: string): string {
-  const line = `${key}=${quoteDotenvValue(value)}`;
-  const pattern = new RegExp(`^(?:export\\s+)?${key}\\s*=`);
-  const lines = text.split(/\r?\n/);
-  if (lines[lines.length - 1] === "") lines.pop();
-  const at = lines.findIndex((l) => pattern.test(l.trim()));
-  if (at !== -1) lines[at] = line;
-  else lines.push(line);
-  return lines.join("\n") + "\n";
+function editDotenvKey(text: string, key: string, replacement?: string): string {
+  const newline = text.includes("\r\n") ? "\r\n" : "\n";
+  let found = false;
+  const edited = text.replace(/^[^\n]+(?:\n|$)/gm, row => {
+    const name = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/.exec(row.trim())?.[1];
+    if (name !== key) return row;
+    if (found || replacement === undefined) return "";
+    found = true;
+    const ending = row.endsWith("\r\n") ? "\r\n" : row.endsWith("\n") ? "\n" : newline;
+    return replacement + ending;
+  });
+  if (found || replacement === undefined) return edited;
+  return edited + (edited && !edited.endsWith("\n") ? newline : "") + replacement + newline;
 }
 
-/** Remove every uncommented `KEY=` line; the rest of the file is untouched. */
+/** Replace the first active assignment and remove duplicates that could override it. */
+export function upsertDotenv(text: string, key: string, value: string): string {
+  return editDotenvKey(text, key, key + "=" + quoteDotenvValue(value));
+}
+
+/** Remove every active assignment for this key, preserving unrelated bytes. */
 export function removeDotenvKey(text: string, key: string): string {
-  const pattern = new RegExp(`^(?:export\\s+)?${key}\\s*=`);
-  const kept = text.split(/\r?\n/).filter((l) => !pattern.test(l.trim()));
-  const out = kept.join("\n").replace(/\n+$/, "");
-  return out === "" ? "" : out + "\n";
+  return editDotenvKey(text, key);
 }
 
 /**
@@ -292,19 +292,33 @@ export function removeDotenvKey(text: string, key: string): string {
  * An existing file keeps its other lines. Returns the path written.
  */
 export function saveApiKey(apiKey: string, path = defaultEnvPath(), provider: ProviderId = "infron"): string {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const existing = existsSync(path) ? readFileSync(path, "utf8") : "";
-  writeFileSync(path, upsertDotenv(existing, PROVIDERS[provider].apiKeyEnv, apiKey), { encoding: "utf8", mode: 0o600 });
-  chmodSync(path, 0o600);
+  saveApiKeyWithRollback(apiKey, path, provider);
   return path;
+}
+
+/** Save a verified candidate; its undo restores only this provider while that candidate is still current. */
+export function saveApiKeyWithRollback(apiKey: string, path: string, provider: ProviderId): () => boolean {
+  const name = PROVIDERS[provider].apiKeyEnv;
+  let previous: string | undefined;
+  updatePrivateFile(path, existing => {
+    previous = parseDotenv(existing ?? "")[name];
+    return upsertDotenv(existing ?? "", name, apiKey);
+  });
+  return () => {
+    if (previous === apiKey || !existsSync(path)) return false;
+    return updatePrivateFile(path, existing => {
+      if (existing === undefined || parseDotenv(existing)[name] !== apiKey) return undefined;
+      return previous === undefined ? removeDotenvKey(existing, name) : upsertDotenv(existing, name, previous);
+    });
+  };
 }
 
 /** Remove the API key from the file; true when there was one to remove. */
 export function forgetApiKey(path = defaultEnvPath(), provider: ProviderId = "infron"): boolean {
   if (!existsSync(path)) return false;
-  const existing = readFileSync(path, "utf8");
-  const next = removeDotenvKey(existing, PROVIDERS[provider].apiKeyEnv);
-  if (next === existing) return false;
-  writeFileSync(path, next, { encoding: "utf8", mode: 0o600 });
-  return true;
+  return updatePrivateFile(path, existing => {
+    if (existing === undefined) return undefined;
+    const next = removeDotenvKey(existing, PROVIDERS[provider].apiKeyEnv);
+    return next === existing ? undefined : next;
+  });
 }

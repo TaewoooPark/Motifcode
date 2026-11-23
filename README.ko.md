@@ -398,13 +398,17 @@ motif plugins connect library-docs
 | Morphfactory (BETA) | `https://api-cbt.morphfactory.io/v1` | `motif/motif-3` | `MOTIF_MORPHFACTORY_API_KEY` |
 
 1. 사용할 서비스에서 키를 발급합니다. [OpenRouter 키 관리](https://openrouter.ai/settings/keys) · [Infron 키 관리](https://infron.ai/dashboard/apiKeys) · [Morphfactory 콘솔](https://cbt.morphfactory.io/console?view=keys)
-2. `motif`를 실행해 provider를 선택하고 키를 붙여 넣습니다. 확인된 키는 본인만 읽을 수 있는 `~/.motif/.env`에 저장됩니다. Provider를 바꾸거나 `/logout`을 해도 다른 서비스의 키는 유지됩니다.
+2. `motif`를 실행해 provider를 선택하고 키를 붙여 넣습니다. 확인된 키는 사용자 프로필의 `~/.motif/.env`에 저장됩니다. Provider를 바꾸거나 `/logout`을 해도 다른 서비스의 키는 유지됩니다.
 3. 스크립트에서는 `motif login --provider openrouter`로 로그인하고 `motif --provider openrouter -p "질문"`으로 실행합니다. 다른 provider 이름은 `infron`과 `morphfactory`입니다. 직접 지정한 `--endpoint`와 `--model`이 preset보다 우선합니다.
 4. `motif doctor --provider openrouter`로 모델 연결과 도구 호출을 점검할 수 있습니다. 이 점검에는 모델 토큰이 사용됩니다. 로컬 세션 사용량은 세 provider 모두에서, 계정 잔액은 Infron에서 확인할 수 있습니다.
 
+**기존 설치에서 전환하기.** `npm install -g motifcode@latest`로 업데이트하고 `/provider`에서 OpenRouter를 선택하세요. 새 키가 필요하면 마스킹된 입력창에 붙여 넣으세요. Esc를 누르면 전환을 취소합니다. 같은 터미널에서 대화를 이어갈 수 있고, 프로젝트를 다시 열 때는 `motif --continue`를 쓸 수 있습니다. 현재 연결은 `/status`에서 확인하세요. 다음 실행에서는 명시한 엔드포인트 플래그, 환경 변수, 신뢰한 프로젝트의 설정이 사용자 기본값보다 우선합니다.
+
+OpenRouter에는 별도의 스트림 처리, 네이티브 도구 호출과 결과의 짝짓기, 중단된 읽기 복구를 적용합니다. Infron·Morphfactory·사용자 지정 엔드포인트는 기존 처리 방식을 사용합니다. 공식 프리셋은 `motif-technologies/motif-3`에 대한 OpenRouter 라우팅을 따릅니다.
+
 환경 변수나 프로젝트 `.env`에 provider 키를 지정할 수도 있습니다. 엔드포인트는
 `MOTIF_ENDPOINT`로 지정하며 `--env-file <경로>`는 해당 파일을 먼저 읽습니다.
-기존에 `MOTIF_API_KEY`만 설정해 사용했다면 Infron 연결을 유지합니다.
+기존에 Infron 또는 Morphfactory 키 하나만 설정해 사용했다면 해당 서비스 연결을 유지합니다.
 CLI는 모델 키를 자식 프로세스 환경에서 제거합니다.
 
 ---

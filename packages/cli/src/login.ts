@@ -15,6 +15,7 @@
  */
 
 import { homedir } from "node:os";
+import { isAbsolute, relative, sep } from "node:path";
 import { PROVIDERS, normalizeEndpoint, providerForEndpoint, type ProviderId } from "@motifcode/core";
 
 /** Where a key comes from, for the prompt. */
@@ -107,16 +108,15 @@ export function normaliseKeyInput(raw: string, provider?: ProviderId): string {
   return s.trim();
 }
 
+export function displayHomePath(path: string, home = homedir()): string {
+  const local = relative(home, path);
+  return local && local !== ".." && !local.startsWith(".." + sep) && !isAbsolute(local)
+    ? "~/" + local.split(sep).join("/") : path;
+}
+
 /** The lines the login prompt shows above the input. */
 export function loginLines(envPath: string, home = homedir(), provider: ProviderId = "openrouter"): string[] {
-  const shown = envPath.startsWith(home + "/") ? `~${envPath.slice(home.length)}` : envPath;
-  // Short lines: the box hard-wraps at its width, and a URL or a path cut
-  // mid-word cannot be copied.
-  return [
-    `Get one at ${PROVIDERS[provider].keyPage}`,
-    `The key is checked with the endpoint and saved to ${shown},`,
-    "readable only by you and never shown to the model.",
-  ];
+  return ["Get an API key", PROVIDERS[provider].keyPage, "Verified keys are saved to", displayHomePath(envPath, home)];
 }
 
 /**

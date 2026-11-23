@@ -24,6 +24,8 @@ from any folder afterwards, with the key saved in `~/.motif/.env`.
 2. Run `motif`, choose the provider, and paste its key. Use `/provider` to switch or `/login` and `/logout` to manage the selected provider's key.
 3. For a script, use `motif login --provider openrouter`, then `motif --provider openrouter -p "your question"`. To probe the model connection, run `motif doctor --provider openrouter`.
 
+In an existing session, open `/provider` and choose OpenRouter to keep working with the same conversation. Enter the new key in the masked prompt, or press Esc to cancel the switch. Use `/status` to see the active endpoint.
+
 OpenRouter uses `OPENROUTER_API_KEY` with model `motif-technologies/motif-3`.
 Infron uses `MOTIF_API_KEY`, and Morphfactory uses `MOTIF_MORPHFACTORY_API_KEY`.
 Select either with `--provider infron` or `--provider morphfactory`. Explicit

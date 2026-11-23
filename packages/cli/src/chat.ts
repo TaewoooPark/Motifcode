@@ -32,6 +32,7 @@ import {
   providerForEndpoint,
   modelForEndpointChange,
   apiKeyEnvForEndpoint,
+  saveApiKeyWithRollback,
   type ProviderId,
   buildCompactedHistory,
   defaultEnvPath,
@@ -70,7 +71,7 @@ import {
 import { forgetFiles, listFiles, matchFiles } from "./files.js";
 import { expandSkillInput } from "./skill-input.js";
 import { installCommand } from "./install.js";
-import { loginLines, normaliseKeyInput, verifyApiKey, type VerifyResult } from "./login.js";
+import { displayHomePath, loginLines, normaliseKeyInput, verifyApiKey, type VerifyResult } from "./login.js";
 import { COMMANDS, findCommand, parseSlash, runSlash, type ChatSettings, type CommandContext, type CommandOutput, type PersistableKey } from "./commands.js";
 import { MCP_USAGE, mcpCatalogEntries, mcpFailureHint, mcpListLines, mcpLoginPanelView, mcpPanelKeys, mcpPanelView, mcpStatusLabel, mcpToolCount, parseMcpRequest, type McpAction } from "./mcp-ui.js";
 import type { LoadedSettings, StoredSettings } from "./settings.js";
@@ -180,6 +181,8 @@ interface Totals {
 type DashboardTab = "config" | "status" | "stats" | "usage";
 const DASHBOARD_TABS: readonly DashboardTab[] = ["config", "status", "stats", "usage"];
 
+type ConnectionResult = CommandOutput & { cancelled?: boolean };
+
 const PLACEHOLDER = "type a task, / for commands";
 /** Empty: the screen shows `? for shortcuts` in its place. */
 const IDLE_HINT = "";
@@ -232,7 +235,7 @@ export class Chat {
   /** A tool call waiting for the person's yes or no, and which of the three answers is selected. */
   private pendingConfirm: { call: ToolInvocation; resolve: (v: "allow" | "deny") => void; selected: number; force: boolean } | null = null;
   /** A question with numbered answers in place of the prompt, and which one is selected. */
-  private pendingChoice: { title: string; lines: string[]; options: string[]; selected: number; wrap?: boolean; resolve: (v: number | null) => void } | null = null;
+  private pendingChoice: { title: string; lines: string[]; options: string[]; selected: number; wrap?: boolean; providerPicker?: boolean; resolve: (v: number | null) => void } | null = null;
   /** A secret being typed in place of the prompt — the API key at login. */
   private pendingSecret: { title: string; lines: string[]; prompt: string; cancelHint: string; allowEmpty: boolean; masked: boolean; resolve: (v: string | null) => void } | null = null;
   /** Connection controls never share a model task's tool-dispatch lifetime. */
@@ -250,6 +253,7 @@ export class Chat {
   private readonly providerCredentials: Partial<Record<ProviderId, { apiKey?: string; source?: string }>>;
   private authGeneration = 0;
   private verifyingLogin: number | null = null;
+  private pendingConnection: number | null = null;
   private readonly billing: InfronBilling;
   /** Tools the person allowed for the rest of the session with `a`. */
   private readonly alwaysAllowed = new Set<string>();
@@ -352,11 +356,13 @@ export class Chat {
   /** What happens before the first prompt is free: the login, the resumed conversation, the first task. */
   private async start(): Promise<void> {
     if (this.opts.chooseProvider) {
-      const choice = await this.chooseProvider();
+      const result = await this.chooseProvider(true);
       if (this.quitting) return;
-      if (choice === null) return;
-      const result = this.switchProvider(choice);
-      if (result.error) { this.screen.append({ kind: "notice", level: "error", text: result.lines.join(" ") }); this.refresh(); return; }
+      this.screen.append(result.error
+        ? { kind: "notice", level: "error", text: result.lines.join(" ") }
+        : { kind: "system", title: "provider", lines: result.lines });
+      this.refresh();
+      if (result.error || result.cancelled) return;
     }
     void this.billing.refresh();
     if (this.needsLogin) {
@@ -387,6 +393,11 @@ export class Chat {
     if (this.screen.handleOutputViewKey(key)) return;
     if (this.pendingSecret) {
       this.answerSecret(key);
+      return;
+    }
+    if (key.type === "escape" && (this.pendingConnection !== null || this.verifyingLogin !== null)) {
+      this.invalidateAuthentication();
+      this.refresh();
       return;
     }
     if (this.pendingChoice) {
@@ -720,10 +731,16 @@ export class Chat {
     else if (key.type === "escape" || (key.type === "ctrl" && (key.key === "c" || key.key === "d"))) choice = null;
     else if (key.type === "up") pending.selected = (pending.selected + n - 1) % n;
     else if (key.type === "down") pending.selected = (pending.selected + 1) % n;
-    else if (key.type === "text" && /^[1-9]$/.test(key.text) && Number(key.text) <= n) choice = Number(key.text) - 1;
+    else if (key.type === "text") {
+      const digit = pending.providerPicker ? key.text[0] ?? "" : key.text;
+      if (/^[1-9]$/.test(digit) && Number(digit) <= n) choice = Number(digit) - 1;
+    }
     if (choice !== undefined) {
       this.pendingChoice = null;
       pending.resolve(choice);
+      if (this.pendingSecret && key.type === "text" && key.text.length > 1) {
+        this.answerSecret({ type: "paste", text: key.text.slice(1) });
+      }
     }
     this.refresh();
   }
@@ -844,11 +861,8 @@ export class Chat {
    * task asks once more, which is a better place to find out than a refusal
    * to open at all.
    */
-  private async login(reason: "startup" | "task" | "command"): Promise<string[]> {
-    this.invalidateAuthentication();
-    const generation = this.authGeneration;
-    const endpoint = this.settings.endpoint;
-    const model = this.settings.model;
+  private async requestKey(reason: "startup" | "task" | "command", endpoint: string, model: string, generation: number):
+    Promise<{ key: string } | { message: string }> {
     const provider = providerForEndpoint(endpoint) ?? "infron";
     const label = PROVIDERS[provider].label;
     const keyEnv = apiKeyEnvForEndpoint(endpoint);
@@ -858,12 +872,10 @@ export class Chat {
     for (;;) {
       const raw = await this.askSecret(title, loginLines(this.envPath, undefined, provider), "key › ", cancelHint);
       if (raw === null) {
-        return reason === "command"
-          ? ["login cancelled"]
-          : [`no key entered; /login when you have one, or put ${keyEnv} in ${this.envPath}`];
+        return { message: reason === "command" ? "login cancelled" : `no key entered; /login when you have one, or put ${keyEnv} in ${this.envPath}` };
       }
-      if (this.quitting || generation !== this.authGeneration || endpoint !== this.settings.endpoint) {
-        return ["login cancelled because the session or endpoint changed; /login to try again"];
+      if (this.quitting || generation !== this.authGeneration) {
+        return { message: "login cancelled because the session or endpoint changed; /login to try again" };
       }
       let key: string;
       try {
@@ -878,33 +890,46 @@ export class Chat {
       let result: VerifyResult;
       try {
         result = await (this.opts.verifyKey ?? ((k: string) => verifyApiKey({ endpoint, model, apiKey: k })))(key);
+      } catch {
+        result = { ok: false, reason: "Key verification could not reach the endpoint" };
       } finally {
         if (this.verifyingLogin === generation) {
           this.verifyingLogin = null;
           if (!this.quitting) this.screen.setActivity(null);
         }
       }
-      if (this.quitting || generation !== this.authGeneration || endpoint !== this.settings.endpoint) {
-        return ["login cancelled because the session or endpoint changed; /login to try again"];
+      if (this.quitting || generation !== this.authGeneration) {
+        return { message: "login cancelled because the session or endpoint changed; /login to try again" };
       }
       if (!result.ok) {
-        this.screen.append({ kind: "notice", level: "error", text: `${result.reason} — try again, or press esc` });
+        this.screen.append({ kind: "notice", level: "error", text: `${result.reason.replaceAll(key, "[redacted]")} — try again, or press esc` });
         continue;
       }
-      this.apiKey = key;
-      this.apiKeyVerified = true;
-      this.syncBilling();
-      try {
-        const path = saveApiKey(key, this.envPath, provider);
-        this.apiKeySource = `${path} (${keyEnv})`;
-        this.cacheProviderCredential();
-      } catch (err) {
-        this.apiKeySource = "this session only";
-        this.cacheProviderCredential();
-        return [`the key works, but ${this.envPath} could not be written: ${err instanceof Error ? err.message : String(err)}`, "it is kept for this session only"];
-      }
-      return [`signed in · the key is saved to ${this.envPath}`];
+      return { key };
     }
+  }
+
+  private async login(reason: "startup" | "task" | "command"): Promise<string[]> {
+    this.invalidateAuthentication();
+    const generation = this.authGeneration;
+    const endpoint = this.settings.endpoint;
+    const provider = providerForEndpoint(endpoint) ?? "infron";
+    const answer = await this.requestKey(reason, endpoint, this.settings.model, generation);
+    if ("message" in answer) return [answer.message];
+    if (this.quitting || generation !== this.authGeneration) return ["login cancelled because the session or endpoint changed; /login to try again"];
+    this.apiKey = answer.key;
+    this.apiKeyVerified = true;
+    this.syncBilling();
+    try {
+      const path = saveApiKey(answer.key, this.envPath, provider);
+      this.apiKeySource = `${path} (${PROVIDERS[provider].apiKeyEnv})`;
+      this.cacheProviderCredential();
+    } catch (err) {
+      this.apiKeySource = "this session only";
+      this.cacheProviderCredential();
+      return [`the key works, but ${this.envPath} could not be written: ${err instanceof Error ? err.message : String(err)}`, "it is kept for this session only"];
+    }
+    return [`signed in · the key is saved to ${displayHomePath(this.envPath)}`];
   }
 
   private logout(): string[] {
@@ -1241,6 +1266,7 @@ export class Chat {
 
   private hintText(): string {
     if (this.pendingSecret) return this.pendingSecret.cancelHint;
+    if (this.verifyingLogin !== null) return "esc cancels key verification";
     if (this.pendingChoice) {
       const numbers = this.pendingChoice.options.slice(0, 9).map((_, i) => i + 1).join(" ");
       return `${numbers} or ↑↓ enter · esc leaves it`;
@@ -1264,6 +1290,11 @@ export class Chat {
 
   private async submit(text: string): Promise<void> {
     if (text.trim() === "") return;
+    if (this.pendingConnection !== null && !/^\/(provider|endpoint|config|logout|quit|exit)(?:\s|$)/i.test(text)) {
+      this.screen.append({ kind: "notice", level: "warn", text: "Finish the provider sign-in or press Esc to cancel before sending a task." });
+      this.refresh();
+      return;
+    }
     if (this.opts.historyPath) appendHistory(this.opts.historyPath, text);
     if (this.shellBusy) {
       this.queued.push(text);
@@ -1395,8 +1426,12 @@ export class Chat {
     this.screen.append({ kind: "user", text: display ?? task });
     if (this.needsLogin) {
       // Skipped at startup, or logged out since: the task waits for a key.
-      this.screen.append({ kind: "system", title: "login", lines: await this.login("task") });
+      const endpoint = this.settings.endpoint;
+      const login = this.login("task");
+      const generation = this.authGeneration;
+      this.screen.append({ kind: "system", title: "login", lines: await login });
       this.refresh();
+      if (this.quitting || this.needsLogin || generation !== this.authGeneration || endpoint !== this.settings.endpoint) return;
     }
     this.tasks.push(task);
     const transport = (this.opts.makeTransport ?? defaultTransport)(this.settings, this.apiKey);
@@ -1907,33 +1942,33 @@ export class Chat {
     return String(this.settings[key] ?? "off");
   }
 
-  private configure(args: string): CommandOutput {
+  private configure(args: string): CommandOutput | Promise<CommandOutput> {
     const match = /^(\S+)\s+([\s\S]+)$/.exec(args.trim());
     const field = match ? configField(match[1]!) : undefined;
     if (!field) return { title: "/config", error: true, lines: [`Use /config <key> <value>. Keys: ${CONFIG_FIELDS.map((f) => f.key).join(", ")}`] };
     return this.applyConfig(field, match![2]!);
   }
 
-  private applyConfig(field: ConfigField, raw: string): CommandOutput {
+  private applyConfig(field: ConfigField, raw: string): CommandOutput | Promise<CommandOutput> {
     const fail = (message: string): CommandOutput => ({ title: "/config", error: true, lines: [message] });
     // A running loop captured its budgets/transport at task start. Avoid a UI
     // that claims a new value controls that in-flight request.
     if ((this.active || this.settlingTask || this.shellBusy || this.compacting) && !["thinking", "verbose", "theme"].includes(field.key)) {
       return fail("Wait for the running task to finish, or close this panel and press Esc to interrupt it.");
     }
+    if (this.pendingConnection !== null && field.key === "model") return fail("Finish the provider sign-in or press Esc before changing model.");
     let value: ReturnType<typeof parseConfigValue>;
     let path: string | null;
     try {
       value = parseConfigValue(field, raw);
       if (field.key === "provider") return this.switchProvider(value as ProviderId);
       // Save first: a failed write must not partially apply the new setting.
-      path = field.key === "endpoint" ? this.setEndpoint(value as string) : this.rememberSetting(field.key, value);
+      if (field.key === "endpoint") return this.setEndpoint(value as string);
+      path = this.rememberSetting(field.key, value);
     } catch (err) {
       return fail(err instanceof Error ? err.message : String(err));
     }
     switch (field.key) {
-      case "endpoint":
-        break;
       case "thinking":
         if (this.screen.thinkingShown !== value) this.screen.toggleThinking();
         break;
@@ -1978,8 +2013,12 @@ export class Chat {
 
   private rememberConnection(endpoint: string, model: string): string | null {
     if (!this.opts.persistConnection) {
-      this.rememberSetting("model", model);
-      return this.rememberSetting("endpoint", endpoint);
+      if (model === this.settings.model) return this.rememberSetting("endpoint", endpoint);
+      if (endpoint === this.settings.endpoint) return this.rememberSetting("model", model);
+      // With only a single-setting writer, a pair is safe to change in memory only.
+      this.changedSettings.set("model", "session only");
+      this.changedSettings.set("endpoint", "session only");
+      return null;
     }
     const path = this.opts.persistConnection(endpoint, model);
     this.changedSettings.set("model", "session + user file");
@@ -1987,79 +2026,122 @@ export class Chat {
     return path;
   }
 
-  private setEndpoint(endpoint: string): string | null {
-    const previous = this.settings.endpoint;
+  private setEndpoint(endpoint: string): CommandOutput | Promise<CommandOutput> {
     const model = this.opts.explicitModel === this.settings.model && !this.changedSettings.has("model")
-      ? this.settings.model : modelForEndpointChange(this.settings.model, previous, endpoint);
-    const path = model === this.settings.model ? this.rememberSetting("endpoint", endpoint) : this.rememberConnection(endpoint, model);
-    this.settings.endpoint = endpoint;
-    this.settings.model = model;
-    this.screen.setLabel(model);
-    this.rebindProviderCredential(previous);
-    this.apiKeyVerified = false;
+      ? this.settings.model : modelForEndpointChange(this.settings.model, this.settings.endpoint, endpoint);
+    return this.changeConnection(endpoint, model, "endpoint");
+  }
+
+  private chooseProvider(firstRun = false): Promise<ConnectionResult> {
     this.invalidateAuthentication();
-    this.syncBilling();
-    return path;
-  }
-
-  private rebindProviderCredential(previousEndpoint: string): void {
-    const previous = providerForEndpoint(previousEndpoint);
-    const next = providerForEndpoint(this.settings.endpoint);
-    if (previous === next) return;
-    this.requireKey = next !== undefined;
-    // Custom endpoint overrides historically share Infron's MOTIF_API_KEY.
-    if ((previous ?? "infron") === (next ?? "infron") && this.apiKey !== undefined) return;
-    if (previous) this.providerCredentials[previous] = { apiKey: this.apiKey, source: this.apiKeySource };
-    const credential = this.providerCredentials[next ?? "infron"];
-    this.apiKey = credential?.apiKey;
-    this.apiKeySource = credential?.source;
-  }
-
-  private chooseProvider(): Promise<ProviderId | null> {
     const providers = Object.keys(PROVIDERS) as ProviderId[];
-    return this.askChoice("Choose a provider", ["Each provider serves Motif-3 and uses its own API key.", "Change this later with /provider or /config provider."], providers.map((id, i) => `${i + 1}. ${PROVIDERS[id].label}`), true)
-      .then((choice) => choice === null ? null : providers[choice]!);
+    const current = firstRun ? undefined : providerForEndpoint(this.settings.endpoint);
+    return new Promise(resolve => {
+      this.pendingChoice = {
+        title: "Choose a provider",
+        lines: [firstRun ? "Each provider serves Motif-3 and uses its own API key." : `Current: ${this.providerLabel} · ${this.settings.endpoint}`, "Change this later with /provider or /config provider."],
+        options: providers.map((id, i) => `${i + 1}. ${PROVIDERS[id].label}${id === current ? " (current)" : ""}`),
+        selected: current ? providers.indexOf(current) : 0,
+        wrap: true,
+        providerPicker: true,
+        // Install a missing-key prompt before the next input event can reach the composer.
+        resolve: index => resolve(index === null || this.quitting
+          ? { title: "/provider", cancelled: true, lines: ["Provider selection cancelled."] }
+          : this.switchProvider(providers[index]!, firstRun)),
+      };
+      this.refresh();
+    });
   }
 
-  private switchProvider(provider: ProviderId): CommandOutput {
+  private switchProvider(provider: ProviderId, firstRun = false): ConnectionResult | Promise<ConnectionResult> {
     const selected = PROVIDERS[provider];
-    try {
-      this.rememberConnection(selected.endpoint, selected.model);
-    } catch (err) {
-      return { title: "/provider", error: true, lines: [err instanceof Error ? err.message : String(err)] };
-    }
-    this.cacheProviderCredential();
+    const model = !firstRun && provider === providerForEndpoint(this.settings.endpoint) ? this.settings.model : selected.model;
+    return this.changeConnection(selected.endpoint, model, firstRun ? "startup" : "provider");
+  }
+
+  private changeConnection(endpoint: string, model: string, reason: "endpoint" | "provider" | "startup"): ConnectionResult | Promise<ConnectionResult> {
+    const title = reason === "endpoint" ? "/endpoint" : "/provider";
+    const fail = (message: string): CommandOutput => ({ title, error: true, lines: [message] });
+    if (this.active || this.settlingTask || this.shellBusy || this.compacting) return fail("Wait for the running task to finish before changing provider.");
     this.invalidateAuthentication();
-    this.settings.endpoint = selected.endpoint;
-    this.settings.model = selected.model;
-    this.apiKey = this.providerCredentials[provider]?.apiKey;
-    this.apiKeySource = this.providerCredentials[provider]?.source;
-    this.apiKeyVerified = false;
-    this.requireKey = true;
-    this.screen.setLabel(selected.model);
-    this.syncBilling();
-    return { title: "/provider", lines: [
-      `Provider: ${selected.label} · ${this.apiKey ? "API key loaded" : "no API key; use /login"}.`,
-      `${selected.endpoint} · ${selected.model}`,
-      "Saved defaults can be overridden by startup flags, environment or trusted project settings.",
-    ] };
+    const generation = this.authGeneration;
+    const provider = providerForEndpoint(endpoint);
+    const slot = provider ?? "infron";
+    const credential = this.providerCredentials[slot];
+    const commit = (key = credential?.apiKey, verified = false): CommandOutput => {
+      let source = credential?.source;
+      let undoKey: (() => boolean) | undefined;
+      let savedCandidate = false;
+      let path: string | null = null;
+      try {
+        if (provider && verified && key) {
+          const envKey = PROVIDERS[provider].apiKeyEnv;
+          undoKey = saveApiKeyWithRollback(key, this.envPath, provider);
+          savedCandidate = true;
+          source = `${this.envPath} (${envKey})`;
+        }
+        if (reason === "startup" || endpoint !== this.settings.endpoint || model !== this.settings.model || savedCandidate) {
+          path = reason === "endpoint" && model === this.settings.model
+            ? this.rememberSetting("endpoint", endpoint) : this.rememberConnection(endpoint, model);
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (undoKey) {
+          try {
+            undoKey();
+          } catch {
+            return fail(`${message}. The previous connection is active. Check ${this.envPath}, which could not be restored.`);
+          }
+        }
+        return fail(message);
+      }
+      this.apiKeyVerified = savedCandidate || (this.apiKeyVerified && endpoint === this.settings.endpoint && key === this.apiKey);
+      this.settings.endpoint = endpoint;
+      this.settings.model = model;
+      this.apiKey = key;
+      this.apiKeySource = source;
+      this.requireKey = provider !== undefined;
+      this.cacheProviderCredential();
+      this.screen.setLabel(model);
+      this.syncBilling();
+      return { title, lines: [
+        reason === "endpoint" ? `endpoint set to ${endpoint} for the next task` : `Provider: ${this.providerLabel} · ${key ? "API key loaded" : "no API key"}.`,
+        ...(savedCandidate ? [`signed in · the key is saved to ${displayHomePath(this.envPath)}`] : []),
+        ...(reason === "endpoint" ? [] : [`${endpoint} · ${model}`]),
+        ...(path ? [`saved to ${displayHomePath(path)}`, ...this.connectionOverrides()] : []),
+      ] };
+    };
+    if (!provider || credential?.apiKey) return commit();
+    this.pendingConnection = generation;
+    return this.requestKey(reason === "startup" ? "startup" : "command", endpoint, model, generation)
+      .then(answer => {
+        if ("message" in answer) return { title, cancelled: true, lines: [reason === "startup" ? "Provider selection cancelled." : answer.message] };
+        if (this.quitting || generation !== this.authGeneration) return { title, cancelled: true, lines: ["Provider selection cancelled."] };
+        return commit(answer.key, true);
+      })
+      .finally(() => { if (this.pendingConnection === generation) this.pendingConnection = null; });
+  }
+
+  private connectionOverrides(): string[] {
+    const overrides: string[] = [];
+    for (const field of ["endpoint", "model"] as const) {
+      const origin = this.opts.settingSources?.[field];
+      if (origin?.includes("MOTIF_")) overrides.push(origin);
+      else if (origin === "flag") overrides.push(`--${field} if supplied again`);
+      else if (origin === "project" || this.opts.settingsInfo?.sources[field] === "project") overrides.push(`${this.opts.settingsInfo?.projectPath ?? ".motif/settings.json"} (${field})`);
+    }
+    return overrides.length ? [`On the next launch, ${overrides.join(", ")} can override these user defaults. See /config show.`] : [];
   }
 
   private async providerCommand(args: string): Promise<CommandOutput> {
     if (this.active || this.settlingTask || this.shellBusy || this.compacting) return { title: "/provider", error: true, lines: ["Wait for the running task to finish before changing provider."] };
     if (args && !Object.hasOwn(PROVIDERS, args)) return { title: "/provider", error: true, lines: [`Choose a provider: ${Object.keys(PROVIDERS).join(", ")}.`] };
-    const provider = args ? args as ProviderId : await this.chooseProvider();
-    if (provider === null || this.quitting) return { title: "/provider", lines: ["Provider selection cancelled."] };
-    const result = this.switchProvider(provider);
-    if (!result.error && this.needsLogin) {
-      result.lines.push(...await this.login("command"));
-      if (this.apiKey && providerForEndpoint(this.settings.endpoint) === provider) result.lines[0] = `Provider: ${PROVIDERS[provider].label} · API key loaded.`;
-    }
-    return result;
+    return args ? this.switchProvider(args as ProviderId) : this.chooseProvider();
   }
 
   private invalidateAuthentication(): void {
     this.authGeneration++;
+    this.pendingConnection = null;
     if (this.verifyingLogin !== null) {
       this.verifyingLogin = null;
       if (!this.quitting) this.screen.setActivity(null);
@@ -2134,13 +2216,23 @@ export class Chat {
   private panelKey(key: Key): void {
     const panel = this.panel!;
     const editor = this.configEditor;
+    const apply = (field: ConfigField, value: string): void => {
+      const result = this.applyConfig(field, value);
+      const display = (out: CommandOutput): void => {
+        if (this.panel !== panel) return;
+        panel.message = [out.lines[0], ...out.lines.filter(line => line.startsWith("On the next launch"))].join(" ");
+        panel.error = out.error;
+        if (!out.error) panel.editing = undefined;
+        this.refresh();
+      };
+      if (result instanceof Promise) void result.then(display);
+      else display(result);
+    };
     if (panel.editing) {
       switch (key.type) {
         case "escape": panel.editing = undefined; panel.message = undefined; panel.error = false; break;
         case "enter": {
-          const result = this.applyConfig(panel.editing, editor.text);
-          panel.message = result.lines[0]; panel.error = result.error;
-          if (!result.error) panel.editing = undefined;
+          apply(panel.editing, editor.text);
           break;
         }
         case "text": case "paste": editor.insert(key.text.replace(/[\r\n\t]/g, " ")); break;
@@ -2180,8 +2272,7 @@ export class Chat {
         const current = field.choices.indexOf(this.configValue(field.key));
         const delta = key.type === "left" ? -1 : 1;
         const value = field.choices[(current + delta + field.choices.length) % field.choices.length]!;
-        const result = this.applyConfig(field, value);
-        panel.message = result.lines[0]; panel.error = result.error;
+        apply(field, value);
       } else if (key.type === "enter") {
         editor.clear(); editor.insert(this.configValue(field.key));
         panel.editing = field; panel.message = undefined; panel.error = false;

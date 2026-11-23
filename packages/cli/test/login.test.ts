@@ -98,7 +98,10 @@ describe("reading the key", () => {
 
 describe("provider login guidance", () => {
   it("shows the selected provider's key page", () => {
-    expect(loginLines("/home/user/.motif/.env", "/home/user").join("\n")).toContain("https://openrouter.ai/settings/keys");
+    const prompt = loginLines("/home/user/.motif/.env", "/home/user");
+    expect(prompt).toContain("https://openrouter.ai/settings/keys");
+    expect(prompt).toContain("~/.motif/.env");
+    expect(Math.max(...prompt.map(line => line.length))).toBeLessThanOrEqual(42);
     expect(loginLines("/home/user/.motif/.env", "/home/user", "infron").join("\n")).toContain("https://infron.ai/dashboard/apiKeys");
     const lines = loginLines("/home/user/.motif/.env", "/home/user", "morphfactory").join("\n");
     expect(lines).toContain("https://cbt.morphfactory.io/console?view=keys");

@@ -6,7 +6,11 @@
  * being found, and being found by the wrong process.
  */
 
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { once } from "node:events";
+import { randomUUID } from "node:crypto";
+import { updatePrivateFile } from "../src/private-file.js";
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -24,6 +28,7 @@ import {
   removeDotenvKey,
   resolveEndpointConfig,
   saveApiKey,
+  saveApiKeyWithRollback,
   upsertDotenv,
   withholdSecrets,
 } from "../src/config.js";
@@ -239,6 +244,108 @@ describe("writing the key", () => {
     expect(upsertDotenv("# MOTIF_API_KEY=commented\n", "MOTIF_API_KEY", "sk-new")).toBe("# MOTIF_API_KEY=commented\nMOTIF_API_KEY=sk-new\n");
   });
 
+  it("updates duplicate provider assignments once and preserves unrelated bytes", () => {
+    const before = "# note\r\nOTHER=7\r\nexport OPENROUTER_API_KEY=old\r\n# keep\r\nOPENROUTER_API_KEY=stale\r\nTAIL=unchanged";
+    const after = upsertDotenv(before, "OPENROUTER_API_KEY", "new");
+    expect(after).toBe("# note\r\nOTHER=7\r\nOPENROUTER_API_KEY=new\r\n# keep\r\nTAIL=unchanged");
+    expect(parseDotenv(after)["OPENROUTER_API_KEY"]).toBe("new");
+    expect(removeDotenvKey(before, "MOTIF_API_KEY")).toBe(before);
+  });
+
+  it("undoes a candidate only while it is still current and only in its own provider slot", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "motif-rollback-")), ".env");
+    const undoNew = saveApiKeyWithRollback("first", path, "openrouter");
+    saveApiKey("keep", path, "infron");
+    expect(undoNew()).toBe(true);
+    expect(parseDotenv(readFileSync(path, "utf8"))).toEqual({ MOTIF_API_KEY: "keep" });
+    saveApiKey("prior", path, "openrouter");
+    const undoReplacement = saveApiKeyWithRollback("candidate", path, "openrouter");
+    expect(undoReplacement()).toBe(true);
+    expect(parseDotenv(readFileSync(path, "utf8")).OPENROUTER_API_KEY).toBe("prior");
+    const staleUndo = saveApiKeyWithRollback("candidate", path, "openrouter");
+    saveApiKey("newer", path, "openrouter");
+    expect(staleUndo()).toBe(false);
+    expect(parseDotenv(readFileSync(path, "utf8"))).toEqual({ MOTIF_API_KEY: "keep", OPENROUTER_API_KEY: "newer" });
+  });
+
+  it("rejects overlapping updates and cleans a marker from an exited writer", () => {
+    const dir = mkdtempSync(join(tmpdir(), "motif-writer-"));
+    const path = join(dir, ".env");
+    const stoppedPid = execFileSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8" });
+    writeFileSync(join(dir, "..env.motif-write-" + stoppedPid + "-" + randomUUID()), "");
+    updatePrivateFile(path, () => {
+      expect(() => saveApiKey("other-fixture", path, "openrouter")).toThrow("Another Motif process");
+      return "OTHER=1\n";
+    });
+    saveApiKey("retry-fixture", path, "openrouter");
+    expect(parseDotenv(readFileSync(path, "utf8"))).toEqual({ OTHER: "1", OPENROUTER_API_KEY: "retry-fixture" });
+    expect(readdirSync(dir)).toEqual([".env"]);
+  });
+
+  it.skipIf(process.platform === "win32")("tightens an unchanged saved key and leaves an absent-key forget untouched", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "motif-mode-")), ".env");
+    writeFileSync(path, "MOTIF_API_KEY=fixture\n");
+    chmodSync(path, 0o644);
+    expect(forgetApiKey(path, "openrouter")).toBe(false);
+    expect(statSync(path).mode & 0o777).toBe(0o644);
+    saveApiKey("fixture", path);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+  });
+
+  it.skipIf(process.platform !== "win32")("creates a private DACL and preserves explicit ACLs on save and forget", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "motif-dacl-")), ".env");
+    const ps = (script: string): string => execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+      env: { ...process.env, MOTIF_FIXTURE: path }, encoding: "utf8", windowsHide: true,
+    }).trim();
+    const describe = [
+      "$a=[IO.File]::GetAccessControl($env:MOTIF_FIXTURE);$user=[Security.Principal.WindowsIdentity]::GetCurrent().User",
+      "$a.AreAccessRulesProtected",
+      "$a.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]) | ForEach-Object {",
+      "  if ($_.IdentityReference -eq $user) {$who='user'} else {$who=$_.IdentityReference.Value}",
+      "  $who + '/' + $_.FileSystemRights + '/' + $_.AccessControlType + '/' + $_.IsInherited",
+      "}",
+    ].join("\n");
+    saveApiKey("fixture", path);
+    expect(ps(describe).split(/\r?\n/)).toEqual(["True", "user/FullControl/Allow/False"]);
+    ps([
+      "$a=[IO.File]::GetAccessControl($env:MOTIF_FIXTURE)",
+      "$system=[Security.Principal.SecurityIdentifier]::new('S-1-5-18')",
+      "$a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($system,'Read','Allow'))",
+      "[IO.File]::SetAccessControl($env:MOTIF_FIXTURE,$a)",
+    ].join("\n"));
+    const before = ps(describe);
+    expect(before).toContain("S-1-5-18/");
+    saveApiKey("other-fixture", path, "openrouter");
+    expect(ps(describe)).toBe(before);
+    expect(forgetApiKey(path, "openrouter")).toBe(true);
+    expect(ps(describe)).toBe(before);
+    expect(parseDotenv(readFileSync(path, "utf8"))).toEqual({ MOTIF_API_KEY: "fixture" });
+  });
+
+  it.skipIf(process.platform !== "win32")("preserves the file and cleans up staging after a failed replacement", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "motif-sharing-"));
+    const path = join(dir, ".env");
+    const original = "MOTIF_API_KEY=fixture\nOTHER=retain\n";
+    writeFileSync(path, original);
+    const lock = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", [
+      "$ErrorActionPreference='Stop'",
+      "$f=[IO.File]::Open($env:MOTIF_FIXTURE,'Open','Read','Read')",
+      "try { [Console]::WriteLine('ready'); [void][Console]::ReadLine() } finally { $f.Dispose() }",
+    ].join("\n")], { env: { ...process.env, MOTIF_FIXTURE: path }, windowsHide: true });
+    const closed = once(lock, "close");
+    try {
+      const [ready] = await Promise.race([once(lock.stdout, "data"), closed]);
+      expect(String(ready).trim()).toBe("ready");
+      expect(() => saveApiKey("new-fixture", path)).toThrow();
+      expect(() => forgetApiKey(path)).toThrow();
+      expect(readFileSync(path, "utf8")).toBe(original);
+      expect(readdirSync(dir)).toEqual([".env"]);
+    } finally {
+      lock.stdin.end("\n");
+      await closed;
+    }
+  });
+
   it("quotes a value that needs it, in a form parseDotenv reads back", () => {
     const out = upsertDotenv("", "MOTIF_API_KEY", "has space#hash");
     expect(parseDotenv(out)["MOTIF_API_KEY"]).toBe("has space#hash");
@@ -255,8 +362,8 @@ describe("writing the key", () => {
     const path = join(home, ".motif", ".env");
     expect(saveApiKey("sk-1", path)).toBe(path);
     expect(readFileSync(path, "utf8")).toBe("MOTIF_API_KEY=sk-1\n");
-    expect(statSync(path).mode & 0o777).toBe(0o600);
-    expect(statSync(join(home, ".motif")).mode & 0o777).toBe(0o700);
+    if (process.platform !== "win32") expect(statSync(path).mode & 0o777).toBe(0o600);
+    if (process.platform !== "win32") expect(statSync(join(home, ".motif")).mode & 0o777).toBe(0o700);
     expect(resolveEndpointConfig({ env: {}, dotenvPaths: [path] }).apiKey).toBe("sk-1");
     expect(forgetApiKey(path)).toBe(true);
     expect(forgetApiKey(path)).toBe(false);
@@ -269,7 +376,7 @@ describe("writing the key", () => {
     saveApiKey("sk-infron", path);
     saveApiKey("sk-morph", path, "morphfactory");
     expect(parseDotenv(readFileSync(path, "utf8"))).toEqual({ OTHER: "1", MOTIF_API_KEY: "sk-infron", MOTIF_MORPHFACTORY_API_KEY: "sk-morph" });
-    expect(statSync(path).mode & 0o777).toBe(0o600);
+    if (process.platform !== "win32") expect(statSync(path).mode & 0o777).toBe(0o600);
     expect(forgetApiKey(path, "morphfactory")).toBe(true);
     expect(forgetApiKey(path, "morphfactory")).toBe(false);
     expect(readFileSync(path, "utf8")).toBe("# keep my settings\nOTHER=1\nMOTIF_API_KEY=sk-infron\n");

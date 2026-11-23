@@ -73,7 +73,7 @@ import { balanceRows } from "./billing-view.js";
 import { describePlugins, loadPlugins, type LoadedPlugins } from "./plugins.js";
 import { loadSettings, saveUserSetting, saveUserSettings } from "./settings.js";
 import { commandOnPath, ranFromNpx } from "./install.js";
-import { normaliseKeyInput, readSecret, verifyApiKey } from "./login.js";
+import { loginLines, normaliseKeyInput, readSecret, verifyApiKey } from "./login.js";
 import { doctor, formatChecks, worstState } from "./doctor.js";
 import { ToolExecutor } from "./executor.js";
 import { policyForAgent } from "./policy.js";
@@ -495,8 +495,7 @@ async function loginAtTerminal(endpoint: string, model: string): Promise<string 
   const provider = providerForEndpoint(endpoint) ?? "infron";
   if (process.stdin.isTTY) {
     process.stdout.write(
-      `Paste your ${PROVIDERS[provider].label} API key. Get one at ${PROVIDERS[provider].keyPage}.\n` +
-        `It is checked against ${endpoint}, then saved to ${path} (readable only by you).\n`,
+      [`Paste your ${PROVIDERS[provider].label} API key.`, ...loginLines(path, undefined, provider), ""].join("\n"),
     );
   }
   const raw = await readSecret("key › ");

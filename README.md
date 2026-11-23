@@ -414,14 +414,17 @@ New installations default to OpenRouter. To change a saved connection, use
 | Morphfactory (BETA) | `https://api-cbt.morphfactory.io/v1` | `motif/motif-3` | `MOTIF_MORPHFACTORY_API_KEY` |
 
 1. Create a key for your provider. [OpenRouter keys](https://openrouter.ai/settings/keys) · [Infron keys](https://infron.ai/dashboard/apiKeys) · [Morphfactory keys](https://cbt.morphfactory.io/console?view=keys)
-2. Run `motif`, choose the provider, and paste its key. After verification the CLI saves it to `~/.motif/.env` with owner-only permissions. Switching providers or using `/logout` preserves the other providers’ keys.
+2. Run `motif`, choose the provider, and paste its key. After verification the CLI saves it to `~/.motif/.env` in your user profile. Switching providers or using `/logout` preserves the other providers’ keys.
 3. For scripts, use `motif login --provider openrouter` and `motif --provider openrouter -p "your question"`. The other provider names are `infron` and `morphfactory`. Explicit `--endpoint` and `--model` flags override the preset.
 4. Run `motif doctor --provider openrouter` to probe the model connection and tool calls. These probes use model tokens. Local session usage is available for all providers. The in-app account balance is available for Infron.
 
+**Switching an existing installation.** Update with `npm install -g motifcode@latest`, open `/provider`, and select OpenRouter. If you need a new key, paste it into the masked prompt. Esc cancels the switch. Continue the conversation in the same terminal, or use `motif --continue` when you reopen the project. Use `/status` to see the active connection. An explicit endpoint flag, environment variable or trusted project setting takes precedence over the saved user default at the next launch.
+
+OpenRouter uses its own stream handling, native tool-result pairing and interruption recovery. Infron, Morphfactory and custom endpoints use their existing processing. The official preset follows OpenRouter’s routing for `motif-technologies/motif-3`.
+
 You can also set the provider’s key in the environment or a project `.env`.
 Use `MOTIF_ENDPOINT` to select the endpoint explicitly and `--env-file <path>`
-to read a particular file first. An existing Infron setup with only `MOTIF_API_KEY`
-continues to use Infron. The CLI withholds model keys from child processes.
+to read a particular file first. Key-only Infron or Morphfactory installations continue to use their configured provider. The CLI withholds model keys from child processes.
 
 
 ---
