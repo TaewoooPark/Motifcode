@@ -88,14 +88,20 @@ describe("a resumed run asks the same next question", () => {
     expect(last.messages[2]!.reasoning_content).toBe("orient");
   });
 
-  it("keeps a pending done proposal across the interruption", async () => {
+  it.each([
+    { when: "after the proposal", replies: [doneBody("renamed it")] },
+    {
+      when: "after a mismatched confirmation",
+      replies: [doneBody("renamed it"), doneBody("different claim", { confirm: true })],
+    },
+  ])("keeps the pending done proposal across an interruption $when", async ({ replies }) => {
     // Resuming into a fresh loop would forget the challenge, so the model's
     // next `done` would be read as a first proposal and challenged again.
     const checkpoints: LoopCheckpoint[] = [];
     await runLoop({
       ...base,
-      transport: new ScriptedTransport([doneBody("renamed it")]),
-      maxTurns: 1,
+      transport: new ScriptedTransport(replies),
+      maxTurns: replies.length,
       onCheckpoint: (c) => checkpoints.push(c),
     });
     const last = checkpoints[checkpoints.length - 1]!;
@@ -104,7 +110,7 @@ describe("a resumed run asks the same next question", () => {
     const resumed = new ScriptedTransport([doneBody("renamed it", { confirm: true })]);
     const r = await runLoop({ ...base, transport: resumed, resume: last });
     expect(r.reason).toBe("done");
-    expect(r.turns).toBe(2);
+    expect(r.turns).toBe(replies.length + 1);
   });
 
   it("keeps the breakage budget and the loop guard", async () => {

@@ -727,13 +727,14 @@ describe("channels are honest about what has been measured", () => {
     await server?.stop();
   });
 
-  it("refuses an unmeasured channel without the experimental flag", async () => {
+  it("requires opt-in for a body channel and points to the endpoint probe", async () => {
     server = new MockServer(() => toolCall("done", { summary: "s" }));
     await server.start();
     for (const chan of ["object", "raw"]) {
       const r = await runCli(["t", "--channel", chan, "--endpoint", server.endpoint, "--no-hero"], dir);
       expect(r.code, chan).toBe(2);
-      expect(r.stderr).toContain("never been measured");
+      expect(r.stderr).toContain("motif doctor");
+      expect(r.stderr).toContain("--experimental-channel");
     }
     expect(server.bodies).toHaveLength(0);
   }, 30_000);

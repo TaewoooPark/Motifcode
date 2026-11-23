@@ -27,6 +27,54 @@ const chunk = (delta: Record<string, unknown>, extra: Record<string, unknown> = 
   ...extra,
 });
 
+describe.each([false, true])("text-completion reasoning (stream=%s)", (stream) => {
+  async function complete(choices: Record<string, unknown>[], raw = true) {
+    const deltas: unknown[] = [];
+    const transport = new HttpTransport({
+      endpoint: "http://x", model: "m",
+      fetchImpl: async () => stream
+        ? sse([...choices.map((choice) => ({ choices: [choice] })), "[DONE]"])
+        : new Response(JSON.stringify({ choices: [choices[0]] }), { headers: { "content-type": "application/json" } }),
+    });
+    const result = await transport.complete({
+      messages: [{ role: "user", content: "test" }], tools: [],
+      ...(raw ? { raw: true, prompt: "test" } : {}),
+      ...(stream ? { onDelta: (delta) => deltas.push(delta) } : {}),
+    });
+    return { result, deltas };
+  }
+
+  it("keeps choice-level reasoning out of the text and preserves the final answer", async () => {
+    const choices = stream
+      ? [{ text: "", reasoning: "first " }, { text: "", reasoning: "second" }, { text: "answer", reasoning: null, finish_reason: "stop" }]
+      : [{ text: "answer", reasoning: "first second", finish_reason: "stop" }];
+    const { result, deltas } = await complete(choices);
+    expect(result).toMatchObject({ content: "answer", rawText: "answer", reasoningContent: "first second", finishReason: "stop" });
+    if (stream) expect(deltas).toEqual([{ reasoning: "first " }, { reasoning: "second" }, { content: "answer" }]);
+  });
+
+  it.each([{}, { reasoning: null }, { reasoning: "" }])("preserves inline reasoning for unsplit raw completions (%j)", async (fields) => {
+    const { result } = await complete([{ ...fields, text: "inline</think>answer" }]);
+    expect(result.reasoningContent).toBeUndefined();
+    expect(result.rawText).toBe("inline</think>answer");
+  });
+
+  it("does not take completion-level metadata as evidence of a chat reasoning boundary", async () => {
+    const { result } = await complete([{
+      reasoning: "other metadata",
+      ...(stream ? { delta: { content: "chat" } } : { message: { content: "chat" } }),
+    }], false);
+    expect(result.reasoningContent).toBeUndefined();
+    expect(result.content).toBe("chat");
+  });
+
+  it("accepts the reasoning_content alias without duplicating an answer", async () => {
+    const { result } = await complete([{ text: "answer", reasoning: "", reasoning_content: "separate" }]);
+    expect(result.reasoningContent).toBe("separate");
+    expect(result.content).toBe("answer");
+  });
+});
+
 describe("the streaming transport", () => {
   it("hands out each piece and returns the assembled whole, tool calls joined by index", async () => {
     const seen: unknown[] = [];

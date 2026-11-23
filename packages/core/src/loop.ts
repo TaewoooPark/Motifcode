@@ -887,12 +887,9 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
         continue;
       }
       if (normalizeSummary(doneAction.summary) !== pendingDone) {
-        // A different summary is a different claim, and confirming a claim the
-        // harness never proposed is not a confirmation of anything.
-        const proposed = pendingDone;
-        pendingDone = null;
+        // Keep the original proposal so the requested correction can confirm it.
         handBack(
-          `The confirmation did not match the summary you proposed:\n\n${proposed}\n\n` +
+          `The confirmation did not match the summary you proposed:\n\n${pendingDone}\n\n` +
             "Repeat that summary verbatim with `confirm: true`, or keep working.",
           doneCalls,
         );

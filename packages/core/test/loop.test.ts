@@ -427,18 +427,24 @@ describe("the done contract", () => {
     expect(r.turns).toBe(3);
   });
 
-  it("does not end when the confirmed summary is a different claim", async () => {
+  it("accepts the original summary when a mismatched confirmation is corrected", async () => {
     const { emit } = collect();
     const transport = new ScriptedTransport([
       doneBody("fixed the parser"),
-      toolCallBody("done", { summary: "fixed everything, shipped it", confirm: true }),
-      doneBody("fixed the parser"),
+      doneBody("fixed everything, shipped it", { confirm: true }),
       doneBody("fixed the parser", { confirm: true }),
     ]);
-    const r = await runLoop({ ...base, transport, executor: okExec, emit, maxTurns: 8 });
+    const r = await runLoop({ ...base, transport, executor: okExec, emit, maxTurns: 3 });
     expect(r.reason).toBe("done");
     expect(r.summary).toBe("fixed the parser");
-    expect(r.turns).toBe(4);
+    expect(r.turns).toBe(3);
+  });
+
+  it("does not promote a rejected confirmation into a new proposal", async () => {
+    const wrong = doneBody("shipped everything", { confirm: true });
+    const transport = new ScriptedTransport([doneBody("fixed the parser"), wrong, wrong, wrong]);
+    const r = await runLoop({ ...base, transport, executor: okExec, emit: collect().emit, maxTurns: 4 });
+    expect(r.reason).toBe("turn_limit");
   });
 
   it("tolerates reflowed whitespace in the confirmed summary", async () => {
@@ -468,6 +474,7 @@ describe("the done contract", () => {
     const { emit } = collect();
     const transport = new ScriptedTransport([
       doneBody("nearly"),
+      doneBody("different claim", { confirm: true }),
       toolCallBody("bash", { command: "ls" }),
       doneBody("nearly", { confirm: true }),
       doneBody("nearly"),
@@ -475,9 +482,9 @@ describe("the done contract", () => {
     ]);
     const r = await runLoop({ ...base, transport, executor: okExec, emit, maxTurns: 8 });
     expect(r.reason).toBe("done");
-    // Turn 3's confirmation had nothing to confirm, so it became a fresh
+    // Turn 4's confirmation had nothing to confirm, so it became a fresh
     // proposal and needed its own confirmation.
-    expect(r.turns).toBe(5);
+    expect(r.turns).toBe(6);
   });
 });
 

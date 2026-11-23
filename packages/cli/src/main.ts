@@ -879,14 +879,12 @@ async function main(): Promise<number> {
   const seed = args.flags["seed"] !== undefined ? flagInt(args.flags, "seed", 0, 0) : stored.values.seed;
   const bashTimeout = flagInt(args.flags, "bash-timeout", stored.values.bashTimeout ?? 120, 1);
 
-  // The two body-parsing channels are implemented end to end but have never
-  // been run against Motif-3. Saying so with a flag is more honest than a
-  // README note nobody reads at the point of use. A channel chosen in a
-  // settings file was chosen on purpose, and is not asked again.
+  // A saved channel is already an explicit choice. A command-line selection
+  // opts in separately because completions support varies by endpoint.
   const channelFromFlag = typeof args.flags["channel"] === "string";
   if (channel !== "toolcall" && channelFromFlag && args.flags["experimental-channel"] !== true) {
     throw new UsageError(
-      `the ${channel} channel has never been measured against Motif-3; pass --experimental-channel to try it`,
+      `the ${channel} channel is experimental. Run motif doctor to check this endpoint, then pass --experimental-channel to use it`,
     );
   }
   if (channelPolicy === "adaptive" && args.flags["experimental-channel"] !== true) {

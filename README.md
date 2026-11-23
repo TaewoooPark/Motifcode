@@ -520,13 +520,13 @@ and each fact below, checked rather than assumed, became a design constraint.
 
 | Fact about Motif-3 | Source | What it forces here |
 |---|---|---|
-| The chat template renders the tools block **before** the system prompt, in the same turn; reordering two tools leaves ~24% of the prefix | `chat_template.jinja`; measured in `template.test.ts` | Nine tools in a frozen, canonical order (`done, bash, read, write, apply_patch, term, skill, task, mcp`); a subagent takes a *prefix* of it; a prompt under 3k tokens (about 2k for a one-shot run without the MCP tool) of which 90–98% is served from the endpoint's cache |
-| Intermediate reasoning is rendered only when tools are registered, and the hosted router does render returned `reasoning_content` | template, measured; endpoint, 2026-09-20 | Tools are registered on every channel, and the model's reasoning is sent back every turn |
+| The chat template places tools before the system prompt. Changing the early tools shortens the reusable prefix. | `chat_template.jinja`; endpoint cache counters | Nine tools have a stable order and subagents take a prefix. Read the reported cached-token count for the current provider and prompt length. |
+| With tools registered, the local template includes intermediate assistant reasoning. The original Infron benchmark observed it in hosted prompts. | template tests; Infron, 2026-09-20 | The client replays reasoning. On OpenRouter/KT, tests recovered task state from ordinary tool results and user messages. Keep required IDs, decisions and outcomes in those messages. |
 | JSON inside `<tool_call>` is frequently malformed (shell `\$`, regex `\s`), and the hosted endpoint sometimes emits a bare call with no tags | the vendor's vLLM parser; endpoint, measured | A client-side repair ladder behind the server's own, recovery of bare calls, a breakage budget, and closed tool schemas enforced by a linter that fails the build |
 | A dropped tool call and a final answer look the same | vendor parser comments; measured in the campaign | `done` is a tool; in benchmark mode a turn without an action is handed back instead of ending the task |
 | SWE-bench Verified 76.2 came from a single `bash` tool; Terminal-Bench 2.1 74.9 from a persistent tmux session | mini-SWE-agent config; Terminus 2 | The thin tool set is the baseline, with a `term` tool beside `bash` |
 | A reasoning step takes 200–300 s on the hosted endpoint | measured | No 300-second header timeout in the transport; a 429 is retried after `Retry-After` |
-| The Infron endpoint tested in the original benchmark did not expose `/v1/completions` | `motif doctor` | Only the native `toolcall` channel runs there; the `object` and `raw` channels and the pruning toolkit need a local completions server (`--experimental-channel`) |
+| The Infron endpoint in the original benchmark lacked `/v1/completions`. Other endpoints can expose different response formats. | `motif doctor` | Use native `toolcall` by default. For experimental `object` or `raw`, check the selected endpoint with `motif doctor` and opt in with `--experimental-channel`. |
 
 Whatever the channel, the model's own body is kept verbatim in the transcript,
 and the loop is tested by injecting the faults the model actually produces:

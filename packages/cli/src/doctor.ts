@@ -9,14 +9,14 @@
  * those blames the weights.
  *
  * On a hosted endpoint the flags are not the user's to set, so this does not
- * recite them. It probes instead: one small chat request with a tool
- * registered, and one request to the completions endpoint, and it reports what
- * came back. What the server was started with is unknowable from here; what
+ * recite them. It probes native chat and each experimental body format, and
+ * reports which diagnostic actions reach the loop’s in-memory recorder. What the server was started with is unknowable from here; what
  * it produces is not.
  */
 
-import { apiKeyEnvForEndpoint, normalizeEndpoint, providerForEndpoint } from "@motifcode/core";
-import { MAX_CONTEXT, SAMPLING_DEFAULTS } from "@motifcode/protocol";
+import { apiKeyEnvForEndpoint, HttpTransport, normalizeEndpoint, providerForEndpoint, runLoop, TransportError } from "@motifcode/core";
+import { getCodec, MAX_CONTEXT, renderFor, SAMPLING_DEFAULTS, unwrapTool, type Message } from "@motifcode/protocol";
+import { CORE_TOOLS } from "@motifcode/tools";
 import { detectSandbox } from "./sandbox.js";
 
 export type CheckState = "ok" | "warn" | "fail" | "unknown";
@@ -82,6 +82,68 @@ const PROBE_TOOL = {
     },
   },
 };
+
+/** Decode and validate a single body turn without giving it a terminal. */
+async function probeBodyChannel(
+  channel: "object" | "raw",
+  transport: HttpTransport,
+): Promise<{ check: Check; routeAvailable?: boolean; status?: number }> {
+  const name = `${channel} channel`;
+  const tools = CORE_TOOLS.filter((tool) => unwrapTool(tool).name === "term");
+  const codec = getCodec(channel);
+  const system = codec.systemFragment(tools);
+  const userTask = 'Propose one terminal input with the two keystrokes "OK", no newline, duration 0.1 seconds. The task is not complete.';
+  const messages: Message[] = [{ role: "system", content: system }, { role: "user", content: userTask }];
+  const request = codec.buildRequest(
+    { messages, render: () => renderFor(channel, messages, tools) },
+    tools,
+    { maxTokens: 768 },
+  );
+  try {
+    const response = await transport.complete(request);
+    let count = 0;
+    let exact = false;
+    // Replay the one recorded response so even the loop's retry paths cannot
+    // trigger more inference. Only actions past its normal gates reach run().
+    await runLoop({
+      channel,
+      channelPolicy: "fixed",
+      tools,
+      system: () => system,
+      userTask,
+      maxTurns: 1,
+      emit: () => {},
+      transport: { endpoint: transport.endpoint, model: transport.model, complete: async () => response },
+      executor: {
+        run: async (call) => {
+          count++;
+          exact = call.name === "term" && call.arguments.keystrokes === "OK" && call.arguments.duration_s === 0.1;
+          return { ok: true, output: "" };
+        },
+      },
+    });
+    let check: Check = { name, state: "unknown", detail: "the response yielded no validated action" };
+    if (count === 1 && exact) {
+      check = { name, state: "ok", detail: "the harness decoded and validated the requested action" };
+    } else if (response.finishReason === "length") {
+      check.detail = "the probe reached its output limit before a usable action";
+    } else if (count > 0) {
+      check = { name, state: "warn", detail: "the decoded actions did not match the requested input" };
+    }
+    return { check, routeAvailable: true };
+  } catch (error) {
+    const status = TransportError.is(error) ? error.status : undefined;
+    const check: Check = { name, state: "unknown", detail: "probe request failed" };
+    if (status === 404 || status === 405 || status === 501) {
+      return { check: { ...check, detail: "completions unavailable for this model" }, routeAvailable: false, status };
+    }
+    if (TransportError.is(error) && error.kind === "protocol") {
+      return { check: { ...check, detail: "invalid completion response" }, routeAvailable: true };
+    }
+    if (status) check.detail = `probe returned HTTP ${status}`;
+    return { check, status };
+  }
+}
 
 export async function doctor(opts: DoctorOptions): Promise<Check[]> {
   const fetchImpl = opts.fetchImpl ?? globalThis.fetch;
@@ -342,30 +404,25 @@ export async function doctor(opts: DoctorOptions): Promise<Check[]> {
     checks.push({ name: "chat probe", state: "warn", detail: `failed: ${String(err)}` });
   }
 
-  // The body channels need `/v1/completions`. A hosted router usually has no
-  // such route for this model, and finding that out from a 404 in turn one of
-  // an `--experimental-channel` run is later than necessary.
-  try {
-    const res = await fetchImpl(`${endpoint}/v1/completions`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ model: opts.model, prompt: "hi", max_tokens: 1, stream: false }),
-    });
-    checks.push(
-      res.ok
-        ? { name: "completions endpoint", state: "ok", detail: "available; the object and raw channels can run" }
-        : res.status === 404 || res.status === 405 || res.status === 501
-          ? {
-              name: "completions endpoint",
-              state: "warn",
-              detail: `not available (${res.status})`,
-              fix: "only the toolcall channel can run against this endpoint; --channel object|raw will fail on the first request",
-            }
-          : { name: "completions endpoint", state: "unknown", detail: `answered ${res.status}` },
-    );
-  } catch (err) {
-    checks.push({ name: "completions endpoint", state: "unknown", detail: `failed: ${String(err)}` });
+  const transport = new HttpTransport({ endpoint, model: opts.model, apiKey: opts.apiKey, fetchImpl });
+  const objectProbe = await probeBodyChannel("object", transport);
+  // A missing route applies to both formats. Other failures can be specific to
+  // the prompt or sampled answer, so probe each format independently.
+  const rawProbe = objectProbe.routeAvailable === false
+    ? { ...objectProbe, check: { ...objectProbe.check, name: "raw channel" } }
+    : await probeBodyChannel("raw", transport);
+  const probes = [objectProbe, rawProbe];
+  const endpointCheck: Check = { name: "completions endpoint", state: "unknown", detail: "could not verify /v1/completions" };
+  const missing = probes.find((probe) => probe.routeAvailable === false);
+  if (probes.some((probe) => probe.routeAvailable)) {
+    endpointCheck.state = "ok";
+    endpointCheck.detail = "accepted a request to /v1/completions";
+  } else if (missing) {
+    endpointCheck.state = "warn";
+    endpointCheck.detail = `not available for this model (${missing.status})`;
+    endpointCheck.fix = "use the toolcall channel on this endpoint";
   }
+  checks.push(endpointCheck, objectProbe.check, rawProbe.check);
 
   checks.push({
     name: "sampling",

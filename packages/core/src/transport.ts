@@ -215,7 +215,22 @@ interface WireToolCall {
   function?: { name?: string; arguments?: string | Record<string, unknown> };
 }
 
-interface ChatChoice {
+interface ChoiceReasoning {
+  // Some text-completion providers put the split reasoning beside choice.text.
+  reasoning?: string | null;
+  reasoning_content?: string | null;
+}
+
+function textCompletionReasoning(choice: ChoiceReasoning): string | undefined {
+  // An empty placeholder does not establish that text is the final answer.
+  // Keep the template's inline </think> boundary for unsplit completions.
+  for (const part of [choice.reasoning, choice.reasoning_content]) {
+    if (typeof part === "string" && part.length > 0) return part;
+  }
+  return undefined;
+}
+
+interface ChatChoice extends ChoiceReasoning {
   message?: {
     content?: string | null;
     reasoning_content?: string | null;
@@ -421,7 +436,7 @@ export class HttpTransport implements Transport {
     const streamed = /text\/event-stream/i.test(res.headers.get("content-type") ?? "");
     if (req.onDelta && streamed) {
       try {
-        json = await readStream(res, req.onDelta, req.signal);
+        json = await readStream(res, req.onDelta, req.signal, req.raw === true);
       } catch (err) {
         if (TransportError.is(err)) throw err;
         if (req.signal?.aborted || isAbort(err)) throw new TransportError("request aborted", { kind: "aborted", cause: err });
@@ -452,7 +467,8 @@ export class HttpTransport implements Transport {
     if (typeof content !== "string") {
       throw new TransportError("choice content was not a string", { kind: "protocol" });
     }
-    const reasoning = choice.message?.reasoning_content ?? choice.message?.reasoning ?? undefined;
+    const reasoning = choice.message?.reasoning_content ?? choice.message?.reasoning ??
+      (req.raw ? textCompletionReasoning(choice) : undefined);
     if (req.onDelta && !streamed) {
       // Whole, and late, but the same shape the watcher expects.
       req.onDelta({
@@ -511,7 +527,7 @@ interface StreamChunk {
   error?: { code?: unknown; message?: unknown } | null;
   cost?: unknown;
   cost_details?: unknown;
-  choices?: {
+  choices?: (ChoiceReasoning & {
     delta?: {
       content?: string | null;
       reasoning?: string | null;
@@ -520,7 +536,7 @@ interface StreamChunk {
     };
     text?: string;
     finish_reason?: string | null;
-  }[];
+  })[];
   usage?: Record<string, unknown> | null;
 }
 
@@ -537,6 +553,7 @@ async function readStream(
   res: Response,
   onDelta: (d: StreamDelta) => void,
   signal: AbortSignal | undefined,
+  raw: boolean,
 ): Promise<{ choices?: ChatChoice[]; cost?: number; cost_details?: Record<string, number>; usage?: Record<string, unknown> & { prompt_tokens_details?: { cached_tokens?: number } } }> {
   if (!res.body) throw new TransportError("server sent no body to stream", { kind: "protocol" });
   const reader = res.body.getReader();
@@ -581,7 +598,8 @@ async function readStream(
     if (!choice) return false;
     if (choice.finish_reason) finish = choice.finish_reason;
     const delta: StreamDelta = {};
-    const think = choice.delta?.reasoning ?? choice.delta?.reasoning_content;
+    const think = choice.delta?.reasoning ?? choice.delta?.reasoning_content ??
+      (raw ? textCompletionReasoning(choice) : undefined);
     if (typeof think === "string" && think !== "") {
       reasoning += think;
       sawReasoning = true;
