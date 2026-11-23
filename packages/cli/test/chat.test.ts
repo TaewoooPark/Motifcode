@@ -272,11 +272,12 @@ describe("interactive session", () => {
 
     s.type("now the tests\r");
     await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(2));
-    const roles = t.seen[1]!.messages.map((m) => m.role);
-    // system, the first task, its `done`, then the new task — the model sees
-    // what it did before.
-    expect(roles).toEqual(["system", "user", "assistant", "user"]);
-    expect(t.seen[1]!.messages[3]!.content).toBe("now the tests");
+    const history = t.seen[1]!.messages;
+    expect(history.map(message => message.role)).toEqual(["system", "user", "assistant", "tool", "user"]);
+    const completedCall = history[2]!.tool_calls?.[0];
+    expect(completedCall?.id).toBeTruthy();
+    expect(history[3]!.tool_call_id).toBe(completedCall!.id);
+    expect(history[4]!.content).toBe("now the tests");
     expect(s.screen()).toContain("> fix the parser");
     // The `done` summary stands in for the reply; there is no end banner.
     expect(s.screen()).toContain("⏺ first");
