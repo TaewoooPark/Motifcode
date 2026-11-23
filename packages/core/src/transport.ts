@@ -277,11 +277,16 @@ function toWireMessages(messages: Message[]): unknown[] {
 
 /** Normalise the several shapes servers use for an extracted tool call. */
 function normaliseToolCalls(raw: WireToolCall[] | null | undefined): ToolCall[] | undefined {
-  if (!raw || raw.length === 0) return undefined;
+  if (raw == null) return undefined;
+  if (!Array.isArray(raw)) {
+    throw new TransportError("tool_calls was not an array", { kind: "protocol", retryable: true });
+  }
   const out: ToolCall[] = [];
   for (const tc of raw) {
-    const name = tc.function?.name;
-    if (!name) continue;
+    const name = tc?.function?.name;
+    if (typeof name !== "string" || name.trim() === "") {
+      throw new TransportError("tool call has no function name; incomplete batch", { kind: "protocol", retryable: true });
+    }
     const args = tc.function?.arguments;
     out.push({
       ...(tc.id !== undefined ? { id: tc.id } : {}),
@@ -558,7 +563,6 @@ async function readStream(
   if (!res.body) throw new TransportError("server sent no body to stream", { kind: "protocol" });
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
-  let buffer = "";
   let content = "";
   let reasoning = "";
   let sawReasoning = false;
@@ -568,19 +572,20 @@ async function readStream(
   let stopped: { code: string; message: string } | undefined;
   const calls = new Map<number, { id?: string; name: string; arguments: string }>();
 
-  const handle = (line: string): boolean => {
-    if (!line.startsWith("data:")) return false;
-    const payload = line.slice(5).trim();
+  const handleEvent = (payload: string): boolean => {
     if (payload === "[DONE]") return true;
+    if (payload === "") return false;
     let chunk: StreamChunk;
     try {
       chunk = JSON.parse(payload) as StreamChunk;
     } catch {
-      // A torn line is dropped rather than fatal; the whole is still checked
-      // for shape by the caller.
-      return false;
+      // Losing even one delta can leave valid JSON with different tool arguments.
+      throw new TransportError("invalid JSON in completion stream", { kind: "network" });
     }
-    if (typeof chunk !== "object" || chunk === null) return false;
+    if (typeof chunk !== "object" || chunk === null || Array.isArray(chunk) ||
+        (chunk.choices !== undefined && !Array.isArray(chunk.choices))) {
+      throw new TransportError("invalid completion stream event", { kind: "network" });
+    }
     if (chunk.usage) usage = chunk.usage;
     // Accounting may arrive after finish_reason, in a chunk with no choices.
     // Each value is a request total: keep the last valid report, never sum it.
@@ -623,34 +628,55 @@ async function readStream(
     return false;
   };
 
-  let finished = false;
-  for (;;) {
-    if (signal?.aborted) {
-      await reader.cancel().catch(() => undefined);
-      throw new TransportError("request aborted", { kind: "aborted" });
+  // SSE dispatches an event at its blank line. Consecutive data fields form
+  // a single payload, and even the CRLF between fields may span two chunks.
+  let fields: string[] = [];
+  const acceptLine = (line: string): boolean => {
+    if (line === "") {
+      const payload = fields.join("\n").trim();
+      fields = [];
+      return handleEvent(payload);
     }
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let nl = buffer.indexOf("\n");
-    while (nl !== -1) {
-      const line = buffer.slice(0, nl).replace(/\r$/, "");
-      buffer = buffer.slice(nl + 1);
-      if (handle(line)) {
-        finished = true;
+    if (line === "data" || line.startsWith("data:")) fields.push(line.slice(5).replace(/^ /, ""));
+    return false;
+  };
+  let partialLine = "";
+  let endedWithCR = false;
+  const consume = (text: string): boolean => {
+    if (!text) return false;
+    if (endedWithCR && text.startsWith("\n")) text = text.slice(1);
+    endedWithCR = text.endsWith("\r");
+    const lines = text.split(/\r\n|[\r\n]/);
+    lines[0] = partialLine + lines[0];
+    partialLine = lines.pop()!;
+    return lines.some(acceptLine);
+  };
+
+  let finished = false;
+  try {
+    while (!finished) {
+      if (signal?.aborted) throw new TransportError("request aborted", { kind: "aborted" });
+      const { done, value } = await reader.read();
+      if (done) {
+        // Some compatible servers send the complete [DONE] marker without
+        // its final newline. An ordinary socket EOF is not a completion.
+        finished = consume(decoder.decode()) || acceptLine(partialLine) || acceptLine("");
         break;
       }
-      nl = buffer.indexOf("\n");
+      finished = consume(decoder.decode(value, { stream: true }));
     }
-    if (finished) break;
-  }
-  if (!finished && buffer.trim() !== "") handle(buffer.trim());
-  if (stopped) {
+    if (stopped) {
+      throw new TransportError(`the server stopped the generation: ${stopped.code}${stopped.message ? ` (${stopped.message})` : ""}`, {
+        kind: "generation",
+        code: stopped.code,
+      });
+    }
+    if (!finished && finish === undefined) {
+      throw new TransportError("stream ended without a finish reason or [DONE]", { kind: "network" });
+    }
+  } finally {
     await reader.cancel().catch(() => undefined);
-    throw new TransportError(`the server stopped the generation: ${stopped.code}${stopped.message ? ` (${stopped.message})` : ""}`, {
-      kind: "generation",
-      code: stopped.code,
-    });
+    reader.releaseLock();
   }
 
   const toolCalls = [...calls.entries()]

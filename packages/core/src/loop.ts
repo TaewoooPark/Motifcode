@@ -788,6 +788,12 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
 
     // ---- the action gate -------------------------------------------------
     const refusals: Refusal[] = [];
+    if (parsed.truncated || parsed.unrecoverable.length > 0 || (parsed.invalidArguments?.length ?? 0) > 0) {
+      // A parser may recover some siblings while reporting another as broken.
+      // Repeating such a batch after executing its valid prefix can repeat edits.
+      refusals.push({ kind: "incomplete_payload", detail: "part of the action batch could not be decoded; resend the entire batch" });
+    }
+
 
     // A response that hit the token cap is missing its tail by definition. The
     // bracket balancer will still produce valid JSON from what arrived, and a

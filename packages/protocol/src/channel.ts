@@ -308,7 +308,7 @@ class ObjectChannel implements Channel {
           // is a schema violation the validator should reject, not something
           // this parser should quietly turn into a number.
           arguments: {
-            keystrokes: c.keystrokes ?? "",
+            keystrokes: c.keystrokes === undefined ? "" : c.keystrokes,
             duration_s: c.duration === undefined ? 1.0 : c.duration,
           },
           repaired: false,
@@ -401,26 +401,35 @@ class RawChannel implements Channel {
     // Deliberately hand-rolled rather than an XML parser: the contract is that
     // keystroke bodies are raw text, so a conforming parser would corrupt the
     // very thing this channel exists to protect.
-    const re = /<keystrokes([^>]*)>([\s\S]*?)<\/keystrokes>/g;
-    for (let m = re.exec(text); m !== null; m = re.exec(text)) {
-      const attrs = m[1] ?? "";
-      const dur = /duration\s*=\s*"([^"]*)"/.exec(attrs)?.[1];
+    const tag = /<\/?keystrokes(?=[\s/>]|$)/g;
+    const closingTag = "</keystrokes>";
+    let truncated = false;
+    for (let match = tag.exec(text); match !== null; match = tag.exec(text)) {
+      const attrsEnd = text.indexOf(">", tag.lastIndex);
+      const attrs = text.slice(tag.lastIndex, attrsEnd);
+      if (match[0].startsWith("</") || attrsEnd === -1 || attrs.includes("<")) {
+        truncated = true;
+        break;
+      }
+      const waitOnly = /\/\s*$/.test(attrs);
+      const bodyStart = attrsEnd + 1;
+      const bodyEnd = waitOnly ? bodyStart : text.indexOf(closingTag, bodyStart);
+      if (bodyEnd === -1) {
+        truncated = true;
+        break;
+      }
+      const duration = /\bduration\s*=\s*"([^"]*)"/.exec(attrs)?.[1];
       actions.push({
         kind: "tool",
         name: "term",
-        arguments: { keystrokes: m[2] ?? "", duration_s: dur ? Number(dur) : 1.0 },
+        arguments: {
+          keystrokes: text.slice(bodyStart, bodyEnd),
+          duration_s: duration ? Number(duration) : 1.0,
+        },
         repaired: false,
       });
-    }
-    const selfClosing = /<keystrokes([^>]*)\/>/g;
-    for (let m = selfClosing.exec(text); m !== null; m = selfClosing.exec(text)) {
-      const dur = /duration\s*=\s*"([^"]*)"/.exec(m[1] ?? "")?.[1];
-      actions.push({
-        kind: "tool",
-        name: "term",
-        arguments: { keystrokes: "", duration_s: dur ? Number(dur) : 1.0 },
-        repaired: false,
-      });
+      // The body is opaque: a string like "<keystrokes/>" in a command is data.
+      tag.lastIndex = waitOnly ? bodyStart : bodyEnd + closingTag.length;
     }
 
     const complete = tagText(text, "task_complete");
@@ -442,7 +451,7 @@ class RawChannel implements Channel {
       analysis,
       plan,
       unrecoverable,
-      truncated: /<keystrokes[^>]*>(?![\s\S]*<\/keystrokes>)/.test(text),
+      truncated,
     };
   }
 }
