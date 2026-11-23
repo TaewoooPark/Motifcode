@@ -511,7 +511,7 @@ Infron을 선택하면 저장된 Infron 키로 잔액을 조회합니다. Usage�
 | 떨어진 도구 호출과 최종 답변이 겉으로는 같다 | 벤더 파서 주석; 캠페인에서 측정 | `done`은 도구이고, 벤치마크 모드에서는 행동 없는 턴을 작업 종료가 아니라 되돌려 줌 |
 | SWE-bench Verified 76.2는 `bash` 도구 하나로, Terminal-Bench 2.1 74.9는 지속되는 tmux 세션에서 나왔다 | mini-SWE-agent 설정; Terminus 2 | 얇은 도구 집합이 기준선이고, `bash` 옆에 `term` 도구 |
 | 호스팅 엔드포인트에서 추론 스텝 하나가 200~300초 걸린다 | 측정 | 전송 계층에 300초 헤더 타임아웃을 두지 않음; 429는 `Retry-After` 뒤에 재시도 |
-| 호스팅 엔드포인트에 `/v1/completions`가 없다 | `motif doctor` | 거기서는 네이티브 `toolcall` 채널만 동작; `object`·`raw` 채널과 프루닝 툴킷은 completions 경로가 있는 로컬 서버가 필요(`--experimental-channel`) |
+| 기존 벤치마크에서 사용한 Infron 엔드포인트는 `/v1/completions`를 제공하지 않았다 | `motif doctor` | 거기서는 네이티브 `toolcall` 채널만 동작; `object`·`raw` 채널과 프루닝 툴킷은 completions 경로가 있는 로컬 서버가 필요(`--experimental-channel`) |
 
 어느 채널이든 모델 자신의 본문은 대화 기록에 원문 그대로 남기고, 루프는 모델이 실제로
 만들어 내는 결함(잘못된 이스케이프, 잘린 호출, 파싱 불가능한 본문, 빈 턴, 죽은 서버)을

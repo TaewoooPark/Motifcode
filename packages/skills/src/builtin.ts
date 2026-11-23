@@ -257,9 +257,9 @@ model card's numbers.
 for the selected provider, or configure its API key in a \`.env\` file. A 429 is retried after the
 endpoint's \`Retry-After\`; a 5xx is retried on backoff.
 
-**Only the native channel.** The hosted endpoint has no \`/v1/completions\`,
-so the \`object\` and \`raw\` channels cannot run against it. If a task needs
-them, it needs a different server.`,
+**Channels.** Use the native \`toolcall\` channel by default. The experimental
+\`object\` and \`raw\` channels require a text completions endpoint. Check the
+selected provider with \`motif doctor\` before using either channel.`,
 
   /* ---------------------------------------------------------------- */
   `---
