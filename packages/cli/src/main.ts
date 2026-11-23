@@ -29,6 +29,7 @@ import {
   saveApiKey,
   withholdSecrets,
   type LoopEvent,
+  type LoopResult,
 } from "@motifcode/core";
 import { DEFAULT_HOOKS } from "@motifcode/hooks";
 import {
@@ -942,6 +943,12 @@ async function main(): Promise<number> {
   const activeToolNames = CORE_TOOL_NAMES.slice(0, activeTools.length);
   const schemaHash = toolSchemaHash(activeTools);
   const promptHash = systemPromptHash(systemFor(channel));
+  const printSystemFor = (ch: ChannelId): string =>
+    buildSystemPrompt({ mode: "chat", channel: ch, tools: activeTools, skills, agents, ...(projectNotes !== undefined ? { projectNotes } : {}), cwd });
+  const printPromptHash = systemPromptHash(printSystemFor(channel));
+  // Restoring a transcript keeps its original system turn, even when a
+  // one-shot journal is resumed with -p.
+  const resumePromptHash = resumeFrom?.header.prompt.systemHash === printPromptHash ? printPromptHash : promptHash;
   const printOnly = args.flags["print"] === true || args.flags["p"] === true;
   const abort = new AbortController();
   let stopInteractive: (() => void) | undefined;
@@ -963,7 +970,7 @@ async function main(): Promise<number> {
   let task: string;
   if (resumeFrom) {
     const blocker = checkResumable(resumeFrom, {
-      systemHash: promptHash,
+      systemHash: resumePromptHash,
       toolSchemaHash: schemaHash,
       model,
       endpoint,
@@ -1092,6 +1099,58 @@ async function main(): Promise<number> {
     sessionKey = key;
   }
 
+  const runId = new Date().toISOString().replace(/[:.]/g, "-");
+  const journalPath = flagStr(args.flags, "journal", "")
+    || join(cwd, CONFIG_DIR, "sessions", `${runId}.jsonl`);
+  const journal = new Journal(
+    journalPath,
+    newHeader({
+      runId,
+      cwd,
+      model,
+      endpoint,
+      systemHash: resumeFrom ? resumePromptHash : printOnly ? printPromptHash : promptHash,
+      toolSchemaHash: schemaHash,
+      harnessVersion: VERSION,
+      config: {
+        initialChannel: channel,
+        channelPolicy,
+        temperature: SAMPLING_DEFAULTS.temperature,
+        topP: SAMPLING_DEFAULTS.top_p,
+        ...(seed !== undefined ? { seed } : {}),
+        maxTurns,
+        ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+        maxRepairs: 2,
+      },
+    }),
+  );
+  const rootScope: ScopeIdentity = { scopeId: "root", scopeKind: "root" };
+  journal.record(rootScope, {
+    t: "scope_start",
+    task,
+    initialMessages: [{ role: "user", content: task }],
+  });
+  if (resumeFrom?.checkpoint) {
+    journal.record(rootScope, {
+      t: "resume",
+      fromSeq: resumeFrom.checkpoint.afterSeq,
+      previousRunId: resumeFrom.header.runId,
+    });
+  }
+  const rootSink = journal.sinkFor(rootScope);
+  const rootCheckpoint = journal.checkpointFor(rootScope);
+  const recordEnd = (result: LoopResult): void => {
+    if (result.reason === "aborted" && abort.signal.aborted) return;
+    journal.record(rootScope, {
+      t: "scope_end",
+      result: {
+        endReason: result.reason,
+        ...(result.summary !== undefined ? { summary: result.summary } : {}),
+        turns: result.turns,
+      },
+    });
+  };
+
   if (printOnly) {
     // The conversational contract without the conversation: a reply ends
     // the task and is written to stdout, nothing else is. For pipes.
@@ -1108,16 +1167,18 @@ async function main(): Promise<number> {
       const result = await runLoop({
         transport,
         tools: activeTools,
-        system: (ch) => buildSystemPrompt({ mode: "chat", channel: ch, tools: activeTools, skills, agents, ...(projectNotes !== undefined ? { projectNotes } : {}), cwd }),
+        system: printSystemFor,
         userTask: task,
         context: mcpConnected ? await mcp.prepare(discoveryTask, abort.signal) : undefined,
         replyRecovery: (content) => mcp.replyRecovery(content),
         signal: abort.signal,
         executor,
         emit: (e) => {
+          if (e.type !== "stream") rootSink(e);
           if (e.type === "notice" && e.level === "error") process.stderr.write(`${e.text}\n`);
         },
-        scopeId: "root",
+        onCheckpoint: (state) => { if (!abort.signal.aborted) rootCheckpoint(state); },
+        scopeId: rootScope.scopeId,
         repo: { cwd },
         channel,
         channelPolicy,
@@ -1128,6 +1189,7 @@ async function main(): Promise<number> {
         replyEnds: true,
         confirmDone: false,
       });
+      recordEnd(result);
       if (result.summary) process.stdout.write(result.summary.replace(/\s+$/, "") + "\n");
       if (result.reason !== "done") process.stderr.write(`ended: ${result.reason}\n`);
       return result.reason === "done" ? 0 : 1;
@@ -1138,49 +1200,6 @@ async function main(): Promise<number> {
 
   const transport = new HttpTransport({ endpoint, model, ...(sessionKey !== undefined ? { apiKey: sessionKey } : {}) });
   const screen = new Screen({ showThinking, verbose: args.flags["verbose"] === true || stored.values.verbose === true, cwd });
-  const runId = new Date().toISOString().replace(/[:.]/g, "-");
-  // `--journal` so a benchmark runner knows where the record went without
-  // scraping a directory for the newest file. Two rows finishing in the same
-  // second would otherwise be indistinguishable, and the one that lost would
-  // be scored against the other's transcript.
-  const journalPath = flagStr(args.flags, "journal", "")
-    || join(cwd, CONFIG_DIR, "sessions", `${runId}.jsonl`);
-  const journal = new Journal(
-    journalPath,
-    newHeader({
-      runId,
-      cwd,
-      model,
-      endpoint,
-      systemHash: promptHash,
-      toolSchemaHash: schemaHash,
-      harnessVersion: VERSION,
-      config: {
-        initialChannel: channel,
-        channelPolicy,
-        temperature: SAMPLING_DEFAULTS.temperature,
-        topP: SAMPLING_DEFAULTS.top_p,
-        ...(seed !== undefined ? { seed } : {}),
-        maxTurns,
-        ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
-        maxRepairs: 2,
-      },
-    }),
-  );
-
-  const rootScope: ScopeIdentity = { scopeId: "root", scopeKind: "root" };
-  journal.record(rootScope, {
-    t: "scope_start",
-    task,
-    initialMessages: [{ role: "user", content: task }],
-  });
-  if (resumeFrom?.checkpoint) {
-    journal.record(rootScope, {
-      t: "resume",
-      fromSeq: resumeFrom.checkpoint.afterSeq,
-      previousRunId: resumeFrom.header.runId,
-    });
-  }
 
   if (args.flags["no-hero"] !== true) {
     screen.splash({ model, endpoint, channel, maxTokens: 262_144 });
@@ -1189,7 +1208,6 @@ async function main(): Promise<number> {
   // line offers exists for the whole session.
   screen.attachInput(process.stdin, undefined, stop);
 
-  const rootSink = journal.sinkFor(rootScope);
   const emit = (e: LoopEvent) => {
     if (e.type !== "stream") rootSink(e);
     screen.apply(e);
@@ -1308,7 +1326,6 @@ async function main(): Promise<number> {
   // A signal leaves the root journal as the process exit it replaced did: no
   // later checkpoint clears a tool that was cut off, and no scope_end marks the
   // run finished, so `motif resume` still decides from the last safe point.
-  const rootCheckpoint = journal.checkpointFor(rootScope);
   try {
     const result = await runLoop({
       transport,
@@ -1341,14 +1358,7 @@ async function main(): Promise<number> {
       // and the screen ignores them there.
       stream: Boolean(process.stdout.isTTY),
     });
-    if (!(result.reason === "aborted" && abort.signal.aborted)) journal.record(rootScope, {
-      t: "scope_end",
-      result: {
-        endReason: result.reason,
-        ...(result.summary !== undefined ? { summary: result.summary } : {}),
-        turns: result.turns,
-      },
-    });
+    recordEnd(result);
     // Exit 0 means the agent finished its own loop cleanly. It is not a claim
     // that the work is correct — that requires a grader, and `motif distil`
     // reads the grade rather than this exit code.

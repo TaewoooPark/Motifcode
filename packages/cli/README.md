@@ -38,6 +38,12 @@ motif "fix the failing test in tests/"  # one task, then exit
 motif -p "what does src/loop.ts do?"    # print only the reply, for pipes
 ```
 
+One-shot and print runs save their session records in `.motif/sessions/`.
+Use `--journal <path>` to choose the output file, including with `-p`.
+Records include events, checkpoints and the run's ending; an interrupted run
+keeps its last checkpoint for `motif resume <file> -p`. Journal failures
+are reported on stderr with a nonzero exit.
+
 Connect MCP servers and check them from the CLI:
 
 ```bash
