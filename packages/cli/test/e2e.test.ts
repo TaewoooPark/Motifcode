@@ -103,7 +103,7 @@ function runCli(argv: string[], cwd: string, env: Record<string, string> = {}, o
   // empty directory, so neither a developer's own MOTIF_API_KEY nor their
   // ~/.motif/.env can make the unauthenticated cases pass by accident.
   const inherited = { ...process.env };
-  for (const key of ["MOTIF_API_KEY", "MOTIF_MORPHFACTORY_API_KEY", "MOTIF_ENDPOINT", "MOTIF_MODEL"]) delete inherited[key];
+  for (const key of ["OPENROUTER_API_KEY", "MOTIF_API_KEY", "MOTIF_MORPHFACTORY_API_KEY", "MOTIF_ENDPOINT", "MOTIF_MODEL"]) delete inherited[key];
   const home = mkdtempSync(join(tmpdir(), "motif-home-"));
   return new Promise((resolveRun) => {
     const child = spawn(
@@ -586,11 +586,26 @@ describe("the credential", () => {
     expect(preset.stdout).toContain("Morphfactory (BETA)");
     expect(preset.stdout).toContain("https://api-cbt.morphfactory.io");
     expect(preset.stdout).toContain("motif/motif-3");
+    const changed = await runCli(["config", "--provider", "infron", "--endpoint", "https://openrouter.ai/api/v1"], dir);
+    expect(changed.code, changed.stderr).toBe(0);
+    expect(changed.stdout).toContain("motif-technologies/motif-3");
     server = new MockServer(finish);
     await server.start();
     const overridden = await runCli(["t", "--provider", "morphfactory", "--endpoint", server.endpoint, "--model", "local-model", "--no-hero"], dir);
     expect(overridden.code, overridden.stderr).toBe(0);
     expect(server.bodies[0]!.model).toBe("local-model");
+  }, 30_000);
+
+  it("defaults to OpenRouter on a fresh installation and only accepts its own key", async () => {
+    const config = await runCli(["config"], dir);
+    expect(config.code, config.stderr).toBe(0);
+    expect(config.stdout).toContain("OpenRouter");
+    expect(config.stdout).toContain("https://openrouter.ai/api");
+    expect(config.stdout).toContain("motif-technologies/motif-3");
+    const denied = await runCli(["-p", "hello", "--provider", "openrouter"], dir, { MOTIF_API_KEY: "infron-only", MOTIF_MORPHFACTORY_API_KEY: "morph-only" });
+    expect(denied.code).toBe(2);
+    expect(denied.stderr).toContain("motif login --provider openrouter");
+    expect(denied.stderr).toContain("OPENROUTER_API_KEY");
   }, 30_000);
 
   it("requires Morphfactory's own key and explains how to configure it", async () => {
@@ -614,7 +629,7 @@ describe("the credential", () => {
   it("rejects unknown providers before starting a request", async () => {
     const r = await runCli(["config", "--provider", "unknown"], dir);
     expect(r.code).toBe(2);
-    expect(r.stderr).toContain("--provider must be one of infron, morphfactory");
+    expect(r.stderr).toContain("--provider must be one of openrouter, infron, morphfactory");
   }, 30_000);
 
   it("goes out as a bearer token when set in the environment", async () => {
@@ -657,24 +672,25 @@ describe("the credential", () => {
     // a tool result, and tool results are journalled and sent back as context.
     server = new MockServer((turn) =>
       turn === 1
-        ? toolCall("bash", { command: 'echo "K=${MOTIF_API_KEY:-unset} MF=${MOTIF_MORPHFACTORY_API_KEY:-unset}"' })
+        ? toolCall("bash", { command: 'echo "K=${MOTIF_API_KEY:-unset} MF=${MOTIF_MORPHFACTORY_API_KEY:-unset} OR=${OPENROUTER_API_KEY:-unset}"' })
         : turn === 2
           ? toolCall("done", { summary: "s" })
           : toolCall("done", { summary: "s", confirm: true }),
     );
     await server.start();
-    const r = await runCli(["t", "--endpoint", server.endpoint, "--no-hero"], dir, { MOTIF_API_KEY: "sk-hidden", MOTIF_MORPHFACTORY_API_KEY: "mf-hidden" });
+    const r = await runCli(["t", "--endpoint", server.endpoint, "--no-hero"], dir, { MOTIF_API_KEY: "sk-hidden", MOTIF_MORPHFACTORY_API_KEY: "mf-hidden", OPENROUTER_API_KEY: "or-hidden" });
     expect(r.code).toBe(0);
     // The header carried it; the tool result did not.
     expect(server.headers[0]!["authorization"]).toBe("Bearer sk-hidden");
     const toolResult = server.bodies[1]!.messages.find((m) => m.role === "tool");
-    expect(toolResult?.content).toContain("K=unset MF=unset");
+    expect(toolResult?.content).toContain("K=unset MF=unset OR=unset");
     expect(JSON.stringify(server.bodies)).not.toContain("sk-hidden");
     expect(JSON.stringify(server.bodies)).not.toContain("mf-hidden");
     const sessions = join(dir, ".motif", "sessions");
     const journal = readFileSync(join(sessions, readdirSync(sessions)[0]!), "utf8");
     expect(journal).not.toContain("sk-hidden");
     expect(journal).not.toContain("mf-hidden");
+    expect(journal).not.toContain("or-hidden");
   }, 30_000);
 
   it("writes the call back into history with its result", async () => {

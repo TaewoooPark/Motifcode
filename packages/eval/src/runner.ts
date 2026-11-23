@@ -26,7 +26,7 @@ import { execFile, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import type { SessionEndReason } from "@motifcode/core";
+import { apiKeyEnvForEndpoint, type SessionEndReason } from "@motifcode/core";
 import type { JournalLine } from "@motifcode/journal";
 import type { GraderAdapter } from "./grader.js";
 import type { EvalManifest } from "./manifest.js";
@@ -159,7 +159,7 @@ async function runAgent(
       env: {
         ...process.env,
         NO_COLOR: "1",
-        ...(opts.apiKey !== undefined ? { MOTIF_API_KEY: opts.apiKey } : {}),
+        ...(opts.apiKey !== undefined ? { [apiKeyEnvForEndpoint(opts.endpoint)]: opts.apiKey } : {}),
       },
     });
     let timedOut = false;

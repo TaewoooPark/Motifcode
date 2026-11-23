@@ -559,6 +559,15 @@ describe("doctor", () => {
     expect(by(checks, "model family").state).toBe("ok");
   });
 
+  it("reads OpenRouter tool metadata and identifies insufficient credit in the live probe", async () => {
+    const model = "motif-technologies/motif-3";
+    const r = router({ models: [{ id: model, supported_parameters: ["tools"], context_length: 262144 }], chat: { status: 402 } });
+    const checks = await doctor({ endpoint: "https://openrouter.ai/api/v1", model, apiKey: "synthetic", fetchImpl: r.fetchImpl });
+    expect(by(checks, "function calling").state).toBe("ok");
+    expect(by(checks, "chat probe")).toMatchObject({ state: "fail", detail: expect.stringContaining("402") });
+    expect(r.seen.map(call => call.url)).toEqual(["https://openrouter.ai/api/v1/models", "https://openrouter.ai/api/v1/chat/completions"]);
+  });
+
   it("warns when the id is not advertised, and about a non-Motif id", async () => {
     const r = router({ models: [MOTIF] });
     const checks = await doctor({ endpoint: "http://x", model: "meta-llama/Llama-3", apiKey: "k", fetchImpl: r.fetchImpl });

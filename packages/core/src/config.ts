@@ -14,8 +14,8 @@
  * once it has been read; see `withholdSecrets`.
  *
  * It has to be findable. A `.env` file next to where the command is typed, or
- * under `~/.motif/`, is read for `MOTIF_*` keys only — never for anything
- * else that file might hold, and never into the environment. Precedence is
+ * under `~/.motif/`, is read for connection settings and provider keys,
+ * without copying anything into the environment. Precedence is
  * the usual one: an explicit flag, then the process environment, then the
  * files in order.
  */
@@ -25,29 +25,38 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 /** The hosted endpoint Motif-3 is served from. The `/v1` is added per request. */
-export const DEFAULT_ENDPOINT = "https://llm.onerouter.pro";
+export const DEFAULT_ENDPOINT = "https://openrouter.ai/api";
 /** The model id the hosted endpoint routes to Motif-3. */
-export const DEFAULT_MODEL = "motif/motif-3";
+export const DEFAULT_MODEL = "motif-technologies/motif-3";
+const LEGACY_MODEL = "motif/motif-3";
 
 export const ENV_ENDPOINT = "MOTIF_ENDPOINT";
 export const ENV_MODEL = "MOTIF_MODEL";
 export const ENV_API_KEY = "MOTIF_API_KEY";
+export const ENV_OPENROUTER_API_KEY = "OPENROUTER_API_KEY";
 export const ENV_MORPHFACTORY_API_KEY = "MOTIF_MORPHFACTORY_API_KEY";
 
-export type ProviderId = "infron" | "morphfactory";
+export type ProviderId = "openrouter" | "infron" | "morphfactory";
 
 export const PROVIDERS = {
-  infron: {
-    label: "Infron",
+  openrouter: {
+    label: "OpenRouter",
     endpoint: DEFAULT_ENDPOINT,
     model: DEFAULT_MODEL,
+    apiKeyEnv: ENV_OPENROUTER_API_KEY,
+    keyPage: "https://openrouter.ai/settings/keys",
+  },
+  infron: {
+    label: "Infron",
+    endpoint: "https://llm.onerouter.pro",
+    model: LEGACY_MODEL,
     apiKeyEnv: ENV_API_KEY,
     keyPage: "https://infron.ai/dashboard/apiKeys",
   },
   morphfactory: {
     label: "Morphfactory (BETA)",
     endpoint: "https://api-cbt.morphfactory.io",
-    model: DEFAULT_MODEL,
+    model: LEGACY_MODEL,
     apiKeyEnv: ENV_MORPHFACTORY_API_KEY,
     keyPage: "https://cbt.morphfactory.io/console?view=keys",
   },
@@ -133,16 +142,30 @@ export function isInfronEndpoint(endpoint: string): boolean {
 export function providerForEndpoint(endpoint: string): ProviderId | undefined {
   if (isInfronEndpoint(endpoint)) return "infron";
   try {
-    const url = new URL(endpoint.trim());
-    if (url.origin === PROVIDERS.morphfactory.endpoint && !url.username && !url.password && !url.search && !url.hash
-      && ["/", "/v1", "/v1/"].includes(url.pathname)) return "morphfactory";
+    const url = new URL(normalizeEndpoint(endpoint));
+    if (url.username || url.password || url.search || url.hash) return undefined;
+    const base = url.origin + url.pathname.replace(/\/$/, "");
+    if (base === PROVIDERS.openrouter.endpoint) return "openrouter";
+    if (base === PROVIDERS.morphfactory.endpoint) return "morphfactory";
   } catch { /* A custom or invalid endpoint is not a provider preset. */ }
   return undefined;
 }
 
-/** Keep the legacy key for Infron and custom servers; never reuse it for Morphfactory. */
+/** Custom servers retain the legacy key. Each preset reads its own credential. */
 export function apiKeyEnvForEndpoint(endpoint: string): string {
-  return providerForEndpoint(endpoint) === "morphfactory" ? ENV_MORPHFACTORY_API_KEY : ENV_API_KEY;
+  const provider = providerForEndpoint(endpoint);
+  return provider ? PROVIDERS[provider].apiKeyEnv : ENV_API_KEY;
+}
+
+function defaultModelForEndpoint(endpoint: string): string {
+  const provider = providerForEndpoint(endpoint);
+  return provider ? PROVIDERS[provider].model : LEGACY_MODEL;
+}
+
+/** Keep a custom model, but translate a previous endpoint's Motif-3 preset. */
+export function modelForEndpointChange(model: string, previousEndpoint: string | undefined, endpoint: string): string {
+  if (!previousEndpoint || model !== defaultModelForEndpoint(previousEndpoint)) return model;
+  return defaultModelForEndpoint(endpoint);
 }
 
 export function defaultDotenvPaths(cwd = process.cwd()): string[] {
@@ -165,31 +188,42 @@ export function resolveEndpointConfig(opts: ResolveOptions = {}): EndpointConfig
   const pick = (
     flag: string | undefined,
     key: string,
-    fallback: string | undefined,
-  ): { value: string | undefined; source: string } => {
+    setting?: string,
+  ): { value: string; source: string; pairedEndpoint?: string } | undefined => {
     if (flag !== undefined && flag !== "") return { value: flag, source: "flag" };
     const fromEnv = env[key];
     if (fromEnv !== undefined && fromEnv !== "") return { value: fromEnv, source: `environment ${key}` };
     for (const f of files) {
       const v = f.values[key];
-      if (v !== undefined && v !== "") return { value: v, source: `${f.path} (${key})` };
+      if (v !== undefined && v !== "") return { value: v, source: `${f.path} (${key})`, pairedEndpoint: f.values[ENV_ENDPOINT] };
     }
-    return { value: fallback, source: fallback !== undefined && fallback !== (key === ENV_ENDPOINT ? DEFAULT_ENDPOINT : DEFAULT_MODEL) ? "settings" : "default" };
+    return setting === undefined ? undefined : { value: setting, source: "settings", pairedEndpoint: opts.defaults?.endpoint };
   };
 
-  const endpoint = pick(opts.flags?.endpoint, ENV_ENDPOINT, opts.defaults?.endpoint ?? DEFAULT_ENDPOINT);
-  const model = pick(opts.flags?.model, ENV_MODEL, opts.defaults?.model ?? DEFAULT_MODEL);
-  const normalizedEndpoint = normalizeEndpoint(endpoint.value!);
-  const apiKey = pick(undefined, apiKeyEnvForEndpoint(normalizedEndpoint), undefined);
+  // Older installations could save only an Infron key, with no endpoint.
+  const endpoint = pick(opts.flags?.endpoint, ENV_ENDPOINT, opts.defaults?.endpoint) ?? {
+    value: !pick(undefined, ENV_OPENROUTER_API_KEY) && pick(undefined, ENV_API_KEY)
+      ? PROVIDERS.infron.endpoint : DEFAULT_ENDPOINT,
+    source: "default",
+  };
+  const normalizedEndpoint = normalizeEndpoint(endpoint.value);
+  // A provider selection saves its endpoint and model together. When an
+  // endpoint override supersedes that pair, use the new provider's slug.
+  // An explicit model flag or environment variable has no paired endpoint.
+  const selectedModel = pick(opts.flags?.model, ENV_MODEL, opts.defaults?.model);
+  const model = selectedModel
+    ? modelForEndpointChange(selectedModel.value, selectedModel.pairedEndpoint, normalizedEndpoint)
+    : defaultModelForEndpoint(normalizedEndpoint);
+  const apiKey = pick(undefined, apiKeyEnvForEndpoint(normalizedEndpoint));
 
   return {
     endpoint: normalizedEndpoint,
-    model: model.value!,
-    ...(apiKey.value !== undefined ? { apiKey: apiKey.value } : {}),
+    model,
+    ...(apiKey ? { apiKey: apiKey.value } : {}),
     sources: {
       endpoint: endpoint.source,
-      model: model.source,
-      ...(apiKey.value !== undefined ? { apiKey: apiKey.source } : {}),
+      model: selectedModel?.value === model ? selectedModel.source : "default",
+      ...(apiKey ? { apiKey: apiKey.source } : {}),
     },
   };
 }
@@ -202,6 +236,7 @@ export function resolveEndpointConfig(opts: ResolveOptions = {}): EndpointConfig
  * one `env` away from a tool result, and tool results are journalled.
  */
 export function withholdSecrets(env: NodeJS.ProcessEnv): void {
+  delete env[ENV_OPENROUTER_API_KEY];
   delete env[ENV_API_KEY];
   delete env[ENV_MORPHFACTORY_API_KEY];
 }

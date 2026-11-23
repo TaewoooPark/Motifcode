@@ -30,7 +30,7 @@
   <a href="https://discord.gg/5d99wCtzc"><img src="https://img.shields.io/badge/Join_OpenLab-Discord-5865F2?style=for-the-badge&amp;logo=discord&amp;logoColor=white&amp;labelColor=000000" alt="Join OpenLab on Discord"></a>
 </p>
 
-> **Choose your provider.** First launch offers [Infron](https://infron.ai) or
+> **Choose your provider.** New installations default to [OpenRouter](https://openrouter.ai/settings/keys). You can also choose [Infron](https://infron.ai) or
 > [Morphfactory (BETA)](https://cbt.morphfactory.io/console?view=keys).
 > Switch later with `/provider` or from `/config`; each provider keeps its own API key.
 
@@ -128,7 +128,7 @@ cd your-project
 npx motifcode          # first run: asks for your key, then offers to install the `motif` command
 ```
 
-The first session lets you choose **Infron** or **Morphfactory (BETA)**, asks for
+The first session offers **OpenRouter** (default), **Infron**, and **Morphfactory (BETA)**. It asks for
 your API key once, and saves it to `~/.motif/.env`. Because `npx` leaves no command behind, it then offers to run
 `npm install -g motifcode` for you; say yes and `motif` (or `motifcode`) opens
 the session from any folder from then on. `npm install -g motifcode` directly
@@ -404,34 +404,25 @@ and a bundle being available does not mean its service is signed in. See
 
 ## Choose a provider and get an API key
 
-First launch offers Infron and Morphfactory (BETA). Existing sessions keep their
-current connection; use `/provider` or the provider row in `/config` to switch.
-Both use the model id `motif/motif-3` and an OpenAI-compatible endpoint:
+New installations default to OpenRouter. To change a saved connection, use
+`/provider` or the provider row in `/config`. Each provider uses its own key.
 
-| provider | base URL | API key environment variable |
-|---|---|---|
-| Infron | `https://llm.onerouter.pro/v1` | `MOTIF_API_KEY` |
-| Morphfactory (BETA) | `https://api-cbt.morphfactory.io/v1` | `MOTIF_MORPHFACTORY_API_KEY` |
+| Provider | Base URL | Model ID | API key environment variable |
+|---|---|---|---|
+| OpenRouter (default) | `https://openrouter.ai/api/v1` | `motif-technologies/motif-3` | `OPENROUTER_API_KEY` |
+| Infron | `https://llm.onerouter.pro/v1` | `motif/motif-3` | `MOTIF_API_KEY` |
+| Morphfactory (BETA) | `https://api-cbt.morphfactory.io/v1` | `motif/motif-3` | `MOTIF_MORPHFACTORY_API_KEY` |
 
-1. Create a key at [Infron's API Keys dashboard](https://infron.ai/dashboard/apiKeys)
-   or [Morphfactory's console](https://cbt.morphfactory.io/console?view=keys).
-2. Run `motif`, choose the provider and paste its key. A one-token request checks
-   it before saving it to `~/.motif/.env` (readable only by you). Provider keys
-   are stored separately, so switching or `/logout` preserves the other key.
-3. In a script, use `motif login --provider morphfactory`, then
-   `motif --provider morphfactory -p "your question"`. `--provider infron` selects
-   Infron; explicit `--endpoint` and `--model` flags override the preset.
-4. `motif doctor --provider morphfactory` checks the connection, tool calls,
-   reasoning and prefix caching. Infron's account balance is only available
-   with Infron; local session token usage remains available for both providers.
+1. Create a key for your provider. [OpenRouter keys](https://openrouter.ai/settings/keys) · [Infron keys](https://infron.ai/dashboard/apiKeys) · [Morphfactory keys](https://cbt.morphfactory.io/console?view=keys)
+2. Run `motif`, choose the provider, and paste its key. After verification the CLI saves it to `~/.motif/.env` with owner-only permissions. Switching providers or using `/logout` preserves the other providers’ keys.
+3. For scripts, use `motif login --provider openrouter` and `motif --provider openrouter -p "your question"`. The other provider names are `infron` and `morphfactory`. Explicit `--endpoint` and `--model` flags override the preset.
+4. Run `motif doctor --provider openrouter` to probe the model connection and tool calls. These probes use model tokens. Local session usage is available for all providers. The in-app account balance is available for Infron.
 
-Environment variables or a project `.env` work too; `--env-file <path>` reads
-that file first. Set `MOTIF_ENDPOINT` to select a provider through an env file.
-Infron remains the default when no provider is configured.
+You can also set the provider’s key in the environment or a project `.env`.
+Use `MOTIF_ENDPOINT` to select the endpoint explicitly and `--env-file <path>`
+to read a particular file first. An existing Infron setup with only `MOTIF_API_KEY`
+continues to use Infron. The CLI withholds model keys from child processes.
 
-Only `MOTIF_*` keys are read from a `.env` file, none of them are exported, and
-the key is removed from the harness's own environment before anything is
-spawned — the agent's `bash` cannot see it, and neither can a project hook.
 
 ---
 
@@ -478,7 +469,7 @@ Use ↑/↓, PageUp/PageDown or Home/End to browse, then Esc, `q` or `Ctrl+O` to
 to the same draft and scrollback. This does not truncate the model's tool data.
 `--verbose` or `/config verbose true` explicitly keeps full inline output.
 
-The Infron balance connects automatically using the key entered at first login.
+When Infron is selected, its balance connects automatically using the saved Infron key.
 Press `r` in Usage to refresh. The account balance and costs recorded in local
 journals are separate: unreported or unrecorded charges are not estimated.
 

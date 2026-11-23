@@ -12,7 +12,7 @@ import { BUILTIN_SKILLS, SkillRegistry } from "@motifcode/skills";
 import { CORE_TOOLS, toolPrefix } from "@motifcode/tools";
 import { Screen, applyTheme, type ComposerView } from "@motifcode/tui";
 import { Chat, type ChatOptions } from "../src/chat.js";
-import { saveUserSetting, userSettingsPath, type StoredSettings } from "../src/settings.js";
+import { saveUserSetting, saveUserSettings, userSettingsPath, type StoredSettings } from "../src/settings.js";
 
 const ESC = "\x1b";
 const DOWN = "\x1b[B";
@@ -72,7 +72,7 @@ function session(extra: Partial<ChatOptions> = {}) {
     journalDir: join(cwd, ".motif", "sessions"), version: "test", hero: false,
     envPath: join(cwd, ".motif", ".env"),
     balanceFetch: async () => new Response(JSON.stringify({ credit_balance: 0 })),
-    persist, makeTransport, ...extra,
+    persist, persistConnection: (endpoint, model) => saveUserSettings({ endpoint, model }, cwd), makeTransport, ...extra,
   });
   const compose = vi.spyOn(terminal, "setComposer");
   const finished = chat.run();
@@ -415,6 +415,7 @@ describe("account balance integration", () => {
 });
 
 describe("provider selection", () => {
+  const openRouter = "https://openrouter.ai/api";
   const morph = "https://api-cbt.morphfactory.io";
   const infron = "https://llm.onerouter.pro";
 
@@ -422,8 +423,10 @@ describe("provider selection", () => {
     const verifyKey = vi.fn(async () => ({ ok: true as const }));
     const s = session({ chooseProvider: true, requireKey: true, verifyKey });
     expect(s.screen()).toContain("Choose a provider");
-    expect(s.screen()).toContain("Morphfactory (BETA)");
-    s.type("2");
+    expect(s.screen()).toContain("1. OpenRouter");
+    expect(s.screen()).toContain("2. Infron");
+    expect(s.screen()).toContain("3. Morphfactory (BETA)");
+    s.type("3");
     await vi.waitFor(() => expect(s.screen()).toContain("Paste your Morphfactory (BETA) API key to get started"));
     expect(s.screen()).toContain("https://cbt.morphfactory.io/console?view=keys");
     s.type("mak-first\r");
@@ -436,10 +439,26 @@ describe("provider selection", () => {
     expect(s.makeTransport.mock.calls.at(-1)).toEqual([expect.objectContaining({ endpoint: morph }), "mak-first"]);
   });
 
+  it("selects OpenRouter by pressing Enter and stores its key in the dedicated slot", async () => {
+    const verifyKey = vi.fn(async () => ({ ok: true as const }));
+    const s = session({ chooseProvider: true, requireKey: true, verifyKey });
+    s.type("\r");
+    await vi.waitFor(() => expect(s.current().secret?.title).toContain("OpenRouter"));
+    s.type("MOTIF_API_KEY=legacy-secret\r");
+    await vi.waitFor(() => expect(s.screen()).toContain("Use OPENROUTER_API_KEY"));
+    expect(verifyKey).not.toHaveBeenCalled();
+    expect(s.screen()).not.toContain("legacy-secret");
+    s.type("OPENROUTER_API_KEY=or-dummy\r");
+    await vi.waitFor(() => expect(s.screen()).toContain("signed in"));
+    expect(s.saved()).toMatchObject({ endpoint: openRouter, model: "motif-technologies/motif-3" });
+    expect(readFileSync(join(s.cwd, ".motif", ".env"), "utf8")).toBe("OPENROUTER_API_KEY=or-dummy\n");
+    expect(s.screen()).not.toContain("or-dummy");
+  });
+
   it("round-trips separate keys through /provider, /config and /endpoint without crossing credentials", async () => {
-    const s = session({ apiKey: "infron-key", requireKey: true, providerCredentials: { morphfactory: { apiKey: "morph-key", source: "test" } } });
+    const s = session({ apiKey: "infron-key", requireKey: true, providerCredentials: { morphfactory: { apiKey: "morph-key", source: "test" }, openrouter: { apiKey: "or-key" } } });
     expect(s.screen()).not.toContain("Choose a provider");
-    const run = async (command: string, endpoint: string, key: string, task: number) => {
+    const run = async (command: string, endpoint: string, key: string | undefined, task: number) => {
       s.type(command + "\r");
       await vi.waitFor(() => expect(s.screen()).toContain(command.startsWith("/endpoint") ? "endpoint set" : "Provider:"));
       s.type("go\r");
@@ -453,6 +472,23 @@ describe("provider selection", () => {
     await run("/provider infron", infron, "infron-key", 4);
     await run("/config endpoint " + morph, morph, "morph-key", 5);
     await run("/provider infron", infron, "infron-key", 6);
+    await run("/config endpoint " + openRouter + "/v1", openRouter, "or-key", 7);
+    expect(s.saved().model).toBe("motif-technologies/motif-3");
+    await run("/endpoint http://127.0.0.1:9999", "http://127.0.0.1:9999", "infron-key", 8);
+    expect(s.saved().model).toBe("motif/motif-3");
+    await run("/provider openrouter", openRouter, "or-key", 9);
+  });
+
+  it("preserves an explicit model when changing endpoint by hand", async () => {
+    const s = session({ explicitModel: "motif/motif-3" });
+    s.type(`/endpoint ${openRouter}\r`);
+    await vi.waitFor(() => expect(s.saved().endpoint).toBe(openRouter));
+    s.type("/config\r");
+    expect(s.value("Model")).toBe("motif/motif-3");
+    s.type(ESC);
+    s.type("/config model local-model\r");
+    s.type(`/config endpoint ${infron}\r`);
+    await vi.waitFor(() => expect(s.saved()).toMatchObject({ endpoint: infron, model: "local-model" }));
   });
 
   it("keeps endpoint and credentials together when multiple commands arrive in one input event", async () => {

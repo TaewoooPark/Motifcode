@@ -15,7 +15,7 @@
  * it produces is not.
  */
 
-import { apiKeyEnvForEndpoint } from "@motifcode/core";
+import { apiKeyEnvForEndpoint, normalizeEndpoint, providerForEndpoint } from "@motifcode/core";
 import { MAX_CONTEXT, SAMPLING_DEFAULTS } from "@motifcode/protocol";
 import { detectSandbox } from "./sandbox.js";
 
@@ -44,6 +44,7 @@ interface ModelRecord {
   max_model_len?: number;
   context_length?: number;
   supports_function_calling?: boolean;
+  supported_parameters?: string[];
   min_prompt_price?: number;
   min_completion_price?: number;
   providers?: { provider_slug?: string }[];
@@ -84,7 +85,7 @@ const PROBE_TOOL = {
 
 export async function doctor(opts: DoctorOptions): Promise<Check[]> {
   const fetchImpl = opts.fetchImpl ?? globalThis.fetch;
-  const endpoint = opts.endpoint.replace(/\/+$/, "").replace(/\/v1$/, "");
+  const endpoint = normalizeEndpoint(opts.endpoint);
   const checks: Check[] = [];
   const apiKeyEnv = apiKeyEnvForEndpoint(endpoint);
   const headers: Record<string, string> = { "content-type": "application/json" };
@@ -194,9 +195,10 @@ export async function doctor(opts: DoctorOptions): Promise<Check[]> {
       ...(full ? {} : { fix: "the endpoint serves less than the native window; long sessions will compact or fail early" }),
     });
   }
-  if (served?.supports_function_calling !== undefined) {
+  const supportsTools = served?.supports_function_calling ?? served?.supported_parameters?.includes("tools");
+  if (supportsTools !== undefined) {
     checks.push(
-      served.supports_function_calling
+      supportsTools
         ? { name: "function calling", state: "ok", detail: "advertised by the endpoint" }
         : {
             name: "function calling",
@@ -240,6 +242,10 @@ export async function doctor(opts: DoctorOptions): Promise<Check[]> {
         detail: `the endpoint refused the request (${res.status}${text ? `: ${text}` : ""})`,
         fix: opts.apiKey ? `the key was sent and rejected; check ${apiKeyEnv}` : `set ${apiKeyEnv}`,
       });
+      return checks;
+    }
+    if (res.status === 402 && providerForEndpoint(endpoint) === "openrouter") {
+      checks.push({ name: "chat probe", state: "fail", detail: "OpenRouter returned 402 (insufficient credits).", fix: "Check the OpenRouter account balance and API key spending limit, then run doctor again." });
       return checks;
     }
     if (!res.ok) {

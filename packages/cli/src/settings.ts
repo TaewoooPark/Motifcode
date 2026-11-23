@@ -180,6 +180,10 @@ export function saveUserSetting<K extends keyof StoredSettings>(
   value: StoredSettings[K] | undefined,
   home = homedir(),
 ): string {
+  return saveUserSettings({ [key]: value }, home);
+}
+
+export function saveUserSettings(updates: Partial<StoredSettings>, home = homedir()): string {
   const path = userSettingsPath(home);
   let current: Record<string, unknown> = {};
   if (existsSync(path)) {
@@ -191,8 +195,10 @@ export function saveUserSetting<K extends keyof StoredSettings>(
       // save fails the same way, and the person never learns why.
     }
   }
-  if (value === undefined) delete current[key];
-  else current[key] = value;
+  for (const [key, value] of Object.entries(updates)) {
+    if (value === undefined) delete current[key];
+    else current[key] = value;
+  }
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   writeFileSync(path, JSON.stringify(current, null, 2) + "\n", "utf8");
   return path;

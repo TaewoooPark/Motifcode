@@ -17,6 +17,7 @@ import {
   PROVIDERS,
   apiKeyEnvForEndpoint,
   providerForEndpoint,
+  modelForEndpointChange,
   type ProviderId,
   HttpTransport,
   defaultDotenvPaths,
@@ -70,7 +71,7 @@ import { Chat } from "./chat.js";
 import { InfronBilling } from "./billing.js";
 import { balanceRows } from "./billing-view.js";
 import { describePlugins, loadPlugins, type LoadedPlugins } from "./plugins.js";
-import { loadSettings, saveUserSetting } from "./settings.js";
+import { loadSettings, saveUserSetting, saveUserSettings } from "./settings.js";
 import { commandOnPath, ranFromNpx } from "./install.js";
 import { normaliseKeyInput, readSecret, verifyApiKey } from "./login.js";
 import { doctor, formatChecks, worstState } from "./doctor.js";
@@ -418,10 +419,10 @@ const HELP = `motif ${VERSION} — a coding agent built for Motif-3 (unofficial;
   motif corpus-render       render a corpus JSONL to prompt text, as the harness would
 
 Flags
-  --provider <id>           infron | morphfactory (BETA); sets endpoint and model defaults
+  --provider <id>           openrouter (default) | infron | morphfactory (BETA)
   --endpoint <url>          model server (default ${DEFAULT_ENDPOINT}; a trailing /v1 is accepted)
   --model <name>            model id to request (default ${DEFAULT_MODEL})
-  --env-file <path>         read MOTIF_* settings from this file first
+  --env-file <path>         read connection settings from this file first
   --mcp-config <path>       explicit MCP config (requires --trust-mcp with its SHA-256)
   --trust-mcp <sha256>      authorize exactly that MCP configuration file
   --mcp-mode <mode>         prefetch (default), search, or catalog comparison mode
@@ -447,14 +448,12 @@ distil flags
   --include-children        also export subagent scopes
 
 Connection
-  The first session offers Infron or Morphfactory (BETA), checks your API key
-  and saves it to ~/.motif/.env; use /provider to switch inside a session.
-  'motif login --provider morphfactory' signs in outside a session.
-  MOTIF_API_KEY (Infron), MOTIF_MORPHFACTORY_API_KEY, MOTIF_ENDPOINT and
-  MOTIF_MODEL are read from the environment,
-  then from ./.env, then from ~/.motif/.env — MOTIF_* keys only, and never into
-  the environment. The key is sent as a bearer token and is withheld from every
-  command the agent runs.
+  The first session offers OpenRouter, Infron and Morphfactory (BETA).
+  Use /provider to switch, or 'motif login --provider openrouter' to sign in.
+  OpenRouter uses OPENROUTER_API_KEY, Infron uses MOTIF_API_KEY and
+  Morphfactory uses MOTIF_MORPHFACTORY_API_KEY. Keys, MOTIF_ENDPOINT and
+  MOTIF_MODEL are read from the environment, then ./.env, then ~/.motif/.env.
+  Provider keys are withheld from every command the agent runs.
 
 The .motif directory
   ~/.motif/settings.json    your defaults: model, channel, budgets, theme, thinking, compactAt
@@ -501,7 +500,7 @@ async function loginAtTerminal(endpoint: string, model: string): Promise<string 
     );
   }
   const raw = await readSecret("key › ");
-  const key = raw === null ? "" : normaliseKeyInput(raw);
+  const key = raw === null ? "" : normaliseKeyInput(raw, provider);
   if (key === "") {
     process.stderr.write("no key entered\n");
     return null;
@@ -551,13 +550,16 @@ async function main(): Promise<number> {
   });
   const provider = args.flags["provider"] === undefined
     ? undefined
-    : flagEnum(args.flags, "provider", ["infron", "morphfactory"] as const, "infron");
+    : flagEnum(args.flags, "provider", Object.keys(PROVIDERS) as ProviderId[], "openrouter");
   const dotenvPaths = [...(envFile ? [envFile] : []), ...defaultDotenvPaths()];
+  const endpointFlag = typeof args.flags["endpoint"] === "string" ? args.flags["endpoint"] : undefined;
+  const preset = provider ? PROVIDERS[provider] : undefined;
+  const modelFlag = typeof args.flags["model"] === "string" ? args.flags["model"] : undefined;
   const connection = resolveEndpointConfig({
     flags: {
-      ...(provider ? { endpoint: PROVIDERS[provider].endpoint, model: PROVIDERS[provider].model } : {}),
-      ...(typeof args.flags["endpoint"] === "string" ? { endpoint: args.flags["endpoint"] } : {}),
-      ...(typeof args.flags["model"] === "string" ? { model: args.flags["model"] } : {}),
+      ...(preset ? { endpoint: preset.endpoint, model: modelForEndpointChange(preset.model, preset.endpoint, endpointFlag ?? preset.endpoint) } : {}),
+      ...(endpointFlag ? { endpoint: endpointFlag } : {}),
+      ...(modelFlag ? { model: modelFlag } : {}),
     },
     dotenvPaths,
     defaults: {
@@ -1017,6 +1019,8 @@ async function main(): Promise<number> {
         ].filter(([, flag]) => args.flags[flag!] !== undefined).map(([key]) => [key, "flag"])),
       },
       persist: (key, value) => saveUserSetting(key, value as never),
+      persistConnection: (endpoint, model) => saveUserSettings({ endpoint, model }),
+      ...(modelFlag || (connection.sources.model.includes("MOTIF_MODEL")) ? { explicitModel: model } : {}),
       historyPath: join(cwd, CONFIG_DIR, "history.jsonl"),
       pluginLines: describePlugins(plugins(cwd)),
       hookLines: describeHooks(cwd, hooks),
@@ -1082,7 +1086,7 @@ async function main(): Promise<number> {
   let sessionKey = apiKey;
   if (sessionKey === undefined && keyRequired(endpoint)) {
     if (!tty) {
-      process.stderr.write(`no API key: run 'motif login${providerForEndpoint(endpoint) === "morphfactory" ? " --provider morphfactory" : ""}', or put ${apiKeyEnvForEndpoint(endpoint)} in ${defaultEnvPath()}\n`);
+      process.stderr.write(`no API key: run 'motif login --provider ${providerForEndpoint(endpoint)}', or put ${apiKeyEnvForEndpoint(endpoint)} in ${defaultEnvPath()}\n`);
       return 2;
     }
     const key = await loginAtTerminal(endpoint, model);

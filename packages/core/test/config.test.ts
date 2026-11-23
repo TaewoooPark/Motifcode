@@ -14,6 +14,7 @@ import {
   DEFAULT_ENDPOINT,
   DEFAULT_MODEL,
   ENV_MORPHFACTORY_API_KEY,
+  ENV_OPENROUTER_API_KEY,
   PROVIDERS,
   apiKeyEnvForEndpoint,
   forgetApiKey,
@@ -70,8 +71,8 @@ describe("resolution", () => {
 
   it("defaults to the hosted endpoint and model", () => {
     const c = resolveEndpointConfig({ env: {}, dotenvPaths: [] });
-    expect(c.endpoint).toBe(DEFAULT_ENDPOINT);
-    expect(c.model).toBe(DEFAULT_MODEL);
+    expect(c.endpoint).toBe("https://openrouter.ai/api");
+    expect(c.model).toBe("motif-technologies/motif-3");
     expect(c.apiKey).toBeUndefined();
     expect(c.sources).toEqual({ endpoint: "default", model: "default" });
   });
@@ -79,6 +80,8 @@ describe("resolution", () => {
   it("reads the key from a .env file, and says which one", () => {
     const d = dir({ ".env": "MOTIF_API_KEY=sk-from-file\n" });
     const c = resolveEndpointConfig({ env: {}, dotenvPaths: [join(d, ".env")] });
+    expect(c.endpoint).toBe(PROVIDERS.infron.endpoint);
+    expect(c.model).toBe("motif/motif-3");
     expect(c.apiKey).toBe("sk-from-file");
     expect(c.sources.apiKey).toContain(join(d, ".env"));
   });
@@ -89,7 +92,7 @@ describe("resolution", () => {
     expect(resolveEndpointConfig(options).apiKey).toBe("sk-infron");
     const morph = resolveEndpointConfig({ ...options, flags: { endpoint: `${PROVIDERS.morphfactory.endpoint}/v1/` } });
     expect(morph.endpoint).toBe(PROVIDERS.morphfactory.endpoint);
-    expect(morph.model).toBe(DEFAULT_MODEL);
+    expect(morph.model).toBe("motif/motif-3");
     expect(morph.apiKey).toBe("sk-morph");
     expect(morph.sources.apiKey).toBe(`${path} (${ENV_MORPHFACTORY_API_KEY})`);
     expect(providerForEndpoint("https://api-cbt.morphfactory.io:443/v1")).toBe("morphfactory");
@@ -108,8 +111,26 @@ describe("resolution", () => {
     const fromEnv = resolveEndpointConfig({ ...options, env: { MOTIF_MORPHFACTORY_API_KEY: "sk-morph-env" } });
     expect(fromEnv.apiKey).toBe("sk-morph-env");
     expect(fromEnv.sources.apiKey).toBe(`environment ${ENV_MORPHFACTORY_API_KEY}`);
-    const overridden = resolveEndpointConfig({ ...options, env: { MOTIF_ENDPOINT: DEFAULT_ENDPOINT } });
+    const overridden = resolveEndpointConfig({ ...options, env: { MOTIF_ENDPOINT: PROVIDERS.infron.endpoint } });
     expect(overridden.apiKey).toBe("sk-infron-first");
+  });
+
+  it("uses the OpenRouter key from the environment or file and keeps it at the official endpoint", () => {
+    const path = join(dir({ ".env": "OPENROUTER_API_KEY=sk-or-file\nMOTIF_API_KEY=sk-infron\n" }), ".env");
+    const options = { env: {}, dotenvPaths: [path] };
+    expect(resolveEndpointConfig(options)).toMatchObject({
+      endpoint: DEFAULT_ENDPOINT, model: DEFAULT_MODEL, apiKey: "sk-or-file", sources: { apiKey: `${path} (${ENV_OPENROUTER_API_KEY})` },
+    });
+    expect(resolveEndpointConfig({ ...options, env: { OPENROUTER_API_KEY: "sk-or-env" } }).apiKey).toBe("sk-or-env");
+    const onlyOpenRouter = { env: { OPENROUTER_API_KEY: "sk-or-env" }, dotenvPaths: [] };
+    for (const endpoint of [PROVIDERS.infron.endpoint, PROVIDERS.morphfactory.endpoint, "http://localhost:8080", "https://openrouter.ai.example/api"]) {
+      const connection = resolveEndpointConfig({ ...onlyOpenRouter, defaults: { endpoint } });
+      expect(connection.apiKey).toBeUndefined();
+      expect(connection.model).toBe("motif/motif-3");
+    }
+    expect(resolveEndpointConfig({
+      env: { MOTIF_API_KEY: "sk-infron" }, dotenvPaths: [], flags: { endpoint: DEFAULT_ENDPOINT },
+    }).apiKey).toBeUndefined();
   });
 
   it("prefers a flag over the environment over the file", () => {
@@ -120,6 +141,28 @@ describe("resolution", () => {
     expect(resolveEndpointConfig({ env, dotenvPaths: paths }).endpoint).toBe("http://env");
     expect(resolveEndpointConfig({ env: {}, dotenvPaths: paths }).endpoint).toBe("http://file");
     expect(resolveEndpointConfig({ env: {}, dotenvPaths: paths }).model).toBe("file-model");
+  });
+
+  it("translates a saved provider preset on endpoint override and preserves explicit models", () => {
+    const infron = PROVIDERS.infron;
+    const openRouter = PROVIDERS.openrouter;
+    const previous = { endpoint: infron.endpoint, model: infron.model };
+    const options = { defaults: previous, env: {}, dotenvPaths: [], flags: { endpoint: openRouter.endpoint } };
+    expect(resolveEndpointConfig(options)).toMatchObject({ endpoint: openRouter.endpoint, model: openRouter.model, sources: { model: "default" } });
+    expect(resolveEndpointConfig({ ...options, defaults: { ...previous, model: "my-model" } }).model).toBe("my-model");
+    expect(resolveEndpointConfig({ ...options, env: { MOTIF_MODEL: infron.model } }).model).toBe(infron.model);
+    expect(resolveEndpointConfig({ ...options, flags: { endpoint: openRouter.endpoint, model: infron.model } }).model).toBe(infron.model);
+    expect(resolveEndpointConfig({ ...options, defaults: openRouter, flags: { endpoint: "http://localhost:8080" } }).model).toBe(infron.model);
+  });
+
+  it("translates a dotenv model only if paired with the superseded endpoint in that file", () => {
+    const infron = PROVIDERS.infron;
+    const openRouter = PROVIDERS.openrouter;
+    const file = join(dir({ ".env": `MOTIF_ENDPOINT=${infron.endpoint}\nMOTIF_MODEL=${infron.model}\n` }), ".env");
+    const options = { dotenvPaths: [file], env: { MOTIF_ENDPOINT: openRouter.endpoint } };
+    expect(resolveEndpointConfig(options).model).toBe(openRouter.model);
+    writeFileSync(file, `MOTIF_MODEL=${infron.model}\n`);
+    expect(resolveEndpointConfig(options).model).toBe(infron.model);
   });
 
   it("takes the first file that has the key", () => {
@@ -145,7 +188,7 @@ describe("resolution", () => {
   });
 
   it("withholds the key from an environment children will inherit", () => {
-    const env: NodeJS.ProcessEnv = { MOTIF_API_KEY: "sk-secret", MOTIF_MORPHFACTORY_API_KEY: "sk-morph-secret", PATH: "/bin" };
+    const env: NodeJS.ProcessEnv = { MOTIF_API_KEY: "sk-secret", MOTIF_MORPHFACTORY_API_KEY: "sk-morph-secret", OPENROUTER_API_KEY: "sk-or-secret", PATH: "/bin" };
     withholdSecrets(env);
     expect(env).toEqual({ PATH: "/bin" });
   });
@@ -153,7 +196,7 @@ describe("resolution", () => {
 
 describe("provider endpoints", () => {
   it("accepts the documented base URLs with optional /v1 and trailing slash", () => {
-    for (const provider of ["infron", "morphfactory"] as const) {
+    for (const provider of ["openrouter", "infron", "morphfactory"] as const) {
       for (const suffix of ["", "/", "/v1", "/v1/"]) {
         const endpoint = `  ${PROVIDERS[provider].endpoint}${suffix}  `;
         expect(providerForEndpoint(endpoint)).toBe(provider);
@@ -161,6 +204,7 @@ describe("provider endpoints", () => {
       }
     }
     expect(providerForEndpoint("https://API-CBT.MORPHFACTORY.IO/v1")).toBe("morphfactory");
+    expect(providerForEndpoint("https://OPENROUTER.AI:443/api/v1")).toBe("openrouter");
   });
 
   it("does not recognize lookalike hosts or custom paths as a provider", () => {
@@ -168,6 +212,9 @@ describe("provider endpoints", () => {
       "https://api-cbt.morphfactory.io.example.com", "https://api-cbt.morphfactory.io@evil.example",
       "http://api-cbt.morphfactory.io", "https://api-cbt.morphfactory.io/proxy",
       "https://api-cbt.morphfactory.io/v1?target=other", "http://localhost:8080",
+      "https://openrouter.ai.evil.example/api", "https://openrouter.ai@evil.example/api",
+      "https://other@openrouter.ai/api", "http://openrouter.ai/api", "https://openrouter.ai/v1",
+      "https://openrouter.ai/api/custom", "https://openrouter.ai/api/v1?other=1",
     ]) expect(providerForEndpoint(endpoint)).toBeUndefined();
   });
 });
@@ -217,7 +264,10 @@ describe("writing the key", () => {
     expect(forgetApiKey(path, "morphfactory")).toBe(false);
     expect(readFileSync(path, "utf8")).toBe("# keep my settings\nOTHER=1\nMOTIF_API_KEY=sk-infron\n");
     saveApiKey("sk-morph-new", path, "morphfactory");
+    saveApiKey("sk-or-user", path, "openrouter");
     expect(forgetApiKey(path)).toBe(true);
+    expect(resolveEndpointConfig({ env: {}, dotenvPaths: [path] }).apiKey).toBe("sk-or-user");
+    expect(forgetApiKey(path, "openrouter")).toBe(true);
     expect(parseDotenv(readFileSync(path, "utf8"))).toEqual({ OTHER: "1", MOTIF_MORPHFACTORY_API_KEY: "sk-morph-new" });
   });
 });

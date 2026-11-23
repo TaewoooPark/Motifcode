@@ -30,7 +30,7 @@
   <a href="https://discord.gg/5d99wCtzc"><img src="https://img.shields.io/badge/Join_OpenLab-Discord-5865F2?style=for-the-badge&amp;logo=discord&amp;logoColor=white&amp;labelColor=000000" alt="OpenLab Discord 참여하기"></a>
 </p>
 
-> **Provider를 선택하세요.** 처음 실행하면 [Infron](https://infron.ai) 또는
+> **Provider를 선택하세요.** 새 설치의 기본값은 [OpenRouter](https://openrouter.ai/settings/keys)입니다. [Infron](https://infron.ai)이나
 > [Morphfactory (BETA)](https://cbt.morphfactory.io/console?view=keys)를 선택할 수 있습니다.
 > 이후에는 `/provider`나 `/config`에서 바꾸며, 각 provider의 API 키는 따로 보관합니다.
 
@@ -122,7 +122,7 @@ cd your-project
 npx motifcode          # 첫 실행: 키를 물어본 뒤 `motif` 명령 설치까지 해 줍니다
 ```
 
-첫 세션에서 **Infron** 또는 **Morphfactory (BETA)** 를 선택하고, API 키를 한 번만 입력해 `~/.motif/.env`에 저장합니다. `npx`는
+첫 세션에서 **OpenRouter**(기본값), **Infron**, **Morphfactory (BETA)** 중 하나를 선택하고, API 키를 한 번만 입력해 `~/.motif/.env`에 저장합니다. `npx`는
 명령을 남기지 않으므로 이어서 `npm install -g motifcode`를 대신 실행해 줄지
 물어봅니다. 예라고 하면 그다음부터는 어느 폴더에서든 `motif`(또는 `motifcode`)로
 세션을 엽니다. 처음부터 `npm install -g motifcode`를 직접 해도 같은 결과입니다.
@@ -388,34 +388,24 @@ motif plugins connect library-docs
 
 ## Provider 선택과 API 키 발급
 
-처음 실행하면 Infron 또는 Morphfactory (BETA)를 선택합니다. 기존 사용자의 연결은
-유지되며, `/provider`나 `/config`의 provider 항목에서 바꿀 수 있습니다. 두 provider
-모두 `motif/motif-3` 모델과 OpenAI 호환 엔드포인트를 사용합니다.
+새로 설치하면 OpenRouter가 첫 번째 기본 옵션입니다. 저장된 연결은 `/provider`나
+`/config`의 provider 항목에서 바꿀 수 있습니다. 각 서비스의 API 키는 따로 보관합니다.
 
-| provider | base URL | API 키 환경 변수 |
-|---|---|---|
-| Infron | `https://llm.onerouter.pro/v1` | `MOTIF_API_KEY` |
-| Morphfactory (BETA) | `https://api-cbt.morphfactory.io/v1` | `MOTIF_MORPHFACTORY_API_KEY` |
+| Provider | Base URL | 모델 ID | API 키 환경 변수 |
+|---|---|---|---|
+| OpenRouter (기본값) | `https://openrouter.ai/api/v1` | `motif-technologies/motif-3` | `OPENROUTER_API_KEY` |
+| Infron | `https://llm.onerouter.pro/v1` | `motif/motif-3` | `MOTIF_API_KEY` |
+| Morphfactory (BETA) | `https://api-cbt.morphfactory.io/v1` | `motif/motif-3` | `MOTIF_MORPHFACTORY_API_KEY` |
 
-1. [Infron API Keys 대시보드](https://infron.ai/dashboard/apiKeys) 또는
-   [Morphfactory 콘솔](https://cbt.morphfactory.io/console?view=keys)에서 키를 발급합니다.
-2. `motif`를 실행해 provider를 선택하고 키를 붙여 넣습니다. 토큰 하나짜리 요청으로
-   확인한 뒤 본인만 읽을 수 있는 `~/.motif/.env`에 저장합니다. 키는 따로 보관하므로
-   provider를 바꾸거나 `/logout`을 해도 다른 provider의 키는 유지됩니다.
-3. 스크립트에서는 `motif login --provider morphfactory`로 로그인하고
-   `motif --provider morphfactory -p "질문"`으로 실행합니다. `--provider infron`은
-   Infron을 선택하며, 명시한 `--endpoint`와 `--model`이 preset보다 우선합니다.
-4. `motif doctor --provider morphfactory`로 연결, 도구 호출, 추론과 프리픽스 캐시를
-   확인합니다. Infron 계정 잔액은 Infron에서만 지원하며, 로컬 세션 토큰 사용량은
-   두 provider 모두 볼 수 있습니다.
+1. 사용할 서비스에서 키를 발급합니다. [OpenRouter 키 관리](https://openrouter.ai/settings/keys) · [Infron 키 관리](https://infron.ai/dashboard/apiKeys) · [Morphfactory 콘솔](https://cbt.morphfactory.io/console?view=keys)
+2. `motif`를 실행해 provider를 선택하고 키를 붙여 넣습니다. 확인된 키는 본인만 읽을 수 있는 `~/.motif/.env`에 저장됩니다. Provider를 바꾸거나 `/logout`을 해도 다른 서비스의 키는 유지됩니다.
+3. 스크립트에서는 `motif login --provider openrouter`로 로그인하고 `motif --provider openrouter -p "질문"`으로 실행합니다. 다른 provider 이름은 `infron`과 `morphfactory`입니다. 직접 지정한 `--endpoint`와 `--model`이 preset보다 우선합니다.
+4. `motif doctor --provider openrouter`로 모델 연결과 도구 호출을 점검할 수 있습니다. 이 점검에는 모델 토큰이 사용됩니다. 로컬 세션 사용량은 세 provider 모두에서, 계정 잔액은 Infron에서 확인할 수 있습니다.
 
-환경 변수나 프로젝트 `.env`도 지원하며 `--env-file <경로>`는 해당 파일을 먼저 읽습니다.
-환경 파일에서 provider를 지정하려면 `MOTIF_ENDPOINT`를 설정합니다. 별도 설정이 없으면
-기존과 같이 Infron을 사용합니다.
-
-`.env` 파일에서는 `MOTIF_*` 키만 읽고, 어느 것도 환경 변수로 내보내지 않으며, 무엇이든
-실행되기 전에 하네스 자신의 환경에서도 키를 지웁니다. 모델의 `bash`도, 프로젝트 훅도
-키를 볼 수 없습니다.
+환경 변수나 프로젝트 `.env`에 provider 키를 지정할 수도 있습니다. 엔드포인트는
+`MOTIF_ENDPOINT`로 지정하며 `--env-file <경로>`는 해당 파일을 먼저 읽습니다.
+기존에 `MOTIF_API_KEY`만 설정해 사용했다면 Infron 연결을 유지합니다.
+CLI는 모델 키를 자식 프로세스 환경에서 제거합니다.
 
 ---
 
@@ -462,7 +452,7 @@ Esc, `q`, `Ctrl+O`로 닫으면 입력 중이던 문장과 스크롤 기록으�
 모델에 전달되는 도구 데이터는 이 표시 방식 때문에 잘리지 않습니다.
 항상 전체 출력을 표시하려면 `--verbose` 또는 `/config verbose true`를 사용합니다.
 
-최초 로그인 때 입력한 키로 Infron 잔액이 자동 연결됩니다. Usage에서 `r`로
+Infron을 선택하면 저장된 Infron 키로 잔액을 조회합니다. Usage에서 `r`로
 새로고침할 수 있습니다. 계정 잔액과 로컬 기록의 요청 비용은 별도로 표시하며,
 보고되지 않았거나 기록에 없는 비용을 추정해서 더하지 않습니다.
 

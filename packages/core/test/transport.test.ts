@@ -19,6 +19,7 @@ import {
   backoffDelay,
   parseRetryAfter,
   requestBody,
+  resolveEndpointConfig,
   runLoop,
   sleep,
   type Executor,
@@ -187,6 +188,32 @@ describe("Retry-After", () => {
 });
 
 describe("what goes in the body", () => {
+  it("sends a Motif tool conversation through the default OpenRouter route", async () => {
+    const config = resolveEndpointConfig({ env: { OPENROUTER_API_KEY: "sk-or-test" }, dotenvPaths: [] });
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      choices: [{ message: { reasoning: "checked", content: "complete" } }],
+    }));
+    const transport = new HttpTransport({ ...config, fetchImpl });
+    const response = await transport.complete({
+      messages: [
+        { role: "user", content: "Read the file." },
+        { role: "assistant", reasoning_content: "check the file", tool_calls: [{ id: "call_1", function: { name: "read", arguments: { path: "notes" } } }] },
+        { role: "tool", tool_call_id: "call_1", content: "ok" },
+      ],
+      tools: [...CORE_TOOLS],
+    });
+    const [url, init] = fetchImpl.mock.calls[0]!;
+    expect(url).toBe("https://openrouter.ai/api/v1/chat/completions");
+    expect(new Headers(init?.headers).get("authorization")).toBe("Bearer sk-or-test");
+    const body = JSON.parse(String(init?.body));
+    expect(body.model).toBe("motif-technologies/motif-3");
+    expect(body.tools).toEqual(CORE_TOOLS);
+    expect(body.messages[1].reasoning_content).toBe("check the file");
+    expect(JSON.parse(body.messages[1].tool_calls[0].function.arguments)).toEqual({ path: "notes" });
+    expect(body).not.toHaveProperty("usage");
+    expect(response.reasoningContent).toBe("checked");
+  });
+
   it("sends the key as a bearer token, and nothing when there is none", async () => {
     const headers: Record<string, string>[] = [];
     const fetchImpl = (async (_u: string, init: { headers: Record<string, string> }) => {
