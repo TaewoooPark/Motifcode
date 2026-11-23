@@ -890,7 +890,8 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
         // Keep the original proposal so the requested correction can confirm it.
         handBack(
           `The confirmation did not match the summary you proposed:\n\n${pendingDone}\n\n` +
-            "Repeat that summary verbatim with `confirm: true`, or keep working.",
+            "Check that proposal against the recorded observations. If a required check failed or work remains, correct it first. " +
+            "If the work is complete, repeat the proposed summary verbatim with `confirm: true`.",
           doneCalls,
         );
         emit({ type: "notice", level: "warn", text: "confirmation summary did not match" });
