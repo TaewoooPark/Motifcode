@@ -33,7 +33,7 @@
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { resumeBlock, type LoopCheckpoint, type LoopEvent, type SessionEndReason } from "@motifcode/core";
+import { PROVIDERS, providerForEndpoint, resumeBlock, type LoopCheckpoint, type LoopEvent, type SessionEndReason } from "@motifcode/core";
 import type { ChannelId, Message } from "@motifcode/protocol";
 
 export const JOURNAL_VERSION = 2;
@@ -408,7 +408,7 @@ export function loadResume(path: string): ResumeState {
  */
 export function checkResumable(
   state: ResumeState,
-  current: { systemHash: string; toolSchemaHash: string; model: string },
+  current: { systemHash: string; toolSchemaHash: string; model: string; endpoint?: string },
 ): string | null {
   if (state.corruption !== undefined) {
     return `this journal is corrupt (${state.corruption}); it cannot be salvaged`;
@@ -429,7 +429,13 @@ export function checkResumable(
     return "the system prompt changed since this session was recorded";
   }
   if (state.header.model.id !== current.model) {
-    return `recorded against model ${state.header.model.id}, now ${current.model}`;
+    // Different providers publish the same Motif-3 under different model IDs.
+    const recordedEndpoint = state.header.serving.endpoint;
+    const before = recordedEndpoint && providerForEndpoint(recordedEndpoint);
+    const after = current.endpoint && providerForEndpoint(current.endpoint);
+    if (!before || !after || state.header.model.id !== PROVIDERS[before].model || current.model !== PROVIDERS[after].model) {
+      return `recorded against model ${state.header.model.id}, now ${current.model}`;
+    }
   }
   const blocker = resumeBlock(state.checkpoint, null);
   if (blocker?.kind === "execution_uncertain") {

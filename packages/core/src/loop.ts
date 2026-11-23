@@ -53,10 +53,12 @@ import { buildCompactedHistory, summarizeTranscript } from "./compaction.js";
 import {
   PROTOCOL_VERSION,
   isMutating,
+  resumedMessages,
   type LoopCheckpoint,
   type RepoState,
 } from "./checkpoint.js";
 import type { EventSink, LoopEvent, SessionEndReason, ToolInvocation } from "./events.js";
+import { isOpenRouterTransportEndpoint } from "./config.js";
 import { Session } from "./session.js";
 import { TransportError, backoffDelay, sleep, type Transport } from "./transport.js";
 
@@ -348,6 +350,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
 
   if (opts.userTask.trim() === "") throw new EmptyTaskError();
 
+  const openRouter = isOpenRouterTransportEndpoint(transport.endpoint);
   const resume = opts.resume;
   const scopeId = opts.scopeId ?? resume?.scopeId ?? "root";
   const repo: RepoState = opts.repo ?? resume?.repo ?? { cwd: process.cwd() };
@@ -364,7 +367,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
     tools,
     initialMessages: [...(opts.history ?? []), { role: "user", content: opts.userTask }],
   });
-  if (resume) session.restoreMessages(resume.messages);
+  if (resume) session.restoreMessages(openRouter ? resumedMessages(resume) : resume.messages);
   if (opts.context) session.append({ role: "user", content: opts.context });
   const restartContext = opts.contextOnRestart ?? opts.context;
   const budget = resume ? BreakageBudget.restore(resume.breakage) : new BreakageBudget();
@@ -675,6 +678,14 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
      */
     const handBack = (text: string, calls?: readonly SerializedCall[]): void => {
       session.appendAll(codec.serializeAssistant(split.content, split.reasoning, parsed, calls));
+      if (openRouter && channel === "toolcall" && calls) {
+        for (const call of calls) {
+          session.appendAll(codec.serializeObservation({
+            callId: call.id, name: call.name, arguments: call.arguments,
+            ok: false, output: "Handled by the harness without executing a tool. See the following instruction.",
+          }));
+        }
+      }
       session.appendAll(codec.serializeHarnessTurn(text));
     };
 
@@ -788,6 +799,12 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
 
     // ---- the action gate -------------------------------------------------
     const refusals: Refusal[] = [];
+    if (openRouter && channel === "toolcall" &&
+        (parsed.truncated || parsed.unrecoverable.length > 0 || (parsed.invalidArguments?.length ?? 0) > 0)) {
+      // A parser may recover some siblings while reporting another as broken.
+      // Repeating such a batch after executing its valid prefix can repeat edits.
+      refusals.push({ kind: "incomplete_payload", detail: "part of the action batch could not be decoded; resend the entire batch" });
+    }
 
     // A response that hit the token cap is missing its tail by definition. The
     // bracket balancer will still produce valid JSON from what arrived, and a
@@ -864,11 +881,17 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
     const doneAction = doneActions[0];
     if (doneAction) {
       const doneCalls = callsOf([doneAction]);
-      if (!confirmDone) {
+      const accept = (): LoopResult => {
         session.appendAll(codec.serializeAssistant(split.content, split.reasoning, parsed, doneCalls));
+        if (openRouter && channel === "toolcall") {
+          for (const call of doneCalls) session.appendAll(codec.serializeObservation({
+            callId: call.id, name: call.name, arguments: call.arguments, ok: true, output: "Completion accepted.",
+          }));
+        }
         checkpoint();
         return finish("done", doneAction.summary);
-      }
+      };
+      if (!confirmDone) return accept();
       if (pendingDone === null) {
         pendingDone = normalizeSummary(doneAction.summary);
         handBack(confirmationChallenge(doneAction.summary, channel), doneCalls);
@@ -887,10 +910,8 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
         continue;
       }
       if (normalizeSummary(doneAction.summary) !== pendingDone) {
-        // A different summary is a different claim, and confirming a claim the
-        // harness never proposed is not a confirmation of anything.
         const proposed = pendingDone;
-        pendingDone = null;
+        if (!openRouter) pendingDone = null;
         handBack(
           `The confirmation did not match the summary you proposed:\n\n${proposed}\n\n` +
             "Repeat that summary verbatim with `confirm: true`, or keep working.",
@@ -905,9 +926,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
       // challenge, so a conversation continued from here — and a trajectory
       // exported from here — showed the model asked to confirm and never
       // answering.
-      session.appendAll(codec.serializeAssistant(split.content, split.reasoning, parsed, doneCalls));
-      checkpoint();
-      return finish("done", doneAction.summary);
+      return accept();
     }
     // Any other action withdraws a pending proposal: the model went back to
     // work, so the completion it proposed is no longer the state of the world.

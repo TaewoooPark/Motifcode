@@ -14,40 +14,50 @@
  * once it has been read; see `withholdSecrets`.
  *
  * It has to be findable. A `.env` file next to where the command is typed, or
- * under `~/.motif/`, is read for `MOTIF_*` keys only — never for anything
- * else that file might hold, and never into the environment. Precedence is
+ * under `~/.motif/`, is read for connection settings and provider keys,
+ * without copying anything into the environment. Precedence is
  * the usual one: an explicit flag, then the process environment, then the
  * files in order.
  */
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
+import { updatePrivateFile } from "./private-file.js";
 
 /** The hosted endpoint Motif-3 is served from. The `/v1` is added per request. */
-export const DEFAULT_ENDPOINT = "https://llm.onerouter.pro";
+export const DEFAULT_ENDPOINT = "https://openrouter.ai/api";
 /** The model id the hosted endpoint routes to Motif-3. */
-export const DEFAULT_MODEL = "motif/motif-3";
+export const DEFAULT_MODEL = "motif-technologies/motif-3";
+const LEGACY_MODEL = "motif/motif-3";
 
 export const ENV_ENDPOINT = "MOTIF_ENDPOINT";
 export const ENV_MODEL = "MOTIF_MODEL";
 export const ENV_API_KEY = "MOTIF_API_KEY";
+export const ENV_OPENROUTER_API_KEY = "OPENROUTER_API_KEY";
 export const ENV_MORPHFACTORY_API_KEY = "MOTIF_MORPHFACTORY_API_KEY";
 
-export type ProviderId = "infron" | "morphfactory";
+export type ProviderId = "openrouter" | "infron" | "morphfactory";
 
 export const PROVIDERS = {
-  infron: {
-    label: "Infron",
+  openrouter: {
+    label: "OpenRouter",
     endpoint: DEFAULT_ENDPOINT,
     model: DEFAULT_MODEL,
+    apiKeyEnv: ENV_OPENROUTER_API_KEY,
+    keyPage: "https://openrouter.ai/settings/keys",
+  },
+  infron: {
+    label: "Infron",
+    endpoint: "https://llm.onerouter.pro",
+    model: LEGACY_MODEL,
     apiKeyEnv: ENV_API_KEY,
     keyPage: "https://infron.ai/dashboard/apiKeys",
   },
   morphfactory: {
     label: "Morphfactory (BETA)",
     endpoint: "https://api-cbt.morphfactory.io",
-    model: DEFAULT_MODEL,
+    model: LEGACY_MODEL,
     apiKeyEnv: ENV_MORPHFACTORY_API_KEY,
     keyPage: "https://cbt.morphfactory.io/console?view=keys",
   },
@@ -133,16 +143,35 @@ export function isInfronEndpoint(endpoint: string): boolean {
 export function providerForEndpoint(endpoint: string): ProviderId | undefined {
   if (isInfronEndpoint(endpoint)) return "infron";
   try {
-    const url = new URL(endpoint.trim());
-    if (url.origin === PROVIDERS.morphfactory.endpoint && !url.username && !url.password && !url.search && !url.hash
-      && ["/", "/v1", "/v1/"].includes(url.pathname)) return "morphfactory";
+    const url = new URL(normalizeEndpoint(endpoint));
+    if (url.username || url.password || url.search || url.hash) return undefined;
+    const base = url.origin + url.pathname.replace(/\/$/, "");
+    if (base === PROVIDERS.openrouter.endpoint) return "openrouter";
+    if (base === PROVIDERS.morphfactory.endpoint) return "morphfactory";
   } catch { /* A custom or invalid endpoint is not a provider preset. */ }
   return undefined;
 }
 
-/** Keep the legacy key for Infron and custom servers; never reuse it for Morphfactory. */
+/** Transports append /v1 to their already-normalized base when making the request. */
+export function isOpenRouterTransportEndpoint(base: string): boolean {
+  return providerForEndpoint(base + "/v1") === "openrouter";
+}
+
+/** Custom servers retain the legacy key. Each preset reads its own credential. */
 export function apiKeyEnvForEndpoint(endpoint: string): string {
-  return providerForEndpoint(endpoint) === "morphfactory" ? ENV_MORPHFACTORY_API_KEY : ENV_API_KEY;
+  const provider = providerForEndpoint(endpoint);
+  return provider ? PROVIDERS[provider].apiKeyEnv : ENV_API_KEY;
+}
+
+function defaultModelForEndpoint(endpoint: string): string {
+  const provider = providerForEndpoint(endpoint);
+  return provider ? PROVIDERS[provider].model : LEGACY_MODEL;
+}
+
+/** Keep a custom model, but translate a previous endpoint's Motif-3 preset. */
+export function modelForEndpointChange(model: string, previousEndpoint: string | undefined, endpoint: string): string {
+  if (!previousEndpoint || model !== defaultModelForEndpoint(previousEndpoint)) return model;
+  return defaultModelForEndpoint(endpoint);
 }
 
 export function defaultDotenvPaths(cwd = process.cwd()): string[] {
@@ -165,31 +194,41 @@ export function resolveEndpointConfig(opts: ResolveOptions = {}): EndpointConfig
   const pick = (
     flag: string | undefined,
     key: string,
-    fallback: string | undefined,
-  ): { value: string | undefined; source: string } => {
+    setting?: string,
+  ): { value: string; source: string; pairedEndpoint?: string } | undefined => {
     if (flag !== undefined && flag !== "") return { value: flag, source: "flag" };
     const fromEnv = env[key];
     if (fromEnv !== undefined && fromEnv !== "") return { value: fromEnv, source: `environment ${key}` };
     for (const f of files) {
       const v = f.values[key];
-      if (v !== undefined && v !== "") return { value: v, source: `${f.path} (${key})` };
+      if (v !== undefined && v !== "") return { value: v, source: `${f.path} (${key})`, pairedEndpoint: f.values[ENV_ENDPOINT] };
     }
-    return { value: fallback, source: fallback !== undefined && fallback !== (key === ENV_ENDPOINT ? DEFAULT_ENDPOINT : DEFAULT_MODEL) ? "settings" : "default" };
+    return setting === undefined ? undefined : { value: setting, source: "settings", pairedEndpoint: opts.defaults?.endpoint };
   };
 
-  const endpoint = pick(opts.flags?.endpoint, ENV_ENDPOINT, opts.defaults?.endpoint ?? DEFAULT_ENDPOINT);
-  const model = pick(opts.flags?.model, ENV_MODEL, opts.defaults?.model ?? DEFAULT_MODEL);
-  const normalizedEndpoint = normalizeEndpoint(endpoint.value!);
-  const apiKey = pick(undefined, apiKeyEnvForEndpoint(normalizedEndpoint), undefined);
+  // A key-only installation can keep using its provider before it saves a preset.
+  const endpoint = pick(opts.flags?.endpoint, ENV_ENDPOINT, opts.defaults?.endpoint) ?? {
+    value: Object.values(PROVIDERS).find(provider => pick(undefined, provider.apiKeyEnv))?.endpoint ?? DEFAULT_ENDPOINT,
+    source: "default",
+  };
+  const normalizedEndpoint = normalizeEndpoint(endpoint.value);
+  // A provider selection saves its endpoint and model together. When an
+  // endpoint override supersedes that pair, use the new provider's slug.
+  // An explicit model flag or environment variable has no paired endpoint.
+  const selectedModel = pick(opts.flags?.model, ENV_MODEL, opts.defaults?.model);
+  const model = selectedModel
+    ? modelForEndpointChange(selectedModel.value, selectedModel.pairedEndpoint, normalizedEndpoint)
+    : defaultModelForEndpoint(normalizedEndpoint);
+  const apiKey = pick(undefined, apiKeyEnvForEndpoint(normalizedEndpoint));
 
   return {
     endpoint: normalizedEndpoint,
-    model: model.value!,
-    ...(apiKey.value !== undefined ? { apiKey: apiKey.value } : {}),
+    model,
+    ...(apiKey ? { apiKey: apiKey.value } : {}),
     sources: {
       endpoint: endpoint.source,
-      model: model.source,
-      ...(apiKey.value !== undefined ? { apiKey: apiKey.source } : {}),
+      model: selectedModel?.value === model ? selectedModel.source : "default",
+      ...(apiKey ? { apiKey: apiKey.source } : {}),
     },
   };
 }
@@ -202,6 +241,7 @@ export function resolveEndpointConfig(opts: ResolveOptions = {}): EndpointConfig
  * one `env` away from a tool result, and tool results are journalled.
  */
 export function withholdSecrets(env: NodeJS.ProcessEnv): void {
+  delete env[ENV_OPENROUTER_API_KEY];
   delete env[ENV_API_KEY];
   delete env[ENV_MORPHFACTORY_API_KEY];
 }
@@ -219,30 +259,29 @@ function quoteDotenvValue(value: string): string {
   return /[\s#"'\\]/.test(value) ? `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"` : value;
 }
 
-/**
- * Set one key in a dotenv file's text and leave everything else as it was.
- *
- * The first uncommented `KEY=` line is replaced in place; a file without one
- * gets the line appended. Comments and other keys are kept verbatim — the
- * file is the person's, and a login must not rewrite their notes.
- */
-export function upsertDotenv(text: string, key: string, value: string): string {
-  const line = `${key}=${quoteDotenvValue(value)}`;
-  const pattern = new RegExp(`^(?:export\\s+)?${key}\\s*=`);
-  const lines = text.split(/\r?\n/);
-  if (lines[lines.length - 1] === "") lines.pop();
-  const at = lines.findIndex((l) => pattern.test(l.trim()));
-  if (at !== -1) lines[at] = line;
-  else lines.push(line);
-  return lines.join("\n") + "\n";
+function editDotenvKey(text: string, key: string, replacement?: string): string {
+  const newline = text.includes("\r\n") ? "\r\n" : "\n";
+  let found = false;
+  const edited = text.replace(/^[^\n]+(?:\n|$)/gm, row => {
+    const name = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/.exec(row.trim())?.[1];
+    if (name !== key) return row;
+    if (found || replacement === undefined) return "";
+    found = true;
+    const ending = row.endsWith("\r\n") ? "\r\n" : row.endsWith("\n") ? "\n" : newline;
+    return replacement + ending;
+  });
+  if (found || replacement === undefined) return edited;
+  return edited + (edited && !edited.endsWith("\n") ? newline : "") + replacement + newline;
 }
 
-/** Remove every uncommented `KEY=` line; the rest of the file is untouched. */
+/** Replace the first active assignment and remove duplicates that could override it. */
+export function upsertDotenv(text: string, key: string, value: string): string {
+  return editDotenvKey(text, key, key + "=" + quoteDotenvValue(value));
+}
+
+/** Remove every active assignment for this key, preserving unrelated bytes. */
 export function removeDotenvKey(text: string, key: string): string {
-  const pattern = new RegExp(`^(?:export\\s+)?${key}\\s*=`);
-  const kept = text.split(/\r?\n/).filter((l) => !pattern.test(l.trim()));
-  const out = kept.join("\n").replace(/\n+$/, "");
-  return out === "" ? "" : out + "\n";
+  return editDotenvKey(text, key);
 }
 
 /**
@@ -253,19 +292,33 @@ export function removeDotenvKey(text: string, key: string): string {
  * An existing file keeps its other lines. Returns the path written.
  */
 export function saveApiKey(apiKey: string, path = defaultEnvPath(), provider: ProviderId = "infron"): string {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const existing = existsSync(path) ? readFileSync(path, "utf8") : "";
-  writeFileSync(path, upsertDotenv(existing, PROVIDERS[provider].apiKeyEnv, apiKey), { encoding: "utf8", mode: 0o600 });
-  chmodSync(path, 0o600);
+  saveApiKeyWithRollback(apiKey, path, provider);
   return path;
+}
+
+/** Save a verified candidate; its undo restores only this provider while that candidate is still current. */
+export function saveApiKeyWithRollback(apiKey: string, path: string, provider: ProviderId): () => boolean {
+  const name = PROVIDERS[provider].apiKeyEnv;
+  let previous: string | undefined;
+  updatePrivateFile(path, existing => {
+    previous = parseDotenv(existing ?? "")[name];
+    return upsertDotenv(existing ?? "", name, apiKey);
+  });
+  return () => {
+    if (previous === apiKey || !existsSync(path)) return false;
+    return updatePrivateFile(path, existing => {
+      if (existing === undefined || parseDotenv(existing)[name] !== apiKey) return undefined;
+      return previous === undefined ? removeDotenvKey(existing, name) : upsertDotenv(existing, name, previous);
+    });
+  };
 }
 
 /** Remove the API key from the file; true when there was one to remove. */
 export function forgetApiKey(path = defaultEnvPath(), provider: ProviderId = "infron"): boolean {
   if (!existsSync(path)) return false;
-  const existing = readFileSync(path, "utf8");
-  const next = removeDotenvKey(existing, PROVIDERS[provider].apiKeyEnv);
-  if (next === existing) return false;
-  writeFileSync(path, next, { encoding: "utf8", mode: 0o600 });
-  return true;
+  return updatePrivateFile(path, existing => {
+    if (existing === undefined) return undefined;
+    const next = removeDotenvKey(existing, PROVIDERS[provider].apiKeyEnv);
+    return next === existing ? undefined : next;
+  });
 }

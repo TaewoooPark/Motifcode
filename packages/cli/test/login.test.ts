@@ -17,6 +17,19 @@ describe("verifying a key", () => {
     expect(r).toEqual({ ok: true });
   });
 
+  it("verifies an OpenRouter key without running a completion", async () => {
+    const seen: { url: string; method?: string; body?: unknown; headers?: RequestInit["headers"] }[] = [];
+    const fetchImpl = (async (url: string, init: RequestInit) => {
+      seen.push({ url, ...init });
+      return new Response(JSON.stringify({ data: { label: "fixture" } }));
+    }) as typeof fetch;
+    const result = await verifyApiKey({ endpoint: "https://openrouter.ai/api/v1/", model: "motif-technologies/motif-3", apiKey: "fixture", fetchImpl });
+    expect(result).toEqual({ ok: true });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ url: "https://openrouter.ai/api/v1/key", method: "GET", headers: { authorization: "Bearer fixture" } });
+    expect(seen[0]?.body).toBeUndefined();
+  });
+
   it("asks for one token from the configured model, with the key as a bearer and the /v1 not doubled", async () => {
     let seen: { url: string; method: string | undefined; auth: string | undefined; body: unknown } | null = null;
     const fetchImpl = (async (url: string, init: RequestInit) => {
@@ -61,6 +74,8 @@ describe("what was pasted", () => {
     expect(normaliseKeyInput('export MOTIF_API_KEY="sk-abc123"')).toBe("sk-abc123");
     expect(normaliseKeyInput("'sk-abc123'")).toBe("sk-abc123");
     expect(normaliseKeyInput('export MOTIF_MORPHFACTORY_API_KEY="mf-abc123"')).toBe("mf-abc123");
+    expect(normaliseKeyInput('export OPENROUTER_API_KEY="or-test"', "openrouter")).toBe("or-test");
+    expect(() => normaliseKeyInput("MOTIF_API_KEY=fixture", "openrouter")).toThrow(/Use OPENROUTER_API_KEY/);
     expect(normaliseKeyInput("")).toBe("");
   });
 });
@@ -83,7 +98,11 @@ describe("reading the key", () => {
 
 describe("provider login guidance", () => {
   it("shows the selected provider's key page", () => {
-    expect(loginLines("/home/user/.motif/.env", "/home/user").join("\n")).toContain("https://infron.ai/dashboard/apiKeys");
+    const prompt = loginLines("/home/user/.motif/.env", "/home/user");
+    expect(prompt).toContain("https://openrouter.ai/settings/keys");
+    expect(prompt).toContain("~/.motif/.env");
+    expect(Math.max(...prompt.map(line => line.length))).toBeLessThanOrEqual(42);
+    expect(loginLines("/home/user/.motif/.env", "/home/user", "infron").join("\n")).toContain("https://infron.ai/dashboard/apiKeys");
     const lines = loginLines("/home/user/.motif/.env", "/home/user", "morphfactory").join("\n");
     expect(lines).toContain("https://cbt.morphfactory.io/console?view=keys");
     expect(lines).toContain("~/.motif/.env");

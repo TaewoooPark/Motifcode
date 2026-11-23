@@ -54,10 +54,10 @@ export interface CommandContext {
   config(): string[];
   /** Interactive dashboard; plain outputs remain available without a screen. */
   openPanel?(tab: "config" | "status" | "stats" | "usage"): void;
-  configure?(args: string): CommandOutput;
+  configure?(args: string): CommandOutput | Promise<CommandOutput>;
   provider?(args: string): Promise<CommandOutput>;
   /** Update the endpoint and its credential together in an interactive session. */
-  setEndpoint?(endpoint: string): void;
+  setEndpoint?(endpoint: string): CommandOutput | Promise<CommandOutput>;
   stats?(): string[];
   usage?(): string[];
   doctor(): Promise<string[]>;
@@ -205,8 +205,8 @@ export const COMMANDS: readonly SlashCommand[] = [
   },
   {
     name: "provider",
-    description: "choose Infron or Morphfactory (BETA)",
-    usage: "[infron|morphfactory]",
+    description: "choose OpenRouter, Infron or Morphfactory (BETA)",
+    usage: "[openrouter|infron|morphfactory]",
     run: (ctx, args) => ctx.provider?.(args) ?? fail("/provider", "Provider selection requires an interactive session."),
   },
   {
@@ -237,11 +237,12 @@ export const COMMANDS: readonly SlashCommand[] = [
       if (args === "") return ok("/endpoint", [ctx.settings.endpoint]);
       if (!/^https?:\/\//.test(args)) return fail("/endpoint", `not a URL: ${args}`);
       const endpoint = args.replace(/\/+$/, "").replace(/\/v1$/, "");
-      if (ctx.setEndpoint) ctx.setEndpoint(endpoint);
-      else ctx.settings.endpoint = endpoint;
+      if (ctx.setEndpoint) return ctx.setEndpoint(endpoint);
+      const path = ctx.persist("endpoint", endpoint);
+      ctx.settings.endpoint = endpoint;
       return ok("/endpoint", [
         `endpoint set to ${ctx.settings.endpoint} for the next task`,
-        ...saved(ctx, "endpoint", ctx.settings.endpoint),
+        ...(path ? [`saved to ${path}`] : []),
       ]);
     },
   },

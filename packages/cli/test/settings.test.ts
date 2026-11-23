@@ -2,11 +2,12 @@
  * Settings on disk: two files, one precedence, one gate.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { loadSettings, parseSettings, saveUserSetting } from "../src/settings.js";
+import { loadSettings, parseSettings, saveUserSetting, saveUserSettings } from "../src/settings.js";
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), "motif-settings-"));
@@ -67,6 +68,34 @@ describe("saving", () => {
     expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ model: "x", theme: "claude" });
     saveUserSetting("model", undefined, home);
     expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ theme: "claude" });
+  });
+
+  it.runIf(process.platform === "win32")("creates settings private to the current Windows account", () => {
+    const home = mkdtempSync(join(tmpdir(), "motif-profile-"));
+    const path = saveUserSettings({ theme: "mono", endpoint: "https://openrouter.ai/api" }, home);
+    const check = [
+      "$a=[IO.File]::GetAccessControl($env:MOTIF_FIXTURE)",
+      "$r=@($a.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))",
+      "$a.AreAccessRulesProtected -and $r.Count -eq 1 -and $r[0].IdentityReference -eq [Security.Principal.WindowsIdentity]::GetCurrent().User",
+    ].join("\n");
+    expect(execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", check], {
+      env: { ...process.env, MOTIF_FIXTURE: path }, encoding: "utf8", windowsHide: true,
+    }).trim()).toBe("True");
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ theme: "mono", endpoint: "https://openrouter.ai/api" });
+  });
+
+  it.skipIf(process.platform === "win32")("updates a linked settings file when saving the provider and model together", () => {
+    const home = tmp();
+    const target = join(tmp(), "settings.json");
+    mkdirSync(join(home, ".motif"));
+    const link = join(home, ".motif", "settings.json");
+    writeFileSync(target, JSON.stringify({ theme: "mono", extension: "keep" }));
+    symlinkSync(target, link);
+    saveUserSettings({ endpoint: "https://openrouter.ai/api", model: "motif-technologies/motif-3" }, home);
+    expect(realpathSync(link)).toBe(realpathSync(target));
+    expect(JSON.parse(readFileSync(target, "utf8"))).toEqual({
+      theme: "mono", extension: "keep", endpoint: "https://openrouter.ai/api", model: "motif-technologies/motif-3",
+    });
   });
 
   it("replaces a file that no longer parses rather than failing forever", () => {

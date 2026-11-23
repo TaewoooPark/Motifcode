@@ -1,4 +1,4 @@
-import { normalizeEndpoint } from "@motifcode/core";
+import { PROVIDERS, normalizeEndpoint } from "@motifcode/core";
 import { THEMES } from "@motifcode/tui";
 import type { StoredSettings } from "./settings.js";
 
@@ -15,13 +15,13 @@ export const CONFIG_FIELDS: readonly ConfigField[] = [
   { key: "verbose", label: "Full tool output", choices: ["false", "true"], detail: "Show full tool output instead of clipped results. Applies immediately." },
   { key: "permissions", label: "Tool permissions", choices: ["ask", "auto"], detail: "ask waits for approval before writes and commands; auto runs tools without asking." },
   { key: "model", label: "Model", detail: "Model ID sent to the endpoint on the next task." },
-  { key: "endpoint", label: "Endpoint", detail: "API base URL for the next task. The current API key will be sent to this server." },
+  { key: "endpoint", label: "Endpoint", detail: "API base URL for the next task. Hosted providers use their own API keys." },
   { key: "channel", label: "Action channel", choices: ["toolcall", "object", "raw"], detail: "Changing this restarts the conversation. object/raw are experimental and require /v1/completions." },
   { key: "maxTurns", label: "Max turns / task", detail: "Positive integer: maximum model steps per task." },
   { key: "maxOutputTokens", label: "Max output tokens", detail: "Positive integer per model step, or off to use the server default." },
   { key: "seed", label: "Sampling seed", detail: "Integer >= 0, or off. The endpoint must support seeded sampling." },
   { key: "compactAt", label: "Compact at", detail: "Context fraction from 0.1 to 1 at which automatic compaction runs." },
-  { key: "provider", label: "Provider", choices: ["infron", "morphfactory"], detail: "Infron or Morphfactory (BETA). Switches endpoint, model and the provider’s own API key; /login adds a missing key." },
+  { key: "provider", label: "Provider", choices: Object.keys(PROVIDERS), detail: "Switches the endpoint, model and API key together. Use /login to add a key for the selected provider." },
   { key: "theme", label: "Theme", choices: Object.keys(THEMES), detail: "Terminal color palette. Applies immediately; NO_COLOR takes precedence." },
 ];
 

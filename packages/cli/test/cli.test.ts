@@ -462,6 +462,7 @@ describe("doctor", () => {
     chat?: { status?: number; body?: unknown };
     chats?: { status?: number; body?: unknown }[];
     completions?: { status?: number; body?: unknown };
+    completionReplies?: { status?: number; body?: unknown }[];
     /** Every request, for asserting on headers and bodies. */
     seen: { url: string; init: RequestInit }[];
   }
@@ -470,6 +471,7 @@ describe("doctor", () => {
   function router(script: Omit<Scripted, "seen">): Scripted & { fetchImpl: typeof fetch } {
     const s: Scripted = { ...script, seen: [] };
     let chatIndex = 0;
+    let completionIndex = 0;
     const json = (body: unknown, status = 200) =>
       new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
     const fetchImpl = (async (url: string, init: RequestInit = {}) => {
@@ -493,7 +495,7 @@ describe("doctor", () => {
         return json(r.body ?? {}, r.status ?? 200);
       }
       if (url.endsWith("/v1/completions")) {
-        const r = s.completions ?? { status: 404, body: { error: "Not Found" } };
+        const r = s.completionReplies?.[completionIndex++] ?? s.completions ?? { status: 404, body: { error: "Not Found" } };
         return json(r.body ?? {}, r.status ?? 200);
       }
       return new Response("no route", { status: 404 });
@@ -559,6 +561,15 @@ describe("doctor", () => {
     expect(by(checks, "model family").state).toBe("ok");
   });
 
+  it("reads OpenRouter tool metadata and identifies insufficient credit in the live probe", async () => {
+    const model = "motif-technologies/motif-3";
+    const r = router({ models: [{ id: model, supported_parameters: ["tools"], context_length: 262144 }], chat: { status: 402 } });
+    const checks = await doctor({ endpoint: "https://openrouter.ai/api/v1", model, apiKey: "synthetic", fetchImpl: r.fetchImpl });
+    expect(by(checks, "function calling").state).toBe("ok");
+    expect(by(checks, "chat probe")).toMatchObject({ state: "fail", detail: expect.stringContaining("402") });
+    expect(r.seen.map(call => call.url)).toEqual(["https://openrouter.ai/api/v1/models", "https://openrouter.ai/api/v1/chat/completions"]);
+  });
+
   it("warns when the id is not advertised, and about a non-Motif id", async () => {
     const r = router({ models: [MOTIF] });
     const checks = await doctor({ endpoint: "http://x", model: "meta-llama/Llama-3", apiKey: "k", fetchImpl: r.fetchImpl });
@@ -612,10 +623,65 @@ describe("doctor", () => {
     expect(c.fix).toContain("toolcall");
   });
 
-  it("reports the body channels available when the route answers", async () => {
+  it.each(["https://llm.onerouter.pro", "https://api-cbt.morphfactory.io", "http://localhost:4567"])(
+    "preserves the one-token completions probe on %s", async (endpoint) => {
+      const model = "motif/motif-3";
+      const r = router({
+        models: [{ id: model, supported_parameters: ["tools"] }],
+        completions: { body: { choices: [{ text: "h" }] } },
+      });
+      const checks = await doctor({ endpoint, model, fetchImpl: r.fetchImpl });
+      expect(r.seen.map(call => call.url)).toEqual([
+        endpoint + "/v1/models", endpoint + "/v1/chat/completions",
+        endpoint + "/v1/chat/completions", endpoint + "/v1/completions",
+      ]);
+      expect(JSON.parse(String(r.seen.at(-1)!.init.body))).toEqual({ model, prompt: "hi", max_tokens: 1, stream: false });
+      expect(by(checks, "completions endpoint")).toMatchObject({ state: "ok", detail: "available; the object and raw channels can run" });
+      expect(checks.filter(c => c.name === "object channel" || c.name === "raw channel")).toEqual([]);
+      expect(by(checks, "function calling")).toBeUndefined();
+    },
+  );
+
+  it("skips both OpenRouter body decoders after a missing completions route", async () => {
+    const r = router({ completions: { status: 404 } });
+    const checks = await doctor({ endpoint: "https://openrouter.ai/api", model: "motif-technologies/motif-3", fetchImpl: r.fetchImpl });
+    expect(r.seen.filter(call => call.url.endsWith("/v1/completions"))).toHaveLength(1);
+    for (const name of ["object channel", "raw channel"]) {
+      expect(by(checks, name)).toMatchObject({ state: "unknown", detail: "completions unavailable for this model" });
+    }
+  });
+
+  it("keeps HTTP availability separate from action verification", async () => {
     const r = router({ completions: { status: 200, body: { choices: [{ text: "h" }] } } });
-    const checks = await doctor({ endpoint: "http://x", model: "motif/motif-3", apiKey: "k", fetchImpl: r.fetchImpl });
+    const checks = await doctor({ endpoint: "https://openrouter.ai/api", model: "motif-technologies/motif-3", apiKey: "k", fetchImpl: r.fetchImpl });
     expect(by(checks, "completions endpoint").state).toBe("ok");
+    expect(by(checks, "object channel").state).toBe("unknown");
+    expect(by(checks, "raw channel").state).toBe("unknown");
+  });
+
+  it("reports exact body actions separately for each codec", async () => {
+    const object = JSON.stringify({ commands: [{ keystrokes: "OK", duration: 0.1 }], task_complete: false });
+    const raw = '<response><commands><keystrokes duration="0.1">NO</keystrokes></commands></response>';
+    const r = router({ completionReplies: [object, raw].map((text) => ({ body: { choices: [{ text, reasoning: "probe", finish_reason: "stop" }] } })) });
+    const checks = await doctor({ endpoint: "https://openrouter.ai/api", model: "motif-technologies/motif-3", fetchImpl: r.fetchImpl });
+    expect(by(checks, "object channel").state).toBe("ok");
+    expect(by(checks, "raw channel").state).toBe("warn");
+    const bodies = r.seen.filter(({ url }) => url.endsWith("/v1/completions")).map(({ init }) => JSON.parse(String(init.body)));
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0].prompt).toContain("single JSON object");
+    expect(bodies[1].prompt).toContain("Respond with XML");
+  });
+
+  it("applies the real truncation and inline reasoning gates to the diagnostic", async () => {
+    const object = JSON.stringify({ commands: [{ keystrokes: "OK", duration: 0.1 }] });
+    const raw = '<response><commands><keystrokes duration="0.1">OK</keystrokes></commands></response>';
+    const r = router({ completionReplies: [
+      { body: { choices: [{ text: object, reasoning: "probe", finish_reason: "length" }] } },
+      { body: { choices: [{ text: "inline</think>" + raw, finish_reason: "stop" }] } },
+    ] });
+    const checks = await doctor({ endpoint: "https://openrouter.ai/api", model: "motif-technologies/motif-3", fetchImpl: r.fetchImpl });
+    expect(by(checks, "object channel")).toMatchObject({ state: "unknown", detail: expect.stringContaining("output limit") });
+    expect(by(checks, "raw channel").state).toBe("ok");
   });
 
   it("fails cleanly when nothing is listening", async () => {

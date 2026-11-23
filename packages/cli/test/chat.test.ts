@@ -16,7 +16,7 @@ import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentRegistry, BUILTIN_AGENTS } from "@motifcode/agents";
-import { TransportError, type CompletionRequest, type CompletionResponse, type Transport } from "@motifcode/core";
+import { PROVIDERS, TransportError, type CompletionRequest, type CompletionResponse, type Transport } from "@motifcode/core";
 import { DEFAULT_HOOKS } from "@motifcode/hooks";
 import type { JournalLine } from "@motifcode/journal";
 import { McpSession } from "@motifcode/mcp";
@@ -40,13 +40,12 @@ class FakeTTY extends PassThrough {
  * mid-flight — interrupted, or queued behind.
  */
 class GateTransport implements Transport {
-  readonly endpoint = "fake://endpoint";
   readonly model = "fake";
   readonly seen: CompletionRequest[] = [];
   private release: (() => void) | null = null;
   gated = false;
 
-  constructor(private readonly bodies: string[]) {}
+  constructor(private readonly bodies: string[], readonly endpoint = "fake://endpoint") {}
 
   async complete(req: CompletionRequest): Promise<CompletionResponse> {
     this.seen.push(req);
@@ -260,8 +259,8 @@ describe("interactive session", () => {
     } finally { await mcp.close(); }
   });
 
-  it("runs a task and continues the conversation with the next one", async () => {
-    const t = new GateTransport([...done("first"), ...done("second")]);
+  it.each(["openrouter", "infron", "morphfactory"] as const)("continues the conversation with %s history", async (provider) => {
+    const t = new GateTransport([...done("first"), ...done("second")], PROVIDERS[provider].endpoint);
     const s = session(t);
     open.push(s);
     s.type("fix the parser\r");
@@ -272,11 +271,16 @@ describe("interactive session", () => {
 
     s.type("now the tests\r");
     await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(2));
-    const roles = t.seen[1]!.messages.map((m) => m.role);
-    // system, the first task, its `done`, then the new task — the model sees
-    // what it did before.
-    expect(roles).toEqual(["system", "user", "assistant", "user"]);
-    expect(t.seen[1]!.messages[3]!.content).toBe("now the tests");
+    const history = t.seen[1]!.messages;
+    if (provider === "openrouter") {
+      expect(history.map(message => message.role)).toEqual(["system", "user", "assistant", "tool", "user"]);
+      const completedCall = history[2]!.tool_calls?.[0];
+      expect(completedCall?.id).toBeTruthy();
+      expect(history[3]!.tool_call_id).toBe(completedCall!.id);
+    } else {
+      expect(history.map(message => message.role)).toEqual(["system", "user", "assistant", "user"]);
+    }
+    expect(history.at(-1)!.content).toBe("now the tests");
     expect(s.screen()).toContain("> fix the parser");
     // The `done` summary stands in for the reply; there is no end banner.
     expect(s.screen()).toContain("⏺ first");
@@ -769,6 +773,38 @@ describe("interactive session", () => {
     expect(target.chat.transcript).toEqual(original.chat.transcript);
     expect(target.screen()).toContain("recorded against previous/model");
     expect(target.screen()).toContain("that session had finished");
+    expect(t.seen).toHaveLength(1);
+  });
+
+  it.each(["slash", "continue"] as const)("reconciles an interrupted legacy read on %s into OpenRouter", async (entry) => {
+    const t = new GateTransport(reply("ready"));
+    const original = session(t);
+    open.push(original);
+    original.type("record a checkpoint\r");
+    await vi.waitFor(() => expect(original.chat.tasksCompleted).toBe(1));
+    const folder = join(original.cwd, ".motif", "sessions");
+    const file = join(folder, readdirSync(folder)[0]!);
+    const lines = readFileSync(file, "utf8").trimEnd().split("\n").map(line => JSON.parse(line) as JournalLine)
+      .filter(line => "t" in line || line.record.t !== "scope_end");
+    for (const line of lines) {
+      if ("t" in line || line.record.t !== "checkpoint") continue;
+      const point = line.record.state;
+      point.inFlightTool = { name: "read", id: "read-1", argumentsHash: "fixture", mutating: false };
+      point.messages = [
+        { role: "system", content: "recorded" },
+        { role: "user", content: "read the file" },
+        { role: "assistant", tool_calls: [{ id: "read-1", type: "function", function: { name: "read", arguments: { path: "file.txt" } } }] },
+      ];
+    }
+    writeFileSync(file, lines.map(line => JSON.stringify(line)).join("\n") + "\n");
+    const target = session(t, {
+      ...(entry === "continue" ? { continueFrom: file } : {}),
+      settings: { ...PROVIDERS.openrouter, channel: "toolcall", maxTurns: 20, cwd: original.cwd, theme: "motif", compactAt: 0.75, permissions: "auto" },
+    });
+    open.push(target);
+    if (entry === "slash") target.type(`/resume ${file}\r`);
+    await vi.waitFor(() => expect(target.screen()).toContain("continuing from"));
+    expect(target.chat.transcript.at(-1)).toMatchObject({ role: "tool", tool_call_id: "read-1", content: expect.stringContaining("unavailable") });
     expect(t.seen).toHaveLength(1);
   });
 

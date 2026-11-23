@@ -30,7 +30,7 @@
   <a href="https://discord.gg/5d99wCtzc"><img src="https://img.shields.io/badge/Join_OpenLab-Discord-5865F2?style=for-the-badge&amp;logo=discord&amp;logoColor=white&amp;labelColor=000000" alt="Join OpenLab on Discord"></a>
 </p>
 
-> **Choose your provider.** First launch offers [Infron](https://infron.ai) or
+> **Choose your provider.** New installations default to [OpenRouter](https://openrouter.ai/settings/keys). You can also choose [Infron](https://infron.ai) or
 > [Morphfactory (BETA)](https://cbt.morphfactory.io/console?view=keys).
 > Switch later with `/provider` or from `/config`; each provider keeps its own API key.
 
@@ -128,7 +128,7 @@ cd your-project
 npx motifcode          # first run: asks for your key, then offers to install the `motif` command
 ```
 
-The first session lets you choose **Infron** or **Morphfactory (BETA)**, asks for
+The first session offers **OpenRouter** (default), **Infron**, and **Morphfactory (BETA)**. It asks for
 your API key once, and saves it to `~/.motif/.env`. Because `npx` leaves no command behind, it then offers to run
 `npm install -g motifcode` for you; say yes and `motif` (or `motifcode`) opens
 the session from any folder from then on. `npm install -g motifcode` directly
@@ -404,34 +404,28 @@ and a bundle being available does not mean its service is signed in. See
 
 ## Choose a provider and get an API key
 
-First launch offers Infron and Morphfactory (BETA). Existing sessions keep their
-current connection; use `/provider` or the provider row in `/config` to switch.
-Both use the model id `motif/motif-3` and an OpenAI-compatible endpoint:
+New installations default to OpenRouter. To change a saved connection, use
+`/provider` or the provider row in `/config`. Each provider uses its own key.
 
-| provider | base URL | API key environment variable |
-|---|---|---|
-| Infron | `https://llm.onerouter.pro/v1` | `MOTIF_API_KEY` |
-| Morphfactory (BETA) | `https://api-cbt.morphfactory.io/v1` | `MOTIF_MORPHFACTORY_API_KEY` |
+| Provider | Base URL | Model ID | API key environment variable |
+|---|---|---|---|
+| OpenRouter (default) | `https://openrouter.ai/api/v1` | `motif-technologies/motif-3` | `OPENROUTER_API_KEY` |
+| Infron | `https://llm.onerouter.pro/v1` | `motif/motif-3` | `MOTIF_API_KEY` |
+| Morphfactory (BETA) | `https://api-cbt.morphfactory.io/v1` | `motif/motif-3` | `MOTIF_MORPHFACTORY_API_KEY` |
 
-1. Create a key at [Infron's API Keys dashboard](https://infron.ai/dashboard/apiKeys)
-   or [Morphfactory's console](https://cbt.morphfactory.io/console?view=keys).
-2. Run `motif`, choose the provider and paste its key. A one-token request checks
-   it before saving it to `~/.motif/.env` (readable only by you). Provider keys
-   are stored separately, so switching or `/logout` preserves the other key.
-3. In a script, use `motif login --provider morphfactory`, then
-   `motif --provider morphfactory -p "your question"`. `--provider infron` selects
-   Infron; explicit `--endpoint` and `--model` flags override the preset.
-4. `motif doctor --provider morphfactory` checks the connection, tool calls,
-   reasoning and prefix caching. Infron's account balance is only available
-   with Infron; local session token usage remains available for both providers.
+1. Create a key for your provider. [OpenRouter keys](https://openrouter.ai/settings/keys) · [Infron keys](https://infron.ai/dashboard/apiKeys) · [Morphfactory keys](https://cbt.morphfactory.io/console?view=keys)
+2. Run `motif`, choose the provider, and paste its key. After verification the CLI saves it to `~/.motif/.env` in your user profile. Switching providers or using `/logout` preserves the other providers’ keys.
+3. For scripts, use `motif login --provider openrouter` and `motif --provider openrouter -p "your question"`. The other provider names are `infron` and `morphfactory`. Explicit `--endpoint` and `--model` flags override the preset.
+4. Run `motif doctor --provider openrouter` to probe the model connection and tool calls. These probes use model tokens. Local session usage is available for all providers. The in-app account balance is available for Infron.
 
-Environment variables or a project `.env` work too; `--env-file <path>` reads
-that file first. Set `MOTIF_ENDPOINT` to select a provider through an env file.
-Infron remains the default when no provider is configured.
+**Switching an existing installation.** Update with `npm install -g motifcode@latest`, open `/provider`, and select OpenRouter. If you need a new key, paste it into the masked prompt. Esc cancels the switch. Continue the conversation in the same terminal, or use `motif --continue` when you reopen the project. Use `/status` to see the active connection. An explicit endpoint flag, environment variable or trusted project setting takes precedence over the saved user default at the next launch.
 
-Only `MOTIF_*` keys are read from a `.env` file, none of them are exported, and
-the key is removed from the harness's own environment before anything is
-spawned — the agent's `bash` cannot see it, and neither can a project hook.
+OpenRouter uses its own stream handling, native tool-result pairing and interruption recovery. Infron, Morphfactory and custom endpoints use their existing processing. The official preset follows OpenRouter’s routing for `motif-technologies/motif-3`.
+
+You can also set the provider’s key in the environment or a project `.env`.
+Use `MOTIF_ENDPOINT` to select the endpoint explicitly and `--env-file <path>`
+to read a particular file first. Key-only Infron or Morphfactory installations continue to use their configured provider. The CLI withholds model keys from child processes.
+
 
 ---
 
@@ -478,7 +472,7 @@ Use ↑/↓, PageUp/PageDown or Home/End to browse, then Esc, `q` or `Ctrl+O` to
 to the same draft and scrollback. This does not truncate the model's tool data.
 `--verbose` or `/config verbose true` explicitly keeps full inline output.
 
-The Infron balance connects automatically using the key entered at first login.
+When Infron is selected, its balance connects automatically using the saved Infron key.
 Press `r` in Usage to refresh. The account balance and costs recorded in local
 journals are separate: unreported or unrecorded charges are not estimated.
 
@@ -529,13 +523,13 @@ and each fact below, checked rather than assumed, became a design constraint.
 
 | Fact about Motif-3 | Source | What it forces here |
 |---|---|---|
-| The chat template renders the tools block **before** the system prompt, in the same turn; reordering two tools leaves ~24% of the prefix | `chat_template.jinja`; measured in `template.test.ts` | Nine tools in a frozen, canonical order (`done, bash, read, write, apply_patch, term, skill, task, mcp`); a subagent takes a *prefix* of it; a prompt under 3k tokens (about 2k for a one-shot run without the MCP tool) of which 90–98% is served from the endpoint's cache |
-| Intermediate reasoning is rendered only when tools are registered, and the hosted router does render returned `reasoning_content` | template, measured; endpoint, 2026-09-20 | Tools are registered on every channel, and the model's reasoning is sent back every turn |
+| The chat template places tools before the system prompt. Changing the early tools shortens the reusable prefix. | `chat_template.jinja`; endpoint cache counters | Nine tools have a stable order and subagents take a prefix. Read the reported cached-token count for the current provider and prompt length. |
+| With tools registered, the local template includes intermediate assistant reasoning. The original Infron benchmark observed it in hosted prompts. | template tests; Infron, 2026-09-20 | The client replays reasoning. On OpenRouter/KT, tests recovered task state from ordinary tool results and user messages. Keep required IDs, decisions and outcomes in those messages. |
 | JSON inside `<tool_call>` is frequently malformed (shell `\$`, regex `\s`), and the hosted endpoint sometimes emits a bare call with no tags | the vendor's vLLM parser; endpoint, measured | A client-side repair ladder behind the server's own, recovery of bare calls, a breakage budget, and closed tool schemas enforced by a linter that fails the build |
 | A dropped tool call and a final answer look the same | vendor parser comments; measured in the campaign | `done` is a tool; in benchmark mode a turn without an action is handed back instead of ending the task |
 | SWE-bench Verified 76.2 came from a single `bash` tool; Terminal-Bench 2.1 74.9 from a persistent tmux session | mini-SWE-agent config; Terminus 2 | The thin tool set is the baseline, with a `term` tool beside `bash` |
 | A reasoning step takes 200–300 s on the hosted endpoint | measured | No 300-second header timeout in the transport; a 429 is retried after `Retry-After` |
-| The hosted endpoint has no `/v1/completions` | `motif doctor` | Only the native `toolcall` channel runs there; the `object` and `raw` channels and the pruning toolkit need a local completions server (`--experimental-channel`) |
+| The Infron endpoint in the original benchmark lacked `/v1/completions`. Other endpoints can expose different response formats. | `motif doctor` | Use native `toolcall` by default. For experimental `object` or `raw`, check the selected endpoint with `motif doctor` and opt in with `--experimental-channel`. |
 
 Whatever the channel, the model's own body is kept verbatim in the transcript,
 and the loop is tested by injecting the faults the model actually produces:

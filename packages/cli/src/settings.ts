@@ -15,9 +15,10 @@
  * in `.env`, which is a different kind of file with a different threat model.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
+import { updatePrivateFile } from "@motifcode/core";
 import type { ChannelId } from "@motifcode/protocol";
 
 export interface StoredSettings {
@@ -180,20 +181,26 @@ export function saveUserSetting<K extends keyof StoredSettings>(
   value: StoredSettings[K] | undefined,
   home = homedir(),
 ): string {
+  return saveUserSettings({ [key]: value }, home);
+}
+
+export function saveUserSettings(updates: Partial<StoredSettings>, home = homedir()): string {
   const path = userSettingsPath(home);
-  let current: Record<string, unknown> = {};
-  if (existsSync(path)) {
-    try {
-      const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
-      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) current = parsed as Record<string, unknown>;
-    } catch {
-      // A file that does not parse is replaced: leaving it means every later
-      // save fails the same way, and the person never learns why.
+  updatePrivateFile(path, text => {
+    let current: Record<string, unknown> = {};
+    if (text !== undefined) {
+      try {
+        const parsed: unknown = JSON.parse(text);
+        if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) current = parsed as Record<string, unknown>;
+      } catch {
+        // A file that does not parse can be replaced by a new set of settings.
+      }
     }
-  }
-  if (value === undefined) delete current[key];
-  else current[key] = value;
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  writeFileSync(path, JSON.stringify(current, null, 2) + "\n", "utf8");
+    for (const [key, value] of Object.entries(updates)) {
+      if (value === undefined) delete current[key];
+      else current[key] = value;
+    }
+    return JSON.stringify(current, null, 2) + "\n";
+  });
   return path;
 }

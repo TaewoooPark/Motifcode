@@ -21,6 +21,7 @@ import {
   compatibilityProblem,
   isMutating,
   resumeBlock,
+  resumedMessages,
   runLoop,
   type Executor,
   type LoopCheckpoint,
@@ -227,4 +228,30 @@ describe("compatibility is checked fail-closed", () => {
       expect(compatibilityProblem(recorded, { ...recorded, [field]: value })).not.toBeNull();
     });
   }
+});
+
+describe("native batch association across a crash", () => {
+  const calls = [
+    { id: "a", function: { name: "read", arguments: { path: "source" } } },
+    { id: "b", function: { name: "write", arguments: { path: "out", content: "x" } } },
+  ];
+  const point = (extra: Partial<LoopCheckpoint> = {}): LoopCheckpoint => ({
+    currentChannel: "toolcall", messages: [{ role: "assistant", tool_calls: calls }], ...extra,
+  } as LoopCheckpoint);
+  it("records an unknown interrupted read and explicitly skips the remaining mutation", () => {
+    const input = point({ inFlightTool: { id:"a", name:"read", argumentsHash:"a", mutating:false } });
+    const out = resumedMessages(input);
+    expect(out.slice(1)).toEqual([
+      { role:"tool", tool_call_id:"a", content:expect.stringContaining("unavailable") },
+      { role:"tool", tool_call_id:"b", content:expect.stringContaining("not started") },
+    ]);
+    expect(input.messages).toHaveLength(1);
+  });
+  it("preserves completed results and refuses an uncertain mutation or incorrect tool ID", () => {
+    const input = point(); input.messages.push({role:"tool", tool_call_id:"a",content:"existing data"});
+    expect(resumedMessages(input).slice(1)).toEqual([input.messages[1],{role:"tool",tool_call_id:"b",content:expect.stringContaining("not started")}]);
+    expect(() => resumedMessages({...input,inFlightTool:{id:"b",name:"write",argumentsHash:"b",mutating:false}})).toThrow(/uncertain/);
+    input.messages[1]!.tool_call_id = "b";
+    expect(() => resumedMessages(input)).toThrow(/associated/);
+  });
 });

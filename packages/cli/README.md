@@ -5,7 +5,7 @@ A Claude Code-style terminal session — transcript above, prompt below, `/` com
 a permission prompt, a `.motif/` directory behind it — whose tool set, prompt layout, parser and
 failure handling follow from what is measurably true about Motif-3.
 
-> **Choose your provider.** First launch offers [Infron](https://infron.ai) or
+> **Choose your provider.** New installations default to [OpenRouter](https://openrouter.ai/settings/keys). You can also choose [Infron](https://infron.ai) or
 > [Morphfactory (BETA)](https://cbt.morphfactory.io/console?view=keys).
 > Switch later with `/provider` or `/config`; each provider keeps its own API key.
 
@@ -20,18 +20,16 @@ npx motifcode                # choose a provider and enter its API key once, the
 Or `npm install -g motifcode` directly; either way `motif` (or `motifcode`) opens the session
 from any folder afterwards, with the key saved in `~/.motif/.env`.
 
-1. Create an API key at [Infron's dashboard](https://infron.ai/dashboard/apiKeys) or
-   [Morphfactory's console](https://cbt.morphfactory.io/console?view=keys).
-2. Run `motif`, choose the provider and paste its key. It is checked against the endpoint,
-   saved to `~/.motif/.env` (readable only by you), and never shown to the model. Use
-   `/provider` to switch, or `/login` and `/logout` to manage the selected provider's key.
-3. Outside a session, use `motif login --provider morphfactory` and
-   `motif doctor --provider morphfactory`. `--provider infron` selects Infron.
+1. Create a key for your provider. [OpenRouter keys](https://openrouter.ai/settings/keys) · [Infron keys](https://infron.ai/dashboard/apiKeys) · [Morphfactory keys](https://cbt.morphfactory.io/console?view=keys)
+2. Run `motif`, choose the provider, and paste its key. Use `/provider` to switch or `/login` and `/logout` to manage the selected provider's key.
+3. For a script, use `motif login --provider openrouter`, then `motif --provider openrouter -p "your question"`. To probe the model connection, run `motif doctor --provider openrouter`.
 
-The environment keys are `MOTIF_API_KEY` for Infron and `MOTIF_MORPHFACTORY_API_KEY`
-for Morphfactory. Use `--provider morphfactory` for a single invocation, or choose
-with `/provider` to save the selection. Explicit `--endpoint` and `--model` flags
-still override a provider preset.
+In an existing session, open `/provider` and choose OpenRouter to keep working with the same conversation. Enter the new key in the masked prompt, or press Esc to cancel the switch. Use `/status` to see the active endpoint.
+
+OpenRouter uses `OPENROUTER_API_KEY` with model `motif-technologies/motif-3`.
+Infron uses `MOTIF_API_KEY`, and Morphfactory uses `MOTIF_MORPHFACTORY_API_KEY`.
+Select either with `--provider infron` or `--provider morphfactory`. Explicit
+`--endpoint` and `--model` flags override the preset.
 
 ```bash
 motif                                   # interactive session in the current directory

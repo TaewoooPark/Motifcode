@@ -27,6 +27,54 @@ const chunk = (delta: Record<string, unknown>, extra: Record<string, unknown> = 
   ...extra,
 });
 
+describe.each([false, true])("text-completion reasoning (stream=%s)", (stream) => {
+  async function complete(choices: Record<string, unknown>[], raw = true) {
+    const deltas: unknown[] = [];
+    const transport = new HttpTransport({
+      endpoint: "https://openrouter.ai/api", model: "m",
+      fetchImpl: async () => stream
+        ? sse([...choices.map((choice) => ({ choices: [choice] })), "[DONE]"])
+        : new Response(JSON.stringify({ choices: [choices[0]] }), { headers: { "content-type": "application/json" } }),
+    });
+    const result = await transport.complete({
+      messages: [{ role: "user", content: "test" }], tools: [],
+      ...(raw ? { raw: true, prompt: "test" } : {}),
+      ...(stream ? { onDelta: (delta) => deltas.push(delta) } : {}),
+    });
+    return { result, deltas };
+  }
+
+  it("keeps choice-level reasoning out of the text and preserves the final answer", async () => {
+    const choices = stream
+      ? [{ text: "", reasoning: "first " }, { text: "", reasoning: "second" }, { text: "answer", reasoning: null, finish_reason: "stop" }]
+      : [{ text: "answer", reasoning: "first second", finish_reason: "stop" }];
+    const { result, deltas } = await complete(choices);
+    expect(result).toMatchObject({ content: "answer", rawText: "answer", reasoningContent: "first second", finishReason: "stop" });
+    if (stream) expect(deltas).toEqual([{ reasoning: "first " }, { reasoning: "second" }, { content: "answer" }]);
+  });
+
+  it.each([{}, { reasoning: null }, { reasoning: "" }])("preserves inline reasoning for unsplit raw completions (%j)", async (fields) => {
+    const { result } = await complete([{ ...fields, text: "inline</think>answer" }]);
+    expect(result.reasoningContent).toBeUndefined();
+    expect(result.rawText).toBe("inline</think>answer");
+  });
+
+  it("does not take completion-level metadata as evidence of a chat reasoning boundary", async () => {
+    const { result } = await complete([{
+      reasoning: "other metadata",
+      ...(stream ? { delta: { content: "chat" } } : { message: { content: "chat" } }),
+    }], false);
+    expect(result.reasoningContent).toBeUndefined();
+    expect(result.content).toBe("chat");
+  });
+
+  it("accepts the reasoning_content alias without duplicating an answer", async () => {
+    const { result } = await complete([{ text: "answer", reasoning: "", reasoning_content: "separate" }]);
+    expect(result.reasoningContent).toBe("separate");
+    expect(result.content).toBe("answer");
+  });
+});
+
 describe("the streaming transport", () => {
   it("hands out each piece and returns the assembled whole, tool calls joined by index", async () => {
     const seen: unknown[] = [];
@@ -162,5 +210,48 @@ describe("the loop's stream events", () => {
     expect(types.indexOf("content_delta")).toBeGreaterThan(types.lastIndexOf("stream"));
     const streamed = events.filter((e): e is Extract<LoopEvent, { type: "stream" }> => e.type === "stream");
     expect(streamed.map((e) => e.content ?? e.reasoning)).toEqual(["r1", "part ", "two"]);
+  });
+});
+
+describe.each([
+  ["https://openrouter.ai/api/v1", true],
+  ["https://llm.onerouter.pro", false],
+  ["https://api-cbt.morphfactory.io", false],
+  ["http://localhost:8189", false],
+  ["https://openrouter.ai/api/custom", false],
+  ["https://openrouter.ai/api/v1/v1", false],
+  ["https://openrouter.ai.example.org/api", false],
+] as const)("stream compatibility at %s", (endpoint, openRouter) => {
+  function complete(events: unknown[], raw = false) {
+    return new HttpTransport({ endpoint, model: "fixture", fetchImpl: async () => sse(events) }).complete({
+      messages: [], tools: [], ...(raw ? { raw: true, prompt: "fixture" } : {}), onDelta: () => {},
+    });
+  }
+  const write = chunk({ tool_calls: [{ index: 0, id: "w", function: { name: "write", arguments: "{}" } }] });
+  const finish = { choices: [{ delta: {}, finish_reason: "tool_calls" }] };
+
+  it("uses the endpoint's policy for unsealed native actions", async () => {
+    const response = complete([write]);
+    if (openRouter) await expect(response).rejects.toMatchObject({ kind: "network" });
+    else expect((await response).toolCalls).toHaveLength(1);
+  });
+
+  it("uses the endpoint's policy for torn events and changes after finish", async () => {
+    for (const events of [[write, "{bad", finish, "[DONE]"], [write, finish, chunk({ content: "after" }), "[DONE]"]]) {
+      const response = complete(events);
+      if (openRouter) await expect(response).rejects.toMatchObject({ kind: "network" });
+      else expect((await response).toolCalls).toHaveLength(1);
+    }
+  });
+
+  it("handles split reasoning on the text-completions route", async () => {
+    const choice = { choices: [{ text: "answer", reasoning: "separate", finish_reason: "stop" }] };
+    const streaming = await complete([choice, "[DONE]"], true);
+    const json = await new HttpTransport({ endpoint, model: "fixture", fetchImpl: async () => Response.json(choice) })
+      .complete({ messages: [], tools: [], raw: true, prompt: "fixture" });
+    for (const result of [streaming, json]) {
+      expect(result.content).toBe("answer");
+      expect(result.reasoningContent).toBe(openRouter ? "separate" : undefined);
+    }
   });
 });

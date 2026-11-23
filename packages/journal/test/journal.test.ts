@@ -11,7 +11,7 @@ import { mkdtempSync, readFileSync, writeFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { resumeBlock, runLoop, type LoopCheckpoint } from "@motifcode/core";
+import { PROVIDERS, resumeBlock, runLoop, type LoopCheckpoint } from "@motifcode/core";
 import { CORE_TOOLS } from "@motifcode/tools";
 import { ScriptedTransport, toolCallBody } from "@motifcode/replay";
 import {
@@ -293,6 +293,19 @@ describe("resume", () => {
   it("refuses a changed model", () => {
     const state = loadResume(interrupted().path);
     expect(checkResumable(state, { ...current, model: "something-else" })).toContain("Motif-3");
+  });
+
+  it.each(["infron", "morphfactory"] as const)("resumes the same Motif-3 across %s and OpenRouter model IDs", (provider) => {
+    const state = loadResume(interrupted().path);
+    state.header.model.id = PROVIDERS[provider].model;
+    state.header.serving.endpoint = PROVIDERS[provider].endpoint;
+    const target = { ...current, ...PROVIDERS.openrouter };
+    expect(checkResumable(state, target)).toBeNull();
+    expect(checkResumable(state, { ...target, systemHash: "different" })).toContain("system prompt changed");
+    expect(checkResumable(state, { ...target, endpoint: "https://example.com/api" })).toContain("recorded against model");
+    expect(checkResumable(state, { ...target, model: "motif-technologies/other" })).toContain("recorded against model");
+    state.header.serving.endpoint = "https://example.com/api";
+    expect(checkResumable(state, target)).toContain("recorded against model");
   });
 
   it("refuses to resume a finished session", () => {

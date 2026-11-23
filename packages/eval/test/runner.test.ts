@@ -249,13 +249,16 @@ describe("runner", () => {
     expect(existsSync(join(workRoot, "c--calc-1--1--0", "session.jsonl"))).toBe(true);
   });
 
-  it("hands the agent the endpoint credential through its environment", async () => {
+  it.each([
+    ["http://127.0.0.1:1", "MOTIF_API_KEY"],
+    ["https://openrouter.ai/api/v1", "OPENROUTER_API_KEY"],
+  ])("hands the %s credential to the agent through %s", async (endpoint, variable) => {
     // The campaign may have read the key from a `.env` the agents never see,
     // so it travels explicitly. Kept artifacts are the only way to look.
     const agent = fakeAgent(
-      `printf '%s' "\${MOTIF_API_KEY:-unset}" > "$cwd/key.txt"\n${SESSION_END("done")}`,
+      `printf '%s' "\${${variable}:-unset}" > "$cwd/key.txt"\n${SESSION_END("done")}`,
     );
-    const row = await runRow({ ...options(agent, true), apiKey: "sk-campaign" }, { ...planned, seed: 7 }, instance());
+    const row = await runRow({ ...options(agent, true), endpoint, apiKey: "sk-campaign" }, { ...planned, seed: 7 }, instance());
     expect(row.status).toBe("completed");
     const rowDir = join(workRoot, "c--calc-1--7--0");
     expect(readFileSync(join(rowDir, "checkout", "key.txt"), "utf8")).toBe("sk-campaign");

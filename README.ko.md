@@ -30,7 +30,7 @@
   <a href="https://discord.gg/5d99wCtzc"><img src="https://img.shields.io/badge/Join_OpenLab-Discord-5865F2?style=for-the-badge&amp;logo=discord&amp;logoColor=white&amp;labelColor=000000" alt="OpenLab Discord 참여하기"></a>
 </p>
 
-> **Provider를 선택하세요.** 처음 실행하면 [Infron](https://infron.ai) 또는
+> **Provider를 선택하세요.** 새 설치의 기본값은 [OpenRouter](https://openrouter.ai/settings/keys)입니다. [Infron](https://infron.ai)이나
 > [Morphfactory (BETA)](https://cbt.morphfactory.io/console?view=keys)를 선택할 수 있습니다.
 > 이후에는 `/provider`나 `/config`에서 바꾸며, 각 provider의 API 키는 따로 보관합니다.
 
@@ -122,7 +122,7 @@ cd your-project
 npx motifcode          # 첫 실행: 키를 물어본 뒤 `motif` 명령 설치까지 해 줍니다
 ```
 
-첫 세션에서 **Infron** 또는 **Morphfactory (BETA)** 를 선택하고, API 키를 한 번만 입력해 `~/.motif/.env`에 저장합니다. `npx`는
+첫 세션에서 **OpenRouter**(기본값), **Infron**, **Morphfactory (BETA)** 중 하나를 선택하고, API 키를 한 번만 입력해 `~/.motif/.env`에 저장합니다. `npx`는
 명령을 남기지 않으므로 이어서 `npm install -g motifcode`를 대신 실행해 줄지
 물어봅니다. 예라고 하면 그다음부터는 어느 폴더에서든 `motif`(또는 `motifcode`)로
 세션을 엽니다. 처음부터 `npm install -g motifcode`를 직접 해도 같은 결과입니다.
@@ -388,34 +388,28 @@ motif plugins connect library-docs
 
 ## Provider 선택과 API 키 발급
 
-처음 실행하면 Infron 또는 Morphfactory (BETA)를 선택합니다. 기존 사용자의 연결은
-유지되며, `/provider`나 `/config`의 provider 항목에서 바꿀 수 있습니다. 두 provider
-모두 `motif/motif-3` 모델과 OpenAI 호환 엔드포인트를 사용합니다.
+새로 설치하면 OpenRouter가 첫 번째 기본 옵션입니다. 저장된 연결은 `/provider`나
+`/config`의 provider 항목에서 바꿀 수 있습니다. 각 서비스의 API 키는 따로 보관합니다.
 
-| provider | base URL | API 키 환경 변수 |
-|---|---|---|
-| Infron | `https://llm.onerouter.pro/v1` | `MOTIF_API_KEY` |
-| Morphfactory (BETA) | `https://api-cbt.morphfactory.io/v1` | `MOTIF_MORPHFACTORY_API_KEY` |
+| Provider | Base URL | 모델 ID | API 키 환경 변수 |
+|---|---|---|---|
+| OpenRouter (기본값) | `https://openrouter.ai/api/v1` | `motif-technologies/motif-3` | `OPENROUTER_API_KEY` |
+| Infron | `https://llm.onerouter.pro/v1` | `motif/motif-3` | `MOTIF_API_KEY` |
+| Morphfactory (BETA) | `https://api-cbt.morphfactory.io/v1` | `motif/motif-3` | `MOTIF_MORPHFACTORY_API_KEY` |
 
-1. [Infron API Keys 대시보드](https://infron.ai/dashboard/apiKeys) 또는
-   [Morphfactory 콘솔](https://cbt.morphfactory.io/console?view=keys)에서 키를 발급합니다.
-2. `motif`를 실행해 provider를 선택하고 키를 붙여 넣습니다. 토큰 하나짜리 요청으로
-   확인한 뒤 본인만 읽을 수 있는 `~/.motif/.env`에 저장합니다. 키는 따로 보관하므로
-   provider를 바꾸거나 `/logout`을 해도 다른 provider의 키는 유지됩니다.
-3. 스크립트에서는 `motif login --provider morphfactory`로 로그인하고
-   `motif --provider morphfactory -p "질문"`으로 실행합니다. `--provider infron`은
-   Infron을 선택하며, 명시한 `--endpoint`와 `--model`이 preset보다 우선합니다.
-4. `motif doctor --provider morphfactory`로 연결, 도구 호출, 추론과 프리픽스 캐시를
-   확인합니다. Infron 계정 잔액은 Infron에서만 지원하며, 로컬 세션 토큰 사용량은
-   두 provider 모두 볼 수 있습니다.
+1. 사용할 서비스에서 키를 발급합니다. [OpenRouter 키 관리](https://openrouter.ai/settings/keys) · [Infron 키 관리](https://infron.ai/dashboard/apiKeys) · [Morphfactory 콘솔](https://cbt.morphfactory.io/console?view=keys)
+2. `motif`를 실행해 provider를 선택하고 키를 붙여 넣습니다. 확인된 키는 사용자 프로필의 `~/.motif/.env`에 저장됩니다. Provider를 바꾸거나 `/logout`을 해도 다른 서비스의 키는 유지됩니다.
+3. 스크립트에서는 `motif login --provider openrouter`로 로그인하고 `motif --provider openrouter -p "질문"`으로 실행합니다. 다른 provider 이름은 `infron`과 `morphfactory`입니다. 직접 지정한 `--endpoint`와 `--model`이 preset보다 우선합니다.
+4. `motif doctor --provider openrouter`로 모델 연결과 도구 호출을 점검할 수 있습니다. 이 점검에는 모델 토큰이 사용됩니다. 로컬 세션 사용량은 세 provider 모두에서, 계정 잔액은 Infron에서 확인할 수 있습니다.
 
-환경 변수나 프로젝트 `.env`도 지원하며 `--env-file <경로>`는 해당 파일을 먼저 읽습니다.
-환경 파일에서 provider를 지정하려면 `MOTIF_ENDPOINT`를 설정합니다. 별도 설정이 없으면
-기존과 같이 Infron을 사용합니다.
+**기존 설치에서 전환하기.** `npm install -g motifcode@latest`로 업데이트하고 `/provider`에서 OpenRouter를 선택하세요. 새 키가 필요하면 마스킹된 입력창에 붙여 넣으세요. Esc를 누르면 전환을 취소합니다. 같은 터미널에서 대화를 이어갈 수 있고, 프로젝트를 다시 열 때는 `motif --continue`를 쓸 수 있습니다. 현재 연결은 `/status`에서 확인하세요. 다음 실행에서는 명시한 엔드포인트 플래그, 환경 변수, 신뢰한 프로젝트의 설정이 사용자 기본값보다 우선합니다.
 
-`.env` 파일에서는 `MOTIF_*` 키만 읽고, 어느 것도 환경 변수로 내보내지 않으며, 무엇이든
-실행되기 전에 하네스 자신의 환경에서도 키를 지웁니다. 모델의 `bash`도, 프로젝트 훅도
-키를 볼 수 없습니다.
+OpenRouter에는 별도의 스트림 처리, 네이티브 도구 호출과 결과의 짝짓기, 중단된 읽기 복구를 적용합니다. Infron·Morphfactory·사용자 지정 엔드포인트는 기존 처리 방식을 사용합니다. 공식 프리셋은 `motif-technologies/motif-3`에 대한 OpenRouter 라우팅을 따릅니다.
+
+환경 변수나 프로젝트 `.env`에 provider 키를 지정할 수도 있습니다. 엔드포인트는
+`MOTIF_ENDPOINT`로 지정하며 `--env-file <경로>`는 해당 파일을 먼저 읽습니다.
+기존에 Infron 또는 Morphfactory 키 하나만 설정해 사용했다면 해당 서비스 연결을 유지합니다.
+CLI는 모델 키를 자식 프로세스 환경에서 제거합니다.
 
 ---
 
@@ -462,7 +456,7 @@ Esc, `q`, `Ctrl+O`로 닫으면 입력 중이던 문장과 스크롤 기록으�
 모델에 전달되는 도구 데이터는 이 표시 방식 때문에 잘리지 않습니다.
 항상 전체 출력을 표시하려면 `--verbose` 또는 `/config verbose true`를 사용합니다.
 
-최초 로그인 때 입력한 키로 Infron 잔액이 자동 연결됩니다. Usage에서 `r`로
+Infron을 선택하면 저장된 Infron 키로 잔액을 조회합니다. Usage에서 `r`로
 새로고침할 수 있습니다. 계정 잔액과 로컬 기록의 요청 비용은 별도로 표시하며,
 보고되지 않았거나 기록에 없는 비용을 추정해서 더하지 않습니다.
 
@@ -515,13 +509,13 @@ Esc, `q`, `Ctrl+O`로 닫으면 입력 중이던 문장과 스크롤 기록으�
 
 | Motif-3에 대한 사실 | 출처 | 여기서 강제되는 설계 |
 |---|---|---|
-| 채팅 템플릿이 도구 블록을 시스템 프롬프트 **앞에**, 같은 턴에 렌더링하고, 도구 두 개의 순서만 바꿔도 프리픽스가 약 24%만 남는다 | `chat_template.jinja`; `template.test.ts`에서 측정 | 고정된 정규 순서의 도구 아홉 개(`done, bash, read, write, apply_patch, term, skill, task, mcp`); 서브에이전트는 그 *앞부분*만 받음; 요청당 3k 토큰 미만의 프롬프트(MCP 도구가 없는 1회 실행은 약 2k), 그중 90~98%가 엔드포인트 캐시 적중 |
-| 중간 추론은 도구가 등록돼 있을 때만 렌더링되고, 호스팅 라우터는 돌려보낸 `reasoning_content`를 실제로 프롬프트에 렌더링한다 | 템플릿, 측정; 엔드포인트, 2026-09-20 | 모든 채널에서 도구를 등록하고, 모델의 추론을 매 턴 되돌려 보냄 |
+| 채팅 템플릿은 시스템 프롬프트 앞에 도구를 배치한다. 앞쪽 도구가 바뀌면 재사용할 수 있는 프리픽스가 짧아진다. | `chat_template.jinja`, 엔드포인트의 캐시 사용량 | 아홉 도구의 순서를 고정하고 서브에이전트에는 그 앞부분을 준다. 실제 적중량은 현재 제공자와 입력 길이에서 보고된 캐시 토큰으로 확인한다. |
+| 도구가 등록되면 로컬 템플릿은 중간 추론을 포함한다. 기존 Infron 벤치마크에서는 호스팅 프롬프트에서도 관찰됐다. | 템플릿 검사, Infron 2026-09-20 측정 | 클라이언트는 추론을 재전송한다. OpenRouter·KT 실험에서는 일반 도구 결과와 사용자 메시지에서 작업 상태를 복원했다. 다음 턴에 필요한 ID, 결정, 결과는 이 메시지들에 남긴다. |
 | `<tool_call>` 안의 JSON이 자주 깨지고(셸 `\$`, 정규식 `\s`), 호스팅 엔드포인트는 가끔 태그 없는 맨 호출을 내보낸다 | 벤더의 vLLM 파서; 엔드포인트, 측정 | 서버 파서 뒤의 클라이언트 수리 사다리, 맨 호출 복구, 깨짐 예산, 빌드를 실패시키는 린터로 강제하는 닫힌 도구 스키마 |
 | 떨어진 도구 호출과 최종 답변이 겉으로는 같다 | 벤더 파서 주석; 캠페인에서 측정 | `done`은 도구이고, 벤치마크 모드에서는 행동 없는 턴을 작업 종료가 아니라 되돌려 줌 |
 | SWE-bench Verified 76.2는 `bash` 도구 하나로, Terminal-Bench 2.1 74.9는 지속되는 tmux 세션에서 나왔다 | mini-SWE-agent 설정; Terminus 2 | 얇은 도구 집합이 기준선이고, `bash` 옆에 `term` 도구 |
 | 호스팅 엔드포인트에서 추론 스텝 하나가 200~300초 걸린다 | 측정 | 전송 계층에 300초 헤더 타임아웃을 두지 않음; 429는 `Retry-After` 뒤에 재시도 |
-| 호스팅 엔드포인트에 `/v1/completions`가 없다 | `motif doctor` | 거기서는 네이티브 `toolcall` 채널만 동작; `object`·`raw` 채널과 프루닝 툴킷은 completions 경로가 있는 로컬 서버가 필요(`--experimental-channel`) |
+| 기존 벤치마크의 Infron은 `/v1/completions`를 제공하지 않았다. 엔드포인트마다 응답 형식이 다를 수 있다. | `motif doctor` | 기본 채널은 네이티브 `toolcall`이다. 실험용 `object`나 `raw`는 `motif doctor`로 해당 엔드포인트를 확인하고 `--experimental-channel`로 선택한다. |
 
 어느 채널이든 모델 자신의 본문은 대화 기록에 원문 그대로 남기고, 루프는 모델이 실제로
 만들어 내는 결함(잘못된 이스케이프, 잘린 호출, 파싱 불가능한 본문, 빈 턴, 죽은 서버)을

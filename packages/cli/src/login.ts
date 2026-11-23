@@ -1,10 +1,10 @@
 /**
  * Signing in: an API key typed once, checked, and kept.
  *
- * The hosted endpoint needs a credential, and "put MOTIF_API_KEY in a .env
+ * The hosted endpoint needs a credential, and "put an API key in a .env
  * file" is the kind of instruction that ends a first run before it starts.
  * Claude Code and Codex both open with a login the first time; this is the
- * same shape without a browser — Infron hands out a key on its dashboard,
+ * same shape without a browser — the provider issues a key on its dashboard,
  * the person pastes it here, and it is verified against the endpoint before
  * anything is written. A key that would only fail at the first task is not a
  * login, it is a delayed error.
@@ -15,10 +15,11 @@
  */
 
 import { homedir } from "node:os";
-import { ENV_API_KEY, ENV_MORPHFACTORY_API_KEY, PROVIDERS, normalizeEndpoint, type ProviderId } from "@motifcode/core";
+import { isAbsolute, relative, sep } from "node:path";
+import { PROVIDERS, normalizeEndpoint, providerForEndpoint, type ProviderId } from "@motifcode/core";
 
 /** Where a key comes from, for the prompt. */
-export const KEY_PAGE = PROVIDERS.infron.keyPage;
+export const KEY_PAGE = PROVIDERS.openrouter.keyPage;
 
 export type VerifyResult = { ok: true } | { ok: false; reason: string };
 
@@ -33,7 +34,8 @@ export interface VerifyOptions {
 /**
  * Ask the endpoint whether it accepts the key.
  *
- * A one-token completion against the configured model, not the model
+ * OpenRouter offers an authenticated key-info endpoint. Other servers use
+ * a one-token completion against the configured model, not the model
  * listing: on a router the listing is public, so a wrong key reads it as
  * well as a right one, and a login that said "signed in" to a bad key
  * would be worse than no login. The completion is the smallest request that
@@ -45,7 +47,13 @@ export async function verifyApiKey(opts: VerifyOptions): Promise<VerifyResult> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 20_000);
   try {
-    const res = await fetchImpl(`${endpoint}/v1/chat/completions`, {
+    const openRouter = providerForEndpoint(endpoint) === "openrouter";
+    const res = openRouter ? await fetchImpl(`${endpoint}/v1/key`, {
+      method: "GET",
+      headers: { authorization: `Bearer ${opts.apiKey}`, accept: "application/json" },
+      redirect: "error",
+      signal: controller.signal,
+    }) : await fetchImpl(`${endpoint}/v1/chat/completions`, {
       method: "POST",
       headers: { authorization: `Bearer ${opts.apiKey}`, accept: "application/json", "content-type": "application/json" },
       body: JSON.stringify({ model: opts.model, messages: [{ role: "user", content: "ping" }], max_tokens: 1, stream: false }),
@@ -57,6 +65,7 @@ export async function verifyApiKey(opts: VerifyOptions): Promise<VerifyResult> {
     }
     if (!res.ok) {
       const message = await serverMessage(res);
+      if (openRouter) return { ok: false, reason: `OpenRouter could not verify this key (HTTP ${res.status})` };
       return { ok: false, reason: `${endpoint} answered ${res.status} for ${opts.model}${message ? `: ${message}` : ""} — the key may be fine; check the model id` };
     }
     return { ok: true };
@@ -83,26 +92,31 @@ async function serverMessage(res: Response): Promise<string> {
  * What was pasted, as a key.
  *
  * People paste the whole line from a dashboard or a `.env`: quotes, a
- * `MOTIF_API_KEY=` or `MOTIF_MORPHFACTORY_API_KEY=` prefix, an `export`, a
+ * provider-specific variable name, an `export`, a
  * trailing newline. All of that is the key's packaging, not the key.
  */
-export function normaliseKeyInput(raw: string): string {
+export function normaliseKeyInput(raw: string, provider?: ProviderId): string {
   let s = raw.trim();
-  s = s.replace(new RegExp(`^(?:export\\s+)?(?:${ENV_API_KEY}|${ENV_MORPHFACTORY_API_KEY})\\s*=\\s*`), "");
+  const assignment = /^(?:export\s+)?([A-Z_][A-Z_0-9]*)\s*=\s*/.exec(s);
+  if (assignment && Object.values(PROVIDERS).some(p => p.apiKeyEnv === assignment[1])) {
+    if (provider && assignment[1] !== PROVIDERS[provider].apiKeyEnv) {
+      throw new Error(`This assignment is for ${assignment[1]}. Use ${PROVIDERS[provider].apiKeyEnv} for ${PROVIDERS[provider].label}.`);
+    }
+    s = s.slice(assignment[0].length);
+  }
   if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) s = s.slice(1, -1);
   return s.trim();
 }
 
+export function displayHomePath(path: string, home = homedir()): string {
+  const local = relative(home, path);
+  return local && local !== ".." && !local.startsWith(".." + sep) && !isAbsolute(local)
+    ? "~/" + local.split(sep).join("/") : path;
+}
+
 /** The lines the login prompt shows above the input. */
-export function loginLines(envPath: string, home = homedir(), provider: ProviderId = "infron"): string[] {
-  const shown = envPath.startsWith(home + "/") ? `~${envPath.slice(home.length)}` : envPath;
-  // Short lines: the box hard-wraps at its width, and a URL or a path cut
-  // mid-word cannot be copied.
-  return [
-    `Get one at ${PROVIDERS[provider].keyPage}`,
-    `The key is checked with the endpoint and saved to ${shown},`,
-    "readable only by you and never shown to the model.",
-  ];
+export function loginLines(envPath: string, home = homedir(), provider: ProviderId = "openrouter"): string[] {
+  return ["Get an API key", PROVIDERS[provider].keyPage, "Verified keys are saved to", displayHomePath(envPath, home)];
 }
 
 /**
