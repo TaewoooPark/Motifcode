@@ -36,6 +36,11 @@ export interface RepoState {
   worktreeHash?: string;
 }
 
+export interface CheckReceipt {
+  digest: string;
+  status: "pass" | "fail" | "unavailable";
+}
+
 export interface LoopCheckpoint {
   scopeId: string;
   /** Journal sequence number this checkpoint follows. */
@@ -51,6 +56,10 @@ export interface LoopCheckpoint {
   replyRepairs?: number;
   /** Normalised summary of a `done` awaiting confirmation, or null. */
   pendingDone: string | null;
+  /** Trusted check results for the declared task inputs. */
+  requiredOutputProof?: Record<string, CheckReceipt>;
+  taskChecksKey?: string;
+  verifiedProgress?: number;
   /**
    * Next call id for this scope.
    *
@@ -138,4 +147,38 @@ export function resumeBlock(
     return { kind: "execution_uncertain", tool: inflight.name, id: inflight.id };
   }
   return null;
+}
+
+/** Reconstruct the missing observations only where the journal establishes the outcome. */
+export function resumedMessages(point: LoopCheckpoint): Message[] {
+  const block = resumeBlock(point, null);
+  if (block?.kind === "execution_uncertain") {
+    throw new Error(`Cannot resume: the outcome of ${block.tool} (${block.id}) is uncertain.`);
+  }
+  const messages = [...point.messages];
+  if (point.currentChannel !== "toolcall") return messages;
+  let last = messages.length - 1;
+  while (last >= 0 && messages[last]?.role === "tool") last--;
+  const calls = messages[last]?.role === "assistant" ? messages[last]?.tool_calls : undefined;
+  if (!calls?.length) {
+    if (point.inFlightTool) throw new Error("Cannot resume: the recorded intent has no matching native tool batch.");
+    return messages;
+  }
+  const received = messages.slice(last + 1);
+  const ids = calls.map(c => c.id);
+  if (ids.some(id => typeof id !== "string" || !id) || new Set(ids).size !== ids.length ||
+      received.some((r, i) => r.tool_call_id !== ids[i]) || received.length > ids.length) {
+    throw new Error("Cannot resume: tool observations cannot be associated with the recorded batch.");
+  }
+  const inflight = point.inFlightTool;
+  const next = calls[received.length];
+  if (inflight && (next?.id !== inflight.id || (next.function?.name ?? next.name) !== inflight.name)) {
+    throw new Error("Cannot resume: the recorded tool intent does not match the outstanding call.");
+  }
+  for (const call of calls.slice(received.length)) {
+    messages.push({ role: "tool", tool_call_id: call.id!, content: call.id === inflight?.id
+      ? "Interrupted read-only tool. Its result is unavailable. Read again if needed."
+      : "This advertised tool was not started before the interruption. Decide whether it is still needed." });
+  }
+  return messages;
 }

@@ -76,6 +76,7 @@ import { commandOnPath, ranFromNpx } from "./install.js";
 import { normaliseKeyInput, readSecret, verifyApiKey } from "./login.js";
 import { doctor, formatChecks, worstState } from "./doctor.js";
 import { ToolExecutor } from "./executor.js";
+import { loadTaskChecks } from "./task-checks.js";
 import { policyForAgent } from "./policy.js";
 import { buildAgentPrompt, buildSystemPrompt } from "./prompt.js";
 import { loadMcpConfig, listMcpPresets, McpSession, McpAuthBroker, resolveServerConfig } from "@motifcode/mcp";
@@ -434,6 +435,7 @@ Flags
   --seed <n>                sampling seed, passed to the server
   --cwd <path>              working directory
   --journal <path>          write the session record here instead of .motif/sessions
+  --task-checks <json>      user-declared artifact checks and progress milestones for this task
   --interactive             open the prompt after the task, or with no task at all
   --continue                open the prompt with the most recent conversation here loaded
   --thinking                show the model's reasoning in the transcript
@@ -944,6 +946,17 @@ async function main(): Promise<number> {
   const schemaHash = toolSchemaHash(activeTools);
   const promptHash = systemPromptHash(systemFor(channel));
   const printOnly = args.flags["print"] === true || args.flags["p"] === true;
+  if (args.flags["task-checks"] !== undefined && !flagStr(args.flags, "task-checks", "").trim()) {
+    throw new UsageError("--task-checks needs a manifest path.");
+  }
+  const manifest = flagStr(args.flags, "task-checks", "");
+  if (manifest && tty && (wantsChat || (!resumeFrom && !args.rest.join(" ").trim()))) {
+    throw new UsageError("--task-checks requires a task, print task, or resumed task session.");
+  }
+  const taskChecks = manifest ? await loadTaskChecks(cwd, manifest) : undefined;
+  if (resumeFrom && resumeFrom.checkpoint?.taskChecksKey !== taskChecks?.key) {
+    throw new UsageError("Cannot resume: supply the same --task-checks manifest for this session.");
+  }
   const abort = new AbortController();
   let stopInteractive: (() => void) | undefined;
   const stop = (signal: NodeJS.Signals): void => {
@@ -1076,6 +1089,7 @@ async function main(): Promise<number> {
     const expanded = expandSkillInput(task, { cwd, skills, automatic: activeToolNames.includes("skill"), slash: !slash || !findCommand(slash.name) });
     if (expanded.errors.length) { process.stderr.write(expanded.errors.join("\n") + "\n"); return 2; }
     task = expanded.task;
+    if (taskChecks?.instructions) task += "\n\n" + taskChecks.instructions;
   }
 
   // A one-shot task or a print against the hosted endpoint needs the key as
@@ -1097,6 +1111,7 @@ async function main(): Promise<number> {
     // the task and is written to stdout, nothing else is. For pipes.
     const transport = new HttpTransport({ endpoint, model, ...(sessionKey !== undefined ? { apiKey: sessionKey } : {}) });
     const executor = new ToolExecutor({
+      ...(taskChecks ? { verifyBash: taskChecks.verifyBash } : {}),
       cwd,
       hooks,
       skills,
@@ -1108,12 +1123,13 @@ async function main(): Promise<number> {
       const result = await runLoop({
         transport,
         tools: activeTools,
-        system: (ch) => buildSystemPrompt({ mode: "chat", channel: ch, tools: activeTools, skills, agents, ...(projectNotes !== undefined ? { projectNotes } : {}), cwd }),
+        system: (ch) => buildSystemPrompt({ mode: taskChecks ? "task" : "chat", channel: ch, tools: activeTools, skills, agents, ...(projectNotes !== undefined ? { projectNotes } : {}), cwd }),
         userTask: task,
         context: mcpConnected ? await mcp.prepare(discoveryTask, abort.signal) : undefined,
         replyRecovery: (content) => mcp.replyRecovery(content),
         signal: abort.signal,
         executor,
+        ...taskChecks?.options,
         emit: (e) => {
           if (e.type === "notice" && e.level === "error") process.stderr.write(`${e.text}\n`);
         },
@@ -1125,8 +1141,8 @@ async function main(): Promise<number> {
         ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
         ...(seed !== undefined ? { seed } : {}),
         ...(resumeFrom?.checkpoint ? { resume: resumeFrom.checkpoint } : {}),
-        replyEnds: true,
-        confirmDone: false,
+        replyEnds: !taskChecks,
+        confirmDone: !!taskChecks,
       });
       if (result.summary) process.stdout.write(result.summary.replace(/\s+$/, "") + "\n");
       if (result.reason !== "done") process.stderr.write(`ended: ${result.reason}\n`);
@@ -1200,6 +1216,7 @@ async function main(): Promise<number> {
   );
 
   const executor = new ToolExecutor({
+    ...(taskChecks ? { verifyBash: taskChecks.verifyBash } : {}),
     cwd,
     hooks,
     skills,
@@ -1319,6 +1336,7 @@ async function main(): Promise<number> {
       replyRecovery: (content) => mcp.replyRecovery(content),
       signal: abort.signal,
       executor,
+      ...taskChecks?.options,
       emit,
       onCheckpoint: (state) => { if (!abort.signal.aborted) rootCheckpoint(state); },
       lifecycle: async (event, context) => {

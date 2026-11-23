@@ -739,10 +739,12 @@ describe("history on the native channel", () => {
     const second = transport.seen[1]!.messages;
     const assistant = second.find((m) => m.role === "assistant")!;
     expect(assistant.tool_calls?.[0]?.function?.name).toBe("bash");
-    // Then the refusal, as a user turn, and no tool result — nothing ran.
+    // The tool-role closure associates the refusal with the rejected call.
     expect(second[second.length - 1]!.role).toBe("user");
     expect(String(second[second.length - 1]!.content)).toContain("None of the actions");
-    expect(second.some((m) => m.role === "tool")).toBe(false);
+    expect(second.find((m) => m.role === "tool")).toMatchObject({
+      tool_call_id: assistant.tool_calls![0]!.id, content: expect.stringContaining("without executing"),
+    });
   });
 
   it("shows the done proposal the confirmation challenge refers to", async () => {
@@ -791,9 +793,9 @@ describe("continuing a conversation", () => {
       emit,
     });
     const roles = second.seen[0]!.messages.map((m) => m.role);
-    expect(roles).toEqual(["system", "user", "assistant", "user", "assistant", "user"]);
+    expect(roles).toEqual(["system", "user", "assistant", "tool", "user", "assistant", "tool", "user"]);
     expect(second.seen[0]!.messages[1]!.content).toBe(TASK);
-    expect(second.seen[0]!.messages[5]!.content).toBe("and now this");
+    expect(second.seen[0]!.messages[7]!.content).toBe("and now this");
     expect(b.transcript.length).toBeGreaterThan(a.transcript.length);
   });
 
@@ -805,7 +807,8 @@ describe("continuing a conversation", () => {
     const checkpoints: { messages: { role: string }[] }[] = [];
     const transport = new ScriptedTransport([doneBody("s"), doneBody("s", { confirm: true })]);
     const r = await runLoop({ ...base, transport, executor: okExecutor, emit, onCheckpoint: (c) => checkpoints.push(c) });
-    const last = r.transcript[r.transcript.length - 1]!;
+    const last = r.transcript[r.transcript.length - 2]!;
+    expect(r.transcript.at(-1)).toMatchObject({ role: "tool", tool_call_id: last.tool_calls![0]!.id, content: "Completion accepted." });
     expect(last.role).toBe("assistant");
     expect(last.tool_calls?.[0]?.function).toEqual({ name: "done", arguments: { summary: "s", confirm: true } });
     expect(checkpoints[checkpoints.length - 1]!.messages.length).toBe(r.transcript.length);
@@ -875,7 +878,8 @@ describe("the conversational ending", () => {
     const r = await runLoop({ ...base, transport, executor: okExecutor, emit, confirmDone: false });
     expect(r.reason).toBe("done");
     expect(r.summary).toBe("finished");
-    const last = r.transcript[r.transcript.length - 1]!;
+    expect(r.transcript.at(-1)?.role).toBe("tool");
+    const last = r.transcript[r.transcript.length - 2]!;
     expect(last.tool_calls?.[0]?.function).toEqual({ name: "done", arguments: { summary: "finished" } });
   });
 });
