@@ -54,11 +54,11 @@ import {
   PROTOCOL_VERSION,
   isMutating,
   resumedMessages,
-  type CheckReceipt,
   type LoopCheckpoint,
   type RepoState,
 } from "./checkpoint.js";
 import type { EventSink, LoopEvent, SessionEndReason, ToolInvocation } from "./events.js";
+import { isOpenRouterTransportEndpoint } from "./config.js";
 import { Session } from "./session.js";
 import { TransportError, backoffDelay, sleep, type Transport } from "./transport.js";
 
@@ -67,7 +67,6 @@ export interface ToolResult {
   output: string;
   /** The producer already bounded this complete result (MCP envelope or skill instructions). */
   bounded?: boolean;
-  requiredOutputReceipt?: CheckReceipt & { id: string };
 }
 
 export interface Executor {
@@ -119,12 +118,6 @@ export interface LoopOptions {
   /** Complete runtime data re-appended when a restart drops earlier history. Defaults to `context`. */
   contextOnRestart?: string;
   executor: Executor;
-  /** Host-declared checks. Only the executor can issue a receipt. */
-  requiredOutputVerifier?: { ids: readonly string[]; digest(id: string): string | undefined | Promise<string | undefined> };
-  /** Fingerprint of the owner-declared contract, preserved across resume. */
-  taskChecksKey?: string;
-  /** Number of externally verified milestones completed. Unavailable evidence never resets a guard. */
-  readProgress?: () => number | undefined | Promise<number | undefined>;
   emit: EventSink;
   channel?: ChannelId;
   channelPolicy?: ChannelPolicy;
@@ -357,6 +350,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
 
   if (opts.userTask.trim() === "") throw new EmptyTaskError();
 
+  const openRouter = isOpenRouterTransportEndpoint(transport.endpoint);
   const resume = opts.resume;
   const scopeId = opts.scopeId ?? resume?.scopeId ?? "root";
   const repo: RepoState = opts.repo ?? resume?.repo ?? { cwd: process.cwd() };
@@ -373,10 +367,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
     tools,
     initialMessages: [...(opts.history ?? []), { role: "user", content: opts.userTask }],
   });
-  if (resume && opts.taskChecksKey !== resume.taskChecksKey) {
-    throw new Error("Cannot resume: supply the same task checks that were declared for this session.");
-  }
-  if (resume) session.restoreMessages(resumedMessages(resume));
+  if (resume) session.restoreMessages(openRouter ? resumedMessages(resume) : resume.messages);
   if (opts.context) session.append({ role: "user", content: opts.context });
   const restartContext = opts.contextOnRestart ?? opts.context;
   const budget = resume ? BreakageBudget.restore(resume.breakage) : new BreakageBudget();
@@ -416,9 +407,6 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
   let consecutiveNoAction = 0;
   let lastObservation = "";
   let pendingDone: string | null = resume?.pendingDone ?? null;
-  const verifier = opts.requiredOutputVerifier;
-  const proof = new Map(Object.entries(resume?.requiredOutputProof ?? {}));
-  let verifiedProgress = resume?.verifiedProgress ?? await opts.readProgress?.();
   let transportErrors = resume?.transportErrors ?? 0;
   let callSequence = resume?.nextCallSequence ?? 1;
   let seq = resume?.afterSeq ?? 0;
@@ -451,9 +439,6 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
       repairsThisTask,
       replyRepairs,
       pendingDone,
-      ...(verifier ? { requiredOutputProof: Object.fromEntries(proof) } : {}),
-      ...(opts.taskChecksKey ? { taskChecksKey: opts.taskChecksKey } : {}),
-      ...(verifiedProgress !== undefined ? { verifiedProgress } : {}),
       nextCallSequence: callSequence,
       transportErrors,
       repo,
@@ -693,7 +678,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
      */
     const handBack = (text: string, calls?: readonly SerializedCall[]): void => {
       session.appendAll(codec.serializeAssistant(split.content, split.reasoning, parsed, calls));
-      if (channel === "toolcall" && calls) {
+      if (openRouter && channel === "toolcall" && calls) {
         for (const call of calls) {
           session.appendAll(codec.serializeObservation({
             callId: call.id, name: call.name, arguments: call.arguments,
@@ -748,7 +733,7 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
       // A turn in which the server sent no text at all is not an answer:
       // nothing reached the person, and in practice it is the model stopping
       // mid-thought. Hand it back.
-      if (replyEnds && !verifier?.ids.length && !leaked && response.finishReason !== "length" && response.content.trim() !== "") {
+      if (replyEnds && !leaked && response.finishReason !== "length" && response.content.trim() !== "") {
         session.appendAll(codec.serializeAssistant(split.content, split.reasoning, parsed));
         checkpoint();
         const reply = split.content.trim();
@@ -814,12 +799,12 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
 
     // ---- the action gate -------------------------------------------------
     const refusals: Refusal[] = [];
-    if (parsed.truncated || parsed.unrecoverable.length > 0 || (parsed.invalidArguments?.length ?? 0) > 0) {
+    if (openRouter && channel === "toolcall" &&
+        (parsed.truncated || parsed.unrecoverable.length > 0 || (parsed.invalidArguments?.length ?? 0) > 0)) {
       // A parser may recover some siblings while reporting another as broken.
       // Repeating such a batch after executing its valid prefix can repeat edits.
       refusals.push({ kind: "incomplete_payload", detail: "part of the action batch could not be decoded; resend the entire batch" });
     }
-
 
     // A response that hit the token cap is missing its tail by definition. The
     // bracket balancer will still produce valid JSON from what arrived, and a
@@ -896,28 +881,9 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
     const doneAction = doneActions[0];
     if (doneAction) {
       const doneCalls = callsOf([doneAction]);
-      if (verifier) {
-        let status: string | undefined;
-        let outstanding: string | undefined;
-        for (const id of verifier.ids) {
-          const last = proof.get(id);
-          const digest = await verifier.digest(id);
-          status = !last ? "missing" : digest === undefined ? "unavailable" : last.digest !== digest ? "stale" : last.status;
-          if (status !== "pass") { outstanding = id; break; }
-        }
-        if (outstanding !== undefined) {
-          pendingDone = null;
-          const feedback = "Required output check " + outstanding + " is " + status +
-            ". Fix a failed result, run that configured check against the current files, then propose completion.";
-          handBack(feedback, doneCalls);
-          emit({ type: "notice", level: "warn", text: feedback });
-          checkpoint();
-          continue;
-        }
-      }
       const accept = (): LoopResult => {
         session.appendAll(codec.serializeAssistant(split.content, split.reasoning, parsed, doneCalls));
-        if (channel === "toolcall") {
+        if (openRouter && channel === "toolcall") {
           for (const call of doneCalls) session.appendAll(codec.serializeObservation({
             callId: call.id, name: call.name, arguments: call.arguments, ok: true, output: "Completion accepted.",
           }));
@@ -944,11 +910,11 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
         continue;
       }
       if (normalizeSummary(doneAction.summary) !== pendingDone) {
-        // Keep the original proposal so the requested correction can confirm it.
+        const proposed = pendingDone;
+        if (!openRouter) pendingDone = null;
         handBack(
-          `The confirmation did not match the summary you proposed:\n\n${pendingDone}\n\n` +
-            "Check that proposal against the recorded observations. If a required check failed or work remains, correct it first. " +
-            "If the work is complete, repeat the proposed summary verbatim with `confirm: true`.",
+          `The confirmation did not match the summary you proposed:\n\n${proposed}\n\n` +
+            "Repeat that summary verbatim with `confirm: true`, or keep working.",
           doneCalls,
         );
         emit({ type: "notice", level: "warn", text: "confirmation summary did not match" });
@@ -1006,10 +972,6 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
       });
       const started = Date.now();
       const result = await executor.run(call, signal);
-      if (verifier && result.requiredOutputReceipt && verifier.ids.includes(result.requiredOutputReceipt.id)) {
-        const receipt = result.requiredOutputReceipt;
-        proof.set(receipt.id, { digest: receipt.digest, status: !result.ok && receipt.status === "pass" ? "fail" : receipt.status });
-      }
       // Cutting a result envelope destroys both JSON and the handle needed to
       // recover omitted data. The MCP host enforces its own serialized budget.
       const output = result.bounded ? result.output : clampOutput(result.output);
@@ -1030,13 +992,6 @@ export async function runLoop(opts: LoopOptions): Promise<LoopResult> {
     }
 
     if (signal?.aborted) return finish("aborted");
-    if (opts.readProgress) {
-      const current = await opts.readProgress();
-      if (current !== undefined && Number.isSafeInteger(current) && current >= 0) {
-        if (verifiedProgress !== undefined && current > verifiedProgress) guard.reset();
-        verifiedProgress = Math.max(verifiedProgress ?? 0, current);
-      }
-    }
     const verdict = guard.observe(LoopGuard.signature(calls), combinedOutput);
     if (verdict.tripped) {
       emit({ type: "loop_detected", signature: verdict.signature.slice(0, 120), repeats: verdict.repeats });

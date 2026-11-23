@@ -9,9 +9,8 @@
  * those blames the weights.
  *
  * On a hosted endpoint the flags are not the user's to set, so this does not
- * recite them. It probes native chat and each experimental body format, and
- * reports which diagnostic actions reach the loop’s in-memory recorder. What the server was started with is unknowable from here; what
- * it produces is not.
+ * recite them. It checks native chat and text completions. For the OpenRouter
+ * preset it also verifies each experimental body format with an in-memory tool.
  */
 
 import { apiKeyEnvForEndpoint, HttpTransport, normalizeEndpoint, providerForEndpoint, runLoop, TransportError } from "@motifcode/core";
@@ -145,9 +144,57 @@ async function probeBodyChannel(
   }
 }
 
+async function probeOpenRouterBodyChannels(transport: HttpTransport): Promise<Check[]> {
+  const objectProbe = await probeBodyChannel("object", transport);
+  // A missing route applies to both formats. Other failures can be specific to
+  // the prompt or sampled answer, so probe each format independently.
+  const rawProbe = objectProbe.routeAvailable === false
+    ? { ...objectProbe, check: { ...objectProbe.check, name: "raw channel" } }
+    : await probeBodyChannel("raw", transport);
+  const probes = [objectProbe, rawProbe];
+  const endpointCheck: Check = { name: "completions endpoint", state: "unknown", detail: "could not verify /v1/completions" };
+  const missing = probes.find((probe) => probe.routeAvailable === false);
+  if (probes.some((probe) => probe.routeAvailable)) {
+    endpointCheck.state = "ok";
+    endpointCheck.detail = "accepted a request to /v1/completions";
+  } else if (missing) {
+    endpointCheck.state = "warn";
+    endpointCheck.detail = `not available for this model (${missing.status})`;
+    endpointCheck.fix = "use the toolcall channel on this endpoint";
+  }
+  return [endpointCheck, objectProbe.check, rawProbe.check];
+}
+
+/** Keep the original one-token route check for Infron, Morphfactory and custom endpoints. */
+async function probeCompletionsRoute(
+  endpoint: string, model: string, headers: Record<string, string>, fetchImpl: typeof fetch,
+): Promise<Check> {
+  const name = "completions endpoint";
+  try {
+    const res = await fetchImpl(`${endpoint}/v1/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ model, prompt: "hi", max_tokens: 1, stream: false }),
+    });
+    if (res.ok) return { name, state: "ok", detail: "available; the object and raw channels can run" };
+    if (res.status === 404 || res.status === 405 || res.status === 501) {
+      return {
+        name,
+        state: "warn",
+        detail: `not available (${res.status})`,
+        fix: "only the toolcall channel can run against this endpoint; --channel object|raw will fail on the first request",
+      };
+    }
+    return { name, state: "unknown", detail: `answered ${res.status}` };
+  } catch (err) {
+    return { name, state: "unknown", detail: `failed: ${String(err)}` };
+  }
+}
+
 export async function doctor(opts: DoctorOptions): Promise<Check[]> {
   const fetchImpl = opts.fetchImpl ?? globalThis.fetch;
-  const endpoint = normalizeEndpoint(opts.endpoint);
+  const openRouter = providerForEndpoint(opts.endpoint) === "openrouter";
+  const endpoint = openRouter ? normalizeEndpoint(opts.endpoint) : opts.endpoint.replace(/\/+$/, "").replace(/\/v1$/, "");
   const checks: Check[] = [];
   const apiKeyEnv = apiKeyEnvForEndpoint(endpoint);
   const headers: Record<string, string> = { "content-type": "application/json" };
@@ -257,7 +304,7 @@ export async function doctor(opts: DoctorOptions): Promise<Check[]> {
       ...(full ? {} : { fix: "the endpoint serves less than the native window; long sessions will compact or fail early" }),
     });
   }
-  const supportsTools = served?.supports_function_calling ?? served?.supported_parameters?.includes("tools");
+  const supportsTools = served?.supports_function_calling ?? (openRouter ? served?.supported_parameters?.includes("tools") : undefined);
   if (supportsTools !== undefined) {
     checks.push(
       supportsTools
@@ -306,7 +353,7 @@ export async function doctor(opts: DoctorOptions): Promise<Check[]> {
       });
       return checks;
     }
-    if (res.status === 402 && providerForEndpoint(endpoint) === "openrouter") {
+    if (res.status === 402 && openRouter) {
       checks.push({ name: "chat probe", state: "fail", detail: "OpenRouter returned 402 (insufficient credits).", fix: "Check the OpenRouter account balance and API key spending limit, then run doctor again." });
       return checks;
     }
@@ -404,25 +451,12 @@ export async function doctor(opts: DoctorOptions): Promise<Check[]> {
     checks.push({ name: "chat probe", state: "warn", detail: `failed: ${String(err)}` });
   }
 
-  const transport = new HttpTransport({ endpoint, model: opts.model, apiKey: opts.apiKey, fetchImpl });
-  const objectProbe = await probeBodyChannel("object", transport);
-  // A missing route applies to both formats. Other failures can be specific to
-  // the prompt or sampled answer, so probe each format independently.
-  const rawProbe = objectProbe.routeAvailable === false
-    ? { ...objectProbe, check: { ...objectProbe.check, name: "raw channel" } }
-    : await probeBodyChannel("raw", transport);
-  const probes = [objectProbe, rawProbe];
-  const endpointCheck: Check = { name: "completions endpoint", state: "unknown", detail: "could not verify /v1/completions" };
-  const missing = probes.find((probe) => probe.routeAvailable === false);
-  if (probes.some((probe) => probe.routeAvailable)) {
-    endpointCheck.state = "ok";
-    endpointCheck.detail = "accepted a request to /v1/completions";
-  } else if (missing) {
-    endpointCheck.state = "warn";
-    endpointCheck.detail = `not available for this model (${missing.status})`;
-    endpointCheck.fix = "use the toolcall channel on this endpoint";
+  if (openRouter) {
+    const transport = new HttpTransport({ endpoint, model: opts.model, apiKey: opts.apiKey, fetchImpl });
+    checks.push(...await probeOpenRouterBodyChannels(transport));
+  } else {
+    checks.push(await probeCompletionsRoute(endpoint, opts.model, headers, fetchImpl));
   }
-  checks.push(endpointCheck, objectProbe.check, rawProbe.check);
 
   checks.push({
     name: "sampling",

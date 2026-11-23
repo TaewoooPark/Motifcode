@@ -37,6 +37,7 @@ import {
   defaultEnvPath,
   forgetApiKey,
   resumeBlock,
+  resumedMessages,
   runLoop,
   saveApiKey,
   summarizeTranscript,
@@ -2285,6 +2286,8 @@ export class Chat {
         "took effect is unknowable from here. Inspect the working tree, then start a new run",
       );
     }
+    const messages = state.interrupted && providerForEndpoint(this.settings.endpoint) === "openrouter"
+      ? resumedMessages(state.checkpoint) : state.checkpoint.messages;
     const lines: string[] = [];
     if (state.checkpoint.currentChannel !== this.settings.channel) {
       // The transcript is in that channel's format, so the session follows it.
@@ -2294,8 +2297,8 @@ export class Chat {
     if (state.header.model.id !== this.settings.model) {
       lines.push(`recorded against ${state.header.model.id}; this session sends ${this.settings.model}`);
     }
-    this.opts.skills.restoreResourceAccess(state.checkpoint.messages);
-    this.history = state.checkpoint.messages.slice(1);
+    this.opts.skills.restoreResourceAccess(messages);
+    this.history = messages.slice(1);
     this.opts.mcp?.clearScope("root");
     lines.unshift(
       `continuing from ${path}`,

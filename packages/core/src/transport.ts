@@ -29,7 +29,12 @@
  */
 
 import {
+  getChannel,
+  THINK_CLOSE,
+  THINK_OPEN,
   pyJson,
+  repairContext,
+  splitThinking,
   toolCallParts,
   type CompletionRequest,
   type CompletionResponse,
@@ -38,7 +43,7 @@ import {
   type StreamDelta,
   type ToolCall,
 } from "@motifcode/protocol";
-import { apiKeyEnvForEndpoint, isInfronEndpoint, normalizeEndpoint } from "./config.js";
+import { isInfronEndpoint, isOpenRouterTransportEndpoint, normalizeEndpoint, providerForEndpoint, PROVIDERS } from "./config.js";
 
 export type { CompletionRequest, CompletionResponse };
 
@@ -275,18 +280,55 @@ function toWireMessages(messages: Message[]): unknown[] {
   });
 }
 
+/** Older sessions can end a native done/hand-back turn without recording tool messages. */
+function openRouterHistory(messages: Message[]): Message[] {
+  const history: Message[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i]!;
+    history.push(message);
+    if (message.role !== "assistant" || !message.tool_calls?.length) continue;
+
+    const calls = message.tool_calls;
+    const ids = calls.map(c => c.id);
+    const knownIds = new Set(ids);
+    const observed = new Set<string>();
+    let valid = ids.every(id => typeof id === "string" && id !== "") && knownIds.size === calls.length;
+    while (messages[i + 1]?.role === "tool") {
+      const observation = messages[++i]!;
+      history.push(observation);
+      const id = observation.tool_call_id;
+      if (!id || !knownIds.has(id) || observed.has(id)) valid = false;
+      else observed.add(id);
+    }
+
+    // Only close a historical batch with a following turn. A tool currently
+    // in flight must be reconciled by the journal before it can become history.
+    const following = messages[i + 1];
+    if (!valid || !following) continue;
+    const missing = calls.filter(c => !observed.has(c.id!));
+    const refused = following.role === "user" && typeof following.content === "string" &&
+      following.content.startsWith("None of the actions in that turn were run. The harness refuses a turn as a whole");
+    if (!refused && missing.some(c => toolCallParts(c).name !== "done")) continue;
+    for (const call of missing) {
+      history.push({ role: "tool", tool_call_id: call.id!, content: "No tool result was recorded in this saved conversation." });
+    }
+  }
+  return history;
+}
+
 /** Normalise the several shapes servers use for an extracted tool call. */
-function normaliseToolCalls(raw: WireToolCall[] | null | undefined): ToolCall[] | undefined {
-  if (raw == null) return undefined;
-  if (!Array.isArray(raw)) {
+function normaliseToolCalls(raw: WireToolCall[] | null | undefined, openRouter: boolean): ToolCall[] | undefined {
+  if (openRouter && raw != null && !Array.isArray(raw)) {
     throw new TransportError("tool_calls was not an array", { kind: "protocol", retryable: true });
   }
+  if (!raw || raw.length === 0) return undefined;
   const out: ToolCall[] = [];
   for (const tc of raw) {
-    const name = tc?.function?.name;
-    if (typeof name !== "string" || name.trim() === "") {
+    const name = openRouter ? tc?.function?.name : tc.function?.name;
+    if (openRouter && (typeof name !== "string" || name.trim() === "")) {
       throw new TransportError("tool call has no function name; incomplete batch", { kind: "protocol", retryable: true });
     }
+    if (!name) continue;
     const args = tc.function?.arguments;
     out.push({
       ...(tc.id !== undefined ? { id: tc.id } : {}),
@@ -338,6 +380,7 @@ export class HttpTransport implements Transport {
   readonly endpoint: string;
   readonly model: string;
   private readonly infronAccounting: boolean;
+  private readonly openRouter: boolean;
   private readonly apiKey?: string;
   private readonly fetchImpl: typeof fetch;
   private readonly requestTimeoutMs: number;
@@ -345,6 +388,7 @@ export class HttpTransport implements Transport {
   constructor(opts: HttpTransportOptions) {
     this.endpoint = normalizeEndpoint(opts.endpoint);
     this.infronAccounting = isInfronEndpoint(opts.endpoint);
+    this.openRouter = isOpenRouterTransportEndpoint(this.endpoint);
     this.model = opts.model;
     this.apiKey = opts.apiKey;
     this.fetchImpl = opts.fetchImpl ?? globalThis.fetch;
@@ -354,7 +398,8 @@ export class HttpTransport implements Transport {
   async complete(req: CompletionRequest): Promise<CompletionResponse> {
     const started = Date.now();
     const url = requestUrl(req, this.endpoint);
-    const body = requestBody(req, this.model);
+    const body = requestBody(this.openRouter && !req.raw
+      ? { ...req, messages: openRouterHistory(req.messages) } : req, this.model);
     if (this.infronAccounting) body["usage"] = { include: true };
 
     const headers: Record<string, string> = { "content-type": "application/json" };
@@ -413,7 +458,8 @@ export class HttpTransport implements Transport {
       if (res.status === 401 || res.status === 403) {
         // The one failure whose fix is never on the server. Say which side of
         // it the user is on: no key at all, or a key the endpoint refused.
-        const keyEnv = apiKeyEnvForEndpoint(this.endpoint);
+        const keyEnv = this.openRouter ? PROVIDERS.openrouter.apiKeyEnv
+          : providerForEndpoint(this.endpoint) === "morphfactory" ? PROVIDERS.morphfactory.apiKeyEnv : PROVIDERS.infron.apiKeyEnv;
         message += this.apiKey
           ? ` (the endpoint rejected the API key that was sent; check ${keyEnv})`
           : ` (no API key was sent; set ${keyEnv} in the environment or in .env)`;
@@ -441,7 +487,7 @@ export class HttpTransport implements Transport {
     const streamed = /text\/event-stream/i.test(res.headers.get("content-type") ?? "");
     if (req.onDelta && streamed) {
       try {
-        json = await readStream(res, req.onDelta, req.signal, req.raw === true);
+        json = await readStream(res, req, req.onDelta, this.openRouter);
       } catch (err) {
         if (TransportError.is(err)) throw err;
         if (req.signal?.aborted || isAbort(err)) throw new TransportError("request aborted", { kind: "aborted", cause: err });
@@ -473,7 +519,7 @@ export class HttpTransport implements Transport {
       throw new TransportError("choice content was not a string", { kind: "protocol" });
     }
     const reasoning = choice.message?.reasoning_content ?? choice.message?.reasoning ??
-      (req.raw ? textCompletionReasoning(choice) : undefined);
+      (this.openRouter && req.raw ? textCompletionReasoning(choice) : undefined);
     if (req.onDelta && !streamed) {
       // Whole, and late, but the same shape the watcher expects.
       req.onDelta({
@@ -481,7 +527,7 @@ export class HttpTransport implements Transport {
         ...(content !== "" ? { content } : {}),
       });
     }
-    const toolCalls = normaliseToolCalls(choice.message?.tool_calls);
+    const toolCalls = normaliseToolCalls(choice.message?.tool_calls, this.openRouter);
     // The hosted endpoint reports how much of the prompt it served from its
     // prefix cache. That is the first direct measurement this harness has had
     // of the thing its frozen tool order exists to protect, so it is kept.
@@ -556,13 +602,13 @@ interface StreamChunk {
  */
 async function readStream(
   res: Response,
+  req: CompletionRequest,
   onDelta: (d: StreamDelta) => void,
-  signal: AbortSignal | undefined,
-  raw: boolean,
+  openRouter: boolean,
 ): Promise<{ choices?: ChatChoice[]; cost?: number; cost_details?: Record<string, number>; usage?: Record<string, unknown> & { prompt_tokens_details?: { cached_tokens?: number } } }> {
   if (!res.body) throw new TransportError("server sent no body to stream", { kind: "protocol" });
+  const raw = openRouter && req.raw === true;
   const reader = res.body.getReader();
-  const decoder = new TextDecoder();
   let content = "";
   let reasoning = "";
   let sawReasoning = false;
@@ -579,11 +625,13 @@ async function readStream(
     try {
       chunk = JSON.parse(payload) as StreamChunk;
     } catch {
+      if (!openRouter) return false;
       // Losing even one delta can leave valid JSON with different tool arguments.
       throw new TransportError("invalid JSON in completion stream", { kind: "network" });
     }
-    if (typeof chunk !== "object" || chunk === null || Array.isArray(chunk) ||
-        (chunk.choices !== undefined && !Array.isArray(chunk.choices))) {
+    if (!openRouter && (typeof chunk !== "object" || chunk === null)) return false;
+    if (openRouter && (typeof chunk !== "object" || chunk === null || Array.isArray(chunk) ||
+        (chunk.choices !== undefined && !Array.isArray(chunk.choices)))) {
       throw new TransportError("invalid completion stream event", { kind: "network" });
     }
     if (chunk.usage) usage = chunk.usage;
@@ -601,21 +649,35 @@ async function readStream(
     }
     const choice = chunk.choices?.[0];
     if (!choice) return false;
-    if (choice.finish_reason) finish = choice.finish_reason;
-    const delta: StreamDelta = {};
     const think = choice.delta?.reasoning ?? choice.delta?.reasoning_content ??
       (raw ? textCompletionReasoning(choice) : undefined);
+    const text = choice.delta?.content ?? choice.text;
+    const toolDeltas = choice.delta?.tool_calls ?? [];
+    if (openRouter && !Array.isArray(toolDeltas)) throw new TransportError("invalid tool calls in completion stream", { kind: "network" });
+    const nextFinish = choice.finish_reason;
+    if (openRouter && nextFinish != null && (typeof nextFinish !== "string" || !nextFinish.trim())) {
+      throw new TransportError("invalid finish reason in completion stream", { kind: "network" });
+    }
+    // A finish reason seals this choice. Some servers then send accounting or
+    // repeat the same finish with an empty delta; neither changes the action.
+    if (openRouter && finish !== undefined) {
+      if ((nextFinish != null && nextFinish !== finish) || text || think || toolDeltas.length) {
+        throw new TransportError("completion stream changed an already finished choice", { kind: "network" });
+      }
+      return false;
+    }
+    if (nextFinish) finish = nextFinish;
+    const delta: StreamDelta = {};
     if (typeof think === "string" && think !== "") {
       reasoning += think;
       sawReasoning = true;
       delta.reasoning = think;
     }
-    const text = choice.delta?.content ?? choice.text;
     if (typeof text === "string" && text !== "") {
       content += text;
       delta.content = text;
     }
-    for (const tc of choice.delta?.tool_calls ?? []) {
+    for (const tc of toolDeltas) {
       const index = tc.index ?? 0;
       const entry = calls.get(index) ?? { name: "", arguments: "" };
       if (tc.id) entry.id = tc.id;
@@ -628,6 +690,88 @@ async function readStream(
     return false;
   };
 
+  let finished = false;
+  if (openRouter) {
+    finished = await readOpenRouterEvents(reader, req.signal, handleEvent);
+  } else {
+    await readLegacyEvents(reader, req.signal, handleEvent);
+  }
+  if (stopped) {
+    if (!openRouter) await reader.cancel().catch(() => undefined);
+    throw new TransportError(`the server stopped the generation: ${stopped.code}${stopped.message ? ` (${stopped.message})` : ""}`, {
+      kind: "generation",
+      code: stopped.code,
+    });
+  }
+
+  if (openRouter && !finished && finish === undefined) {
+    // Chat-compatible servers can close a prose reply at EOF. A raw channel
+    // encodes actions in text, and even chat can carry a tagged or bare call.
+    const inlineThinking = !sawReasoning && (content.includes(THINK_OPEN) || content.includes(THINK_CLOSE));
+    const reply = inlineThinking ? splitThinking(content).content : content;
+    const parsed = !raw && calls.size === 0 && reply.trim() && !/<\/?tool_call\b/.test(reply)
+      ? getChannel("toolcall").parse(reply, repairContext(req.tools)) : undefined;
+    if (!parsed || parsed.actions.length || parsed.unrecoverable.length || parsed.truncated) {
+      throw new TransportError("stream ended without a finish reason or [DONE]", { kind: "network" });
+    }
+  }
+
+  const toolCalls = [...calls.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, c]) => ({ ...(c.id ? { id: c.id } : {}), type: "function", function: { name: c.name, arguments: c.arguments } }));
+  return {
+    choices: [
+      {
+        message: {
+          content,
+          ...(sawReasoning ? { reasoning } : {}),
+          ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+        },
+        ...(finish !== undefined ? { finish_reason: finish } : {}),
+      },
+    ],
+    ...(cost ? { cost: cost.amount, ...(cost.details ? { cost_details: cost.details } : {}) } : {}),
+    ...(usage ? { usage: usage as Record<string, unknown> & { prompt_tokens_details?: { cached_tokens?: number } } } : {}),
+  };
+}
+
+/** Existing endpoints consume one JSON chunk per data line, even without a terminal marker. */
+async function readLegacyEvents(
+  reader: ReadableStreamDefaultReader<Uint8Array>, signal: AbortSignal | undefined,
+  handleEvent: (payload: string) => boolean,
+): Promise<void> {
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const handle = (line: string): boolean => line.startsWith("data:") && handleEvent(line.slice(5).trim());
+  let finished = false;
+  for (;;) {
+    if (signal?.aborted) {
+      await reader.cancel().catch(() => undefined);
+      throw new TransportError("request aborted", { kind: "aborted" });
+    }
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let nl = buffer.indexOf("\n");
+    while (nl !== -1) {
+      const line = buffer.slice(0, nl).replace(/\r$/, "");
+      buffer = buffer.slice(nl + 1);
+      if (handle(line)) {
+        finished = true;
+        break;
+      }
+      nl = buffer.indexOf("\n");
+    }
+    if (finished) break;
+  }
+  if (!finished && buffer.trim() !== "") handle(buffer.trim());
+}
+
+async function readOpenRouterEvents(
+  reader: ReadableStreamDefaultReader<Uint8Array>, signal: AbortSignal | undefined,
+  handleEvent: (payload: string) => boolean,
+): Promise<boolean> {
+  const decoder = new TextDecoder();
   // SSE dispatches an event at its blank line. Consecutive data fields form
   // a single payload, and even the CRLF between fields may span two chunks.
   let fields: string[] = [];
@@ -659,43 +803,17 @@ async function readStream(
       const { done, value } = await reader.read();
       if (done) {
         // Some compatible servers send the complete [DONE] marker without
-        // its final newline. An ordinary socket EOF is not a completion.
+        // its final newline.
         finished = consume(decoder.decode()) || acceptLine(partialLine) || acceptLine("");
         break;
       }
       finished = consume(decoder.decode(value, { stream: true }));
     }
-    if (stopped) {
-      throw new TransportError(`the server stopped the generation: ${stopped.code}${stopped.message ? ` (${stopped.message})` : ""}`, {
-        kind: "generation",
-        code: stopped.code,
-      });
-    }
-    if (!finished && finish === undefined) {
-      throw new TransportError("stream ended without a finish reason or [DONE]", { kind: "network" });
-    }
+    return finished;
   } finally {
     await reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }
-
-  const toolCalls = [...calls.entries()]
-    .sort((a, b) => a[0] - b[0])
-    .map(([, c]) => ({ ...(c.id ? { id: c.id } : {}), type: "function", function: { name: c.name, arguments: c.arguments } }));
-  return {
-    choices: [
-      {
-        message: {
-          content,
-          ...(sawReasoning ? { reasoning } : {}),
-          ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
-        },
-        ...(finish !== undefined ? { finish_reason: finish } : {}),
-      },
-    ],
-    ...(cost ? { cost: cost.amount, ...(cost.details ? { cost_details: cost.details } : {}) } : {}),
-    ...(usage ? { usage: usage as Record<string, unknown> & { prompt_tokens_details?: { cached_tokens?: number } } } : {}),
-  };
 }
 
 function describe(err: unknown): string {

@@ -168,19 +168,6 @@ it is a terminal preference, not an API configuration value in `.env`.
 
 ---
 
-### Task verification
-
-For a task with a known acceptance test, pass an explicit manifest: `motif --task-checks checks.json "Build totals.json"`. Use the same manifest with `motif resume`. A manifest can declare checks, progress, or both.
-
-```json
-{
-  "checks": [{"id": "totals", "command": "node check-totals.cjs", "files": ["input.json", "totals.json"]}],
-  "progress": {"file": "completed.txt", "milestones": ["extract", "validate", "export"]}
-}
-```
-
-For each check the agent runs the exact declared bash command. The host records its exit status and hashes the listed files before and after execution. Completion requires passing checks against the current file contents. Include every input that determines correctness and use a verifier the agent cannot modify. A progress file is optional; its lines must be the exact ordered prefix of the listed milestones. An advancing prefix can clear the repeated-action guard, but cannot approve completion. Use milestones produced by a trusted workflow when they stand for work beyond that file.
-
 ## MCP servers
 
 MCP servers give Motif outside tools: library documentation, GitHub, a browser,

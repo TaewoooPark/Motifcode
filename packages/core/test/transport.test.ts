@@ -12,7 +12,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { CORE_TOOLS } from "@motifcode/tools";
 import { ScriptedTransport, doneBody } from "@motifcode/replay";
-import { requestDigest } from "@motifcode/protocol";
+import { requestDigest, type Message } from "@motifcode/protocol";
 import {
   HttpTransport,
   TransportError,
@@ -420,4 +420,81 @@ describe("the repetition penalty", () => {
     expect(requestDigest({ ...req, repetitionPenalty: undefined })).toBe(requestDigest(req));
     expect(requestDigest({ ...req, repetitionPenalty: 1.05 })).not.toBe(requestDigest(req));
   });
+});
+
+describe.each([
+  ["https://openrouter.ai/api", true, "OPENROUTER_API_KEY"],
+  ["https://llm.onerouter.pro", false, "MOTIF_API_KEY"],
+  ["https://api-cbt.morphfactory.io", false, "MOTIF_MORPHFACTORY_API_KEY"],
+  ["http://localhost:8193/v1", false, "MOTIF_API_KEY"],
+  ["https://openrouter.ai.example.org/api", false, "MOTIF_API_KEY"],
+  ["https://openrouter.ai/api/v1/v1", false, "MOTIF_API_KEY"],
+] as const)("wire compatibility at %s", (endpoint, openRouter, keyName) => {
+  it("handles a nameless sibling according to the selected endpoint", async () => {
+    const t = new HttpTransport({ endpoint, model: "m", fetchImpl: async () => jsonResponse({
+      choices: [{ message: { tool_calls: [
+        { id: "a", function: { name: "read", arguments: "{}" } }, { id: "b", function: { arguments: "{}" } },
+      ] } }],
+    }) });
+    const response = t.complete(req);
+    if (openRouter) await expect(response).rejects.toMatchObject({ kind: "protocol", retryable: true });
+    else expect((await response).toolCalls).toHaveLength(1);
+  });
+
+  it("preserves HTTP status, detail and credential diagnostics", async () => {
+    const t = new HttpTransport({ endpoint, model: "m", fetchImpl: async () => new Response("bad credentials", { status: 403 }) });
+    const error = await t.complete(req).catch((e: unknown) => e);
+    expect(error).toMatchObject({ kind: "http", status: 403, retryable: false });
+    expect((error as Error).message).toContain("bad credentials");
+    expect((error as Error).message).toContain(keyName);
+  });
+
+  it("adapts a prior done turn on the wire without modifying its saved history", async () => {
+    const messages: Message[] = [
+      { role: "assistant", tool_calls: [{ id: "d", function: { name: "done", arguments: "{}" } }] },
+      { role: "user", content: "Continue with the next task." },
+    ];
+    const before = structuredClone(messages);
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({ choices: [{ message: { content: "ok" } }] }));
+    await new HttpTransport({ endpoint, model: "m", fetchImpl }).complete({ messages, tools: [] });
+    const wire: Message[] = JSON.parse(String(fetchImpl.mock.calls[0]![1]?.body)).messages;
+    expect(wire.map(m => m.role)).toEqual(openRouter ? ["assistant", "tool", "user"] : ["assistant", "user"]);
+    if (openRouter) expect(wire[1]).toEqual({ role: "tool", tool_call_id: "d", content: "No tool result was recorded in this saved conversation." });
+    expect(messages).toEqual(before);
+  });
+});
+
+it.each([
+  ["https://openrouter.ai/api/v1", "https://openrouter.ai/api/v1/chat/completions", true],
+  ["https://openrouter.ai/api/v1/v1", "https://openrouter.ai/api/v1/v1/chat/completions", false],
+] as const)("uses the actual wire path to select OpenRouter handling for %s", async (endpoint, url, strict) => {
+  const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({ choices: [{ message: {
+    tool_calls: [{ id: "missing-name", function: { arguments: "{}" } }],
+  } }] }));
+  const response = new HttpTransport({ endpoint, model: "m", fetchImpl }).complete(req);
+  if (strict) await expect(response).rejects.toMatchObject({ kind: "protocol" });
+  else expect((await response).toolCalls).toBeUndefined();
+  expect(fetchImpl.mock.calls[0]![0]).toBe(url);
+});
+
+it("only backfills unambiguous, historical OpenRouter hand-backs or done calls", async () => {
+  const call = (id: string, name: string) => ({ id, function: { name, arguments: "{}" } });
+  const history: Message[] = [
+    { role: "assistant", tool_calls: [call("kept", "done")] },
+    { role: "tool", tool_call_id: "kept", content: "Existing observation" },
+    { role: "user", content: "continue" },
+    { role: "assistant", tool_calls: [call("unknown-write", "write")] },
+    { role: "user", content: "continue" },
+    { role: "assistant", tool_calls: [call("refused", "write")] },
+    { role: "user", content: "None of the actions in that turn were run. The harness refuses a turn as a whole rather\nthan applying part of it." },
+    { role: "assistant", tool_calls: [call("ambiguous", "done"), call("ambiguous", "done")] },
+    { role: "user", content: "continue" },
+    { role: "assistant", tool_calls: [call("pending", "done")] },
+  ];
+  const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({ choices: [{ message: { content: "ok" } }] }));
+  await new HttpTransport({ endpoint: "https://openrouter.ai/api", model: "m", fetchImpl }).complete({ messages: history, tools: [] });
+  const wire: Message[] = JSON.parse(String(fetchImpl.mock.calls[0]![1]?.body)).messages;
+  expect(wire.filter(m => m.role === "tool").map(m => [m.tool_call_id, m.content])).toEqual([
+    ["kept", "Existing observation"], ["refused", "No tool result was recorded in this saved conversation."],
+  ]);
 });

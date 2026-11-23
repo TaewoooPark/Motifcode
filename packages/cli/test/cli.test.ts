@@ -623,9 +623,37 @@ describe("doctor", () => {
     expect(c.fix).toContain("toolcall");
   });
 
+  it.each(["https://llm.onerouter.pro", "https://api-cbt.morphfactory.io", "http://localhost:4567"])(
+    "preserves the one-token completions probe on %s", async (endpoint) => {
+      const model = "motif/motif-3";
+      const r = router({
+        models: [{ id: model, supported_parameters: ["tools"] }],
+        completions: { body: { choices: [{ text: "h" }] } },
+      });
+      const checks = await doctor({ endpoint, model, fetchImpl: r.fetchImpl });
+      expect(r.seen.map(call => call.url)).toEqual([
+        endpoint + "/v1/models", endpoint + "/v1/chat/completions",
+        endpoint + "/v1/chat/completions", endpoint + "/v1/completions",
+      ]);
+      expect(JSON.parse(String(r.seen.at(-1)!.init.body))).toEqual({ model, prompt: "hi", max_tokens: 1, stream: false });
+      expect(by(checks, "completions endpoint")).toMatchObject({ state: "ok", detail: "available; the object and raw channels can run" });
+      expect(checks.filter(c => c.name === "object channel" || c.name === "raw channel")).toEqual([]);
+      expect(by(checks, "function calling")).toBeUndefined();
+    },
+  );
+
+  it("skips both OpenRouter body decoders after a missing completions route", async () => {
+    const r = router({ completions: { status: 404 } });
+    const checks = await doctor({ endpoint: "https://openrouter.ai/api", model: "motif-technologies/motif-3", fetchImpl: r.fetchImpl });
+    expect(r.seen.filter(call => call.url.endsWith("/v1/completions"))).toHaveLength(1);
+    for (const name of ["object channel", "raw channel"]) {
+      expect(by(checks, name)).toMatchObject({ state: "unknown", detail: "completions unavailable for this model" });
+    }
+  });
+
   it("keeps HTTP availability separate from action verification", async () => {
     const r = router({ completions: { status: 200, body: { choices: [{ text: "h" }] } } });
-    const checks = await doctor({ endpoint: "http://x", model: "motif/motif-3", apiKey: "k", fetchImpl: r.fetchImpl });
+    const checks = await doctor({ endpoint: "https://openrouter.ai/api", model: "motif-technologies/motif-3", apiKey: "k", fetchImpl: r.fetchImpl });
     expect(by(checks, "completions endpoint").state).toBe("ok");
     expect(by(checks, "object channel").state).toBe("unknown");
     expect(by(checks, "raw channel").state).toBe("unknown");
@@ -635,7 +663,7 @@ describe("doctor", () => {
     const object = JSON.stringify({ commands: [{ keystrokes: "OK", duration: 0.1 }], task_complete: false });
     const raw = '<response><commands><keystrokes duration="0.1">NO</keystrokes></commands></response>';
     const r = router({ completionReplies: [object, raw].map((text) => ({ body: { choices: [{ text, reasoning: "probe", finish_reason: "stop" }] } })) });
-    const checks = await doctor({ endpoint: "http://x", model: "motif/motif-3", fetchImpl: r.fetchImpl });
+    const checks = await doctor({ endpoint: "https://openrouter.ai/api", model: "motif-technologies/motif-3", fetchImpl: r.fetchImpl });
     expect(by(checks, "object channel").state).toBe("ok");
     expect(by(checks, "raw channel").state).toBe("warn");
     const bodies = r.seen.filter(({ url }) => url.endsWith("/v1/completions")).map(({ init }) => JSON.parse(String(init.body)));
@@ -651,7 +679,7 @@ describe("doctor", () => {
       { body: { choices: [{ text: object, reasoning: "probe", finish_reason: "length" }] } },
       { body: { choices: [{ text: "inline</think>" + raw, finish_reason: "stop" }] } },
     ] });
-    const checks = await doctor({ endpoint: "http://x", model: "motif/motif-3", fetchImpl: r.fetchImpl });
+    const checks = await doctor({ endpoint: "https://openrouter.ai/api", model: "motif-technologies/motif-3", fetchImpl: r.fetchImpl });
     expect(by(checks, "object channel")).toMatchObject({ state: "unknown", detail: expect.stringContaining("output limit") });
     expect(by(checks, "raw channel").state).toBe("ok");
   });

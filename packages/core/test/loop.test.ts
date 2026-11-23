@@ -427,24 +427,18 @@ describe("the done contract", () => {
     expect(r.turns).toBe(3);
   });
 
-  it("accepts the original summary when a mismatched confirmation is corrected", async () => {
+  it("does not end when the confirmed summary is a different claim", async () => {
     const { emit } = collect();
     const transport = new ScriptedTransport([
       doneBody("fixed the parser"),
-      doneBody("fixed everything, shipped it", { confirm: true }),
+      toolCallBody("done", { summary: "fixed everything, shipped it", confirm: true }),
+      doneBody("fixed the parser"),
       doneBody("fixed the parser", { confirm: true }),
     ]);
-    const r = await runLoop({ ...base, transport, executor: okExec, emit, maxTurns: 3 });
+    const r = await runLoop({ ...base, transport, executor: okExec, emit, maxTurns: 8 });
     expect(r.reason).toBe("done");
     expect(r.summary).toBe("fixed the parser");
-    expect(r.turns).toBe(3);
-  });
-
-  it("does not promote a rejected confirmation into a new proposal", async () => {
-    const wrong = doneBody("shipped everything", { confirm: true });
-    const transport = new ScriptedTransport([doneBody("fixed the parser"), wrong, wrong, wrong]);
-    const r = await runLoop({ ...base, transport, executor: okExec, emit: collect().emit, maxTurns: 4 });
-    expect(r.reason).toBe("turn_limit");
+    expect(r.turns).toBe(4);
   });
 
   it("tolerates reflowed whitespace in the confirmed summary", async () => {
@@ -474,7 +468,6 @@ describe("the done contract", () => {
     const { emit } = collect();
     const transport = new ScriptedTransport([
       doneBody("nearly"),
-      doneBody("different claim", { confirm: true }),
       toolCallBody("bash", { command: "ls" }),
       doneBody("nearly", { confirm: true }),
       doneBody("nearly"),
@@ -482,9 +475,9 @@ describe("the done contract", () => {
     ]);
     const r = await runLoop({ ...base, transport, executor: okExec, emit, maxTurns: 8 });
     expect(r.reason).toBe("done");
-    // Turn 4's confirmation had nothing to confirm, so it became a fresh
+    // Turn 3's confirmation had nothing to confirm, so it became a fresh
     // proposal and needed its own confirmation.
-    expect(r.turns).toBe(6);
+    expect(r.turns).toBe(5);
   });
 });
 
@@ -739,12 +732,10 @@ describe("history on the native channel", () => {
     const second = transport.seen[1]!.messages;
     const assistant = second.find((m) => m.role === "assistant")!;
     expect(assistant.tool_calls?.[0]?.function?.name).toBe("bash");
-    // The tool-role closure associates the refusal with the rejected call.
+    // Then the refusal, as a user turn, and no tool result — nothing ran.
     expect(second[second.length - 1]!.role).toBe("user");
     expect(String(second[second.length - 1]!.content)).toContain("None of the actions");
-    expect(second.find((m) => m.role === "tool")).toMatchObject({
-      tool_call_id: assistant.tool_calls![0]!.id, content: expect.stringContaining("without executing"),
-    });
+    expect(second.some((m) => m.role === "tool")).toBe(false);
   });
 
   it("shows the done proposal the confirmation challenge refers to", async () => {
@@ -793,9 +784,9 @@ describe("continuing a conversation", () => {
       emit,
     });
     const roles = second.seen[0]!.messages.map((m) => m.role);
-    expect(roles).toEqual(["system", "user", "assistant", "tool", "user", "assistant", "tool", "user"]);
+    expect(roles).toEqual(["system", "user", "assistant", "user", "assistant", "user"]);
     expect(second.seen[0]!.messages[1]!.content).toBe(TASK);
-    expect(second.seen[0]!.messages[7]!.content).toBe("and now this");
+    expect(second.seen[0]!.messages[5]!.content).toBe("and now this");
     expect(b.transcript.length).toBeGreaterThan(a.transcript.length);
   });
 
@@ -807,8 +798,7 @@ describe("continuing a conversation", () => {
     const checkpoints: { messages: { role: string }[] }[] = [];
     const transport = new ScriptedTransport([doneBody("s"), doneBody("s", { confirm: true })]);
     const r = await runLoop({ ...base, transport, executor: okExecutor, emit, onCheckpoint: (c) => checkpoints.push(c) });
-    const last = r.transcript[r.transcript.length - 2]!;
-    expect(r.transcript.at(-1)).toMatchObject({ role: "tool", tool_call_id: last.tool_calls![0]!.id, content: "Completion accepted." });
+    const last = r.transcript[r.transcript.length - 1]!;
     expect(last.role).toBe("assistant");
     expect(last.tool_calls?.[0]?.function).toEqual({ name: "done", arguments: { summary: "s", confirm: true } });
     expect(checkpoints[checkpoints.length - 1]!.messages.length).toBe(r.transcript.length);
@@ -878,8 +868,7 @@ describe("the conversational ending", () => {
     const r = await runLoop({ ...base, transport, executor: okExecutor, emit, confirmDone: false });
     expect(r.reason).toBe("done");
     expect(r.summary).toBe("finished");
-    expect(r.transcript.at(-1)?.role).toBe("tool");
-    const last = r.transcript[r.transcript.length - 2]!;
+    const last = r.transcript[r.transcript.length - 1]!;
     expect(last.tool_calls?.[0]?.function).toEqual({ name: "done", arguments: { summary: "finished" } });
   });
 });

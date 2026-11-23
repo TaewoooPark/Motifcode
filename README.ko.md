@@ -155,19 +155,6 @@ npx motifcode          # 첫 실행: 키를 물어본 뒤 `motif` 명령 설치�
 
 ---
 
-### 작업 완료 검증
-
-완료 기준이 정해진 작업에는 `motif --task-checks checks.json "totals.json 생성"`처럼 검증 파일을 지정합니다. `motif resume`에도 같은 파일을 지정합니다. 완료 검사와 진행 단계 중 필요한 항목을 선언할 수 있습니다.
-
-```json
-{
-  "checks": [{"id": "totals", "command": "node check-totals.cjs", "files": ["input.json", "totals.json"]}],
-  "progress": {"file": "completed.txt", "milestones": ["extract", "validate", "export"]}
-}
-```
-
-모델이 지정한 bash 명령을 정확히 실행하면 하네스가 종료 상태와 검사 전후 파일 내용의 해시를 기록합니다. 완료하려면 현재 파일 내용에 대한 검사가 통과해야 합니다. 정답에 영향을 주는 모든 입력을 목록에 넣고, 모델이 바꿀 수 없는 검사기를 사용하세요. 선택 항목인 진행 파일에는 선언한 순서대로 완료한 단계가 한 줄씩 들어갑니다. 올바른 다음 단계가 추가되면 같은 출력이 반복돼도 작업을 계속할 수 있습니다. 작업이 다른 곳에서 이루어진다면 실제 진척을 확인하는 절차가 이 파일을 작성하도록 구성하세요.
-
 ## MCP 서버
 
 MCP 서버를 연결하면 Motif가 바깥 도구를 쓸 수 있습니다. 라이브러리 문서, GitHub,

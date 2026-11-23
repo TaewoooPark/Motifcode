@@ -103,6 +103,16 @@ describe("resolution", () => {
     }).apiKey).toBeUndefined();
   });
 
+  it("keeps a key-only Morphfactory installation and respects an explicit endpoint", () => {
+    const path = join(dir({ ".env": "MOTIF_MORPHFACTORY_API_KEY=old-morph-key\n" }), ".env");
+    const options = { env: {}, dotenvPaths: [path] };
+    expect(resolveEndpointConfig(options)).toMatchObject({
+      endpoint: PROVIDERS.morphfactory.endpoint, model: PROVIDERS.morphfactory.model, apiKey: "old-morph-key",
+    });
+    expect(resolveEndpointConfig({ ...options, flags: { endpoint: PROVIDERS.openrouter.endpoint } }).apiKey).toBeUndefined();
+    expect(resolveEndpointConfig({ ...options, env: { MOTIF_API_KEY: "old-infron-key" } }).endpoint).toBe(PROVIDERS.infron.endpoint);
+  });
+
   it("keeps environment and file precedence within the Morphfactory credential slot", () => {
     const first = join(dir({ ".env": "MOTIF_API_KEY=sk-infron-first\n" }), ".env");
     const second = join(dir({ ".env": "MOTIF_MORPHFACTORY_API_KEY=sk-morph-file\n" }), ".env");

@@ -56,8 +56,6 @@ export interface ExecutorOptions {
   runAgent?: (agent: string, prompt: string, callId?: string) => Promise<SubagentOutcome>;
   /** Called for MCP proxy calls. Absent means no servers are connected. */
   callMcp?: (server: string, method: string, args: unknown, signal?: AbortSignal, observe?: () => Promise<ToolResult>) => Promise<string | ToolResult>;
-  /** Called only at actual bash dispatch, after policy, confirmation, and pre-hooks. */
-  verifyBash?: (command: string, dispatch: () => Promise<ToolResult>) => Promise<ToolResult>;
   onHook?: (event: HookEvent, label: string, ok: boolean) => void;
   /** Limit for a command the model runs without its own `timeout_s`; 120 s when absent. */
   timeoutMs?: number;
@@ -529,7 +527,7 @@ export class ToolExecutor implements Executor {
         // onHook above reports the independent post-processing failure.
         if (result.bounded) return result;
         return {
-          ...result,
+          ok: result.ok,
           output: `${result.output}\n\n[hooks] ${failed.map((h) => `${h.label}: ${h.output}`).join("; ")}`,
         };
       }
@@ -541,14 +539,15 @@ export class ToolExecutor implements Executor {
     const cwd = this.opts.cwd;
     const args = call.arguments;
     switch (call.name) {
-      case "bash": {
-        const command = str(args, "command");
-        const dispatch = () => runBash(
-          command, cwd, (num(args, "timeout_s") ?? this.timeoutMs / 1000) * 1000, this.policy,
-          () => this.scratchDir(), signal,
+      case "bash":
+        return runBash(
+          str(args, "command"),
+          cwd,
+          (num(args, "timeout_s") ?? this.timeoutMs / 1000) * 1000,
+          this.policy,
+          () => this.scratchDir(),
+          signal,
         );
-        return this.opts.verifyBash ? this.opts.verifyBash(command, dispatch) : dispatch();
-      }
 
       case "term": {
         const r = await this.shell.send(str(args, "keystrokes"), num(args, "duration_s") ?? 1, signal);

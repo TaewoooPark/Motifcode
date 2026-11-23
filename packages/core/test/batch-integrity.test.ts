@@ -10,8 +10,6 @@ const done = { id: "d", type: "function", function: { name: "done", arguments: '
 
 const native = (calls: unknown[]) =>
   Response.json({ choices: [{ message: { content: null, tool_calls: calls }, finish_reason: "tool_calls" }] });
-const formatted = (text: string) =>
-  Response.json({ choices: [{ text, reasoning: "separate reasoning", finish_reason: "stop" }] });
 
 const event = (data: unknown) => "data: " + JSON.stringify(data) + "\n\n";
 const writeEvent = event({ choices: [{ delta: { tool_calls: [{ ...write, index: 0 }] } }] });
@@ -23,7 +21,7 @@ async function run(channel: ChannelId, replies: Array<() => Response>, maxTurns 
   const requests: string[] = [];
   const effects: Array<{ attempt: number; name: string; args: unknown }> = [];
   const transport = new HttpTransport({
-    endpoint: "http://fixture.invalid", model: "fixture",
+    endpoint: "https://openrouter.ai/api", model: "fixture",
     fetchImpl: async (_, opts) => {
       const reply = replies[requests.length];
       if (!reply) throw Error("unexpected model request");
@@ -58,29 +56,16 @@ describe("validate the complete tool batch before dispatch", () => {
     expect(r.effects).toEqual([{ attempt: 2, name: "write", args }]);
   });
 
-  it.each([
-    ["object", '{"commands":[{"keystrokes":"OK"},null]}'],
-    ["object", '{"commands":[{"keystrokes":null},{"keystrokes":"OK"}]}'],
-    ["object", '{"commands":[null],"task_complete":true,"summary":"finished"}'],
-    ["raw", "<response><keystrokes>OK</keystrokes><keystrokes"],
-    ["raw", "<response><keystrokes/><keystrokes>unfinished"],
-    ["raw", "<response><task_complete>true</task_complete><keystrokes>unfinished"],
-    ["raw", "<response><keystrokes>OK</keystrokes></keystrokes>"],
-  ] as const)("refuses every action in a broken %s batch", async (channel, text) => {
-    const r = await run(channel, [() => formatted(text)]);
-    expect(r.effects).toEqual([]);
-    expect(r.result.reason).toBe("turn_limit");
-  });
 
-  it("executes raw waits and literal input in the supplied order", async () => {
-    const text = '<response><commands><keystrokes duration="2"/><keystrokes>echo "& <keystrokes/>"</keystrokes>' +
-      '<keystrokes duration="4" /></commands></response>';
-    const r = await run("raw", [() => formatted(text)]);
-    expect(r.effects.map(e => e.args)).toEqual([
-      { keystrokes: "", duration_s: 2 },
-      { keystrokes: 'echo "& <keystrokes/>"', duration_s: 1 },
-      { keystrokes: "", duration_s: 4 },
-    ]);
+  it.each([
+    ["raw", "<response><plan>Mention the literal </keystrokes> tag.</plan><keystrokes>OK</keystrokes></response>",
+      [{ keystrokes: "OK", duration_s: 1 }]],
+    ["object", '{"commands":[{"keystrokes":null,"duration":2}]}', [{ keystrokes: "", duration_s: 2 }]],
+  ] as const)("preserves legacy %s input", async (channel, text, expected) => {
+    const r = await run(channel, [() => Response.json({
+      choices: [{ text, reasoning: "separate reasoning", finish_reason: "stop" }],
+    })]);
+    expect(r.effects.map(e => e.args)).toEqual(expected);
   });
 });
 
@@ -109,5 +94,73 @@ describe("integrity of streamed tool calls", () => {
   ])("preserves complete streams with either terminal marker or multiline SSE", async text => {
     const r = await run("toolcall", [() => sse(text)]);
     expect(r.effects).toEqual([{ attempt: 1, name: "write", args }]);
+  });
+});
+
+describe("end-of-stream compatibility", () => {
+  const reply = (content: string) => event({ choices: [{ delta: { content } }] });
+  const request = { messages: [{ role: "user" as const, content: "Status?" }], tools: [...CORE_TOOLS], onDelta: () => {} };
+  const complete = (body: string) => new HttpTransport({
+    endpoint: "https://openrouter.ai/api", model: "fixture", fetchImpl: async () => sse(body),
+  }).complete(request);
+
+  it("accepts a text-only chat response at graceful EOF in a single request", async () => {
+    let requests = 0;
+    const answer = "The report is ready.";
+    const transport = new HttpTransport({
+      endpoint: "https://openrouter.ai/api", model: "fixture", fetchImpl: async () => {
+        requests++;
+        return sse(event({ choices: [{ delta: { reasoning: "checking" } }] }) + reply(answer));
+      },
+    });
+    const result = await runLoop({
+      tools: [...CORE_TOOLS], transport, system: () => "fixture", userTask: "Status?",
+      executor: { run: async () => { throw new Error("unexpected tool call"); } },
+      stream: true, replyEnds: true, maxServerRetries: 1, emit: () => {},
+    });
+    expect(result.reason).toBe("done");
+    expect(result.summary).toBe(answer);
+    expect(requests).toBe(1);
+    expect((await complete(reply(answer))).content).toBe(answer);
+  });
+
+  it.each([
+    ["toolcall", reply('<tool_call>{"name":"write","arguments":{}}</tool_call>')],
+    ["toolcall", reply('<tool_call>{"name":"write"')],
+    ["toolcall", reply(JSON.stringify({ name: "write", arguments: args }))],
+    ["toolcall", reply("analysis</think>" + JSON.stringify({ name: "write", arguments: args }))],
+    ["toolcall", event({ choices: [{ delta: { reasoning: "only reasoning" } }] })],
+    ["toolcall", reply("<think>only reasoning</think>")],
+    ["toolcall", reply("A mixed reply") + writeEvent],
+    ["raw", event({ choices: [{ text: "<response><keystrokes>OK</keystrokes></response>" }] })],
+    ["object", event({ choices: [{ text: '{"commands":[{"keystrokes":"OK"}]}' }] })],
+  ] as const)("requires a terminal marker for actions and empty replies on %s", async (channel, body) => {
+    const r = await run(channel, [() => sse(body)]);
+    expect(r.result.reason).toBe("transport_error");
+    expect(r.effects).toEqual([]);
+  });
+
+  it.each([
+    finishedEvent + writeEvent,
+    event({ choices: [{ delta: {}, finish_reason: "length" }] }) + finishedEvent,
+    finishedEvent + reply("changed"),
+    finishedEvent + event({ choices: [{ delta: { tool_calls: {} } }] }),
+  ])("refuses the entire batch when the finished choice changes", async tail => {
+    const r = await run("toolcall", [() => sse(writeEvent + tail + end)]);
+    expect(r.result.reason).toBe("transport_error");
+    expect(r.effects).toEqual([]);
+  });
+
+  it("accepts a repeated identical finish and trailing usage", async () => {
+    const body = writeEvent + finishedEvent + finishedEvent + event({ choices: [], usage: { prompt_tokens: 17 } }) + end;
+    const r = await complete(body);
+    expect(r.finishReason).toBe("tool_calls");
+    expect(r.toolCalls).toHaveLength(1);
+    expect(r.usage?.promptTokens).toBe(17);
+  });
+
+  it("honors a provider error following a finished choice", async () => {
+    const body = writeEvent + finishedEvent + event({ error: { code: "interrupted", message: "stopped" } }) + end;
+    await expect(complete(body)).rejects.toMatchObject({ kind: "generation", code: "interrupted" });
   });
 });

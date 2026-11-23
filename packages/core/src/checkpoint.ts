@@ -36,11 +36,6 @@ export interface RepoState {
   worktreeHash?: string;
 }
 
-export interface CheckReceipt {
-  digest: string;
-  status: "pass" | "fail" | "unavailable";
-}
-
 export interface LoopCheckpoint {
   scopeId: string;
   /** Journal sequence number this checkpoint follows. */
@@ -56,10 +51,6 @@ export interface LoopCheckpoint {
   replyRepairs?: number;
   /** Normalised summary of a `done` awaiting confirmation, or null. */
   pendingDone: string | null;
-  /** Trusted check results for the declared task inputs. */
-  requiredOutputProof?: Record<string, CheckReceipt>;
-  taskChecksKey?: string;
-  verifiedProgress?: number;
   /**
    * Next call id for this scope.
    *

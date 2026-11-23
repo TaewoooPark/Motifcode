@@ -151,6 +151,11 @@ export function providerForEndpoint(endpoint: string): ProviderId | undefined {
   return undefined;
 }
 
+/** Transports append /v1 to their already-normalized base when making the request. */
+export function isOpenRouterTransportEndpoint(base: string): boolean {
+  return providerForEndpoint(base + "/v1") === "openrouter";
+}
+
 /** Custom servers retain the legacy key. Each preset reads its own credential. */
 export function apiKeyEnvForEndpoint(endpoint: string): string {
   const provider = providerForEndpoint(endpoint);
@@ -200,10 +205,9 @@ export function resolveEndpointConfig(opts: ResolveOptions = {}): EndpointConfig
     return setting === undefined ? undefined : { value: setting, source: "settings", pairedEndpoint: opts.defaults?.endpoint };
   };
 
-  // Older installations could save only an Infron key, with no endpoint.
+  // A key-only installation can keep using its provider before it saves a preset.
   const endpoint = pick(opts.flags?.endpoint, ENV_ENDPOINT, opts.defaults?.endpoint) ?? {
-    value: !pick(undefined, ENV_OPENROUTER_API_KEY) && pick(undefined, ENV_API_KEY)
-      ? PROVIDERS.infron.endpoint : DEFAULT_ENDPOINT,
+    value: Object.values(PROVIDERS).find(provider => pick(undefined, provider.apiKeyEnv))?.endpoint ?? DEFAULT_ENDPOINT,
     source: "default",
   };
   const normalizedEndpoint = normalizeEndpoint(endpoint.value);

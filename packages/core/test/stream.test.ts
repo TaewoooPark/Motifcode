@@ -31,7 +31,7 @@ describe.each([false, true])("text-completion reasoning (stream=%s)", (stream) =
   async function complete(choices: Record<string, unknown>[], raw = true) {
     const deltas: unknown[] = [];
     const transport = new HttpTransport({
-      endpoint: "http://x", model: "m",
+      endpoint: "https://openrouter.ai/api", model: "m",
       fetchImpl: async () => stream
         ? sse([...choices.map((choice) => ({ choices: [choice] })), "[DONE]"])
         : new Response(JSON.stringify({ choices: [choices[0]] }), { headers: { "content-type": "application/json" } }),
@@ -210,5 +210,48 @@ describe("the loop's stream events", () => {
     expect(types.indexOf("content_delta")).toBeGreaterThan(types.lastIndexOf("stream"));
     const streamed = events.filter((e): e is Extract<LoopEvent, { type: "stream" }> => e.type === "stream");
     expect(streamed.map((e) => e.content ?? e.reasoning)).toEqual(["r1", "part ", "two"]);
+  });
+});
+
+describe.each([
+  ["https://openrouter.ai/api/v1", true],
+  ["https://llm.onerouter.pro", false],
+  ["https://api-cbt.morphfactory.io", false],
+  ["http://localhost:8189", false],
+  ["https://openrouter.ai/api/custom", false],
+  ["https://openrouter.ai/api/v1/v1", false],
+  ["https://openrouter.ai.example.org/api", false],
+] as const)("stream compatibility at %s", (endpoint, openRouter) => {
+  function complete(events: unknown[], raw = false) {
+    return new HttpTransport({ endpoint, model: "fixture", fetchImpl: async () => sse(events) }).complete({
+      messages: [], tools: [], ...(raw ? { raw: true, prompt: "fixture" } : {}), onDelta: () => {},
+    });
+  }
+  const write = chunk({ tool_calls: [{ index: 0, id: "w", function: { name: "write", arguments: "{}" } }] });
+  const finish = { choices: [{ delta: {}, finish_reason: "tool_calls" }] };
+
+  it("uses the endpoint's policy for unsealed native actions", async () => {
+    const response = complete([write]);
+    if (openRouter) await expect(response).rejects.toMatchObject({ kind: "network" });
+    else expect((await response).toolCalls).toHaveLength(1);
+  });
+
+  it("uses the endpoint's policy for torn events and changes after finish", async () => {
+    for (const events of [[write, "{bad", finish, "[DONE]"], [write, finish, chunk({ content: "after" }), "[DONE]"]]) {
+      const response = complete(events);
+      if (openRouter) await expect(response).rejects.toMatchObject({ kind: "network" });
+      else expect((await response).toolCalls).toHaveLength(1);
+    }
+  });
+
+  it("handles split reasoning on the text-completions route", async () => {
+    const choice = { choices: [{ text: "answer", reasoning: "separate", finish_reason: "stop" }] };
+    const streaming = await complete([choice, "[DONE]"], true);
+    const json = await new HttpTransport({ endpoint, model: "fixture", fetchImpl: async () => Response.json(choice) })
+      .complete({ messages: [], tools: [], raw: true, prompt: "fixture" });
+    for (const result of [streaming, json]) {
+      expect(result.content).toBe("answer");
+      expect(result.reasoningContent).toBe(openRouter ? "separate" : undefined);
+    }
   });
 });
