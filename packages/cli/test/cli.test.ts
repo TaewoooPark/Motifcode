@@ -397,7 +397,9 @@ describe("executor", () => {
       repaired: false as const,
       validated: true as const,
     };
-    const lines = content === "" ? 0 : content.split("\n").length;
+    // Logical lines follow the same convention as the reader: a single trailing
+    // newline terminates the last line rather than starting an empty one.
+    const lines = content === "" ? 0 : (content.endsWith("\n") ? content.slice(0, -1) : content).split("\n").length;
     const bytes = Buffer.byteLength(content, "utf8");
 
     const created = await ex.run({ id: "1", ...invocation });
@@ -410,6 +412,28 @@ describe("executor", () => {
     expect(replaced.output).toBe(`replaced a.txt (${lines} lines, ${bytes} bytes)`);
     expect(readFileSync(path, "utf8")).toBe(content);
     expect(statSync(path).size).toBe(bytes);
+  });
+
+  it.each([
+    ["", 0],
+    ["a", 1],
+    ["a\n", 1],
+    ["\n", 1],
+    ["a\n\n", 2],
+    ["one\ntwo\nthree\n", 3],
+  ])("counts logical lines consistently in write results for %j", async (content, expected) => {
+    // Regression for #55: the write summary used `content.split("\n").length`,
+    // which counted a trailing newline as an extra empty line. The reader
+    // (`toLogicalLines`) strips one trailing newline, so the writer must agree
+    // or the model sees a different line count than a subsequent read reports.
+    const dir = mkdtempSync(join(tmpdir(), "motifcode-write-lines-"));
+    const ex = new ToolExecutor({ cwd: dir });
+    const r = await ex.run({
+      id: "1", name: "write", arguments: { path: "single", content },
+      repaired: false, validated: true,
+    });
+    ex.close();
+    expect(r.output).toBe(`created single (${expected} lines, ${Buffer.byteLength(content, "utf8")} bytes)`);
   });
 
   it("applies a patch with miscounted hunks and no trailing newline", async () => {

@@ -384,7 +384,7 @@ function writeFile(path: string, content: string, cwd: string): ToolResult {
     mkdirSync(dirname(target), { recursive: true });
     const existed = existsSync(target);
     writeFileSync(target, content, "utf8");
-    const lines = content === "" ? 0 : content.split("\n").length;
+    const lines = toLogicalLines(content).length;
     return {
       ok: true,
       output: `${existed ? "replaced" : "created"} ${path} (${lines} lines, ${Buffer.byteLength(content, "utf8")} bytes)`,
