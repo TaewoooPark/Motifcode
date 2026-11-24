@@ -255,13 +255,24 @@ export class PersistentShell {
     const wait = Math.min(Math.max(durationS, 0), 60) * 1000;
     await new Promise<void>((r) => {
       const timer = setTimeout(done, wait);
-      const onAbort = () => done();
+      const onAbort = () => {
+        // Interrupt the foreground command, not the shell: Ctrl-C reaches the
+        // command's process group, so `sleep 25; write-file` does not write the
+        // file after the user has already seen "Interrupted". The shell stays
+        // alive for the next call.
+        try {
+          proc.stdin?.write("\u0003");
+        } catch {
+          /* the shell is gone; the caller sees alive=false */
+        }
+        done();
+      };
       function done(): void {
         clearTimeout(timer);
         signal?.removeEventListener("abort", onAbort);
         r();
       }
-      if (signal?.aborted) done();
+      if (signal?.aborted) onAbort();
       else signal?.addEventListener("abort", onAbort, { once: true });
     });
 
