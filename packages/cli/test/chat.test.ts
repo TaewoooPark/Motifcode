@@ -1006,6 +1006,24 @@ describe("interactive session", () => {
     expect(await s.finished).toBe(0);
   });
 
+  it("clears the ctrl-c quit hint when the two-second window expires", async () => {
+    const t = new GateTransport([]);
+    const s = session(t);
+    s.type("\x03");
+    await vi.waitFor(() => expect(s.screen()).toContain("ctrl-c again to quit"));
+    const before = s.screen().length;
+    s.tick(2100);
+    // The repaint after the window closes must not repeat the hint.
+    await vi.waitFor(
+      () => {
+        const repaint = s.screen().slice(before);
+        expect(repaint.length).toBeGreaterThan(0);
+        expect(repaint).not.toContain("ctrl-c again to quit");
+      },
+      { timeout: 3000 },
+    );
+  });
+
   it("clears the draft on escape before it ever interrupts anything", async () => {
     const t = new GateTransport([...done("x")]);
     const s = session(t);

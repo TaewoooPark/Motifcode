@@ -532,6 +532,13 @@ export class Chat {
           // Armed. A single Ctrl-C on an empty prompt is too easy to hit by
           // reflex to be an exit; the second one within a moment is a decision.
           this.ctrlCArmedAt = this.now();
+          const armedAt = this.ctrlCArmedAt;
+          // Repaint when the window closes, so the idle prompt stops promising
+          // a quit that the next Ctrl-C will no longer perform.
+          setTimeout(() => {
+            if (this.quitting || this.ctrlCArmedAt !== armedAt) return;
+            if (this.now() - armedAt >= CTRL_C_WINDOW_MS) this.refresh();
+          }, CTRL_C_WINDOW_MS + 25);
         }
         break;
       case "d":
