@@ -248,6 +248,32 @@ describe("cli process end to end", () => {
     expect(server.bodies[2]!.messages[1]!.content).toBe("what is the answer?");
   }, 30_000);
 
+  it("passes literal task text after -- through to the model", async () => {
+    // A standalone `--` ends flag and subcommand parsing. Without it these
+    // invocations print help, report the version, or lose the dash-prefixed word.
+    server = new MockServer(() => "</think>Literal reply.");
+    await server.start();
+
+    const flagLike = await runCli(["-p", "--endpoint", server.endpoint, "--", "--help"], dir);
+    expect(flagLike.code, `${flagLike.stdout}\n${flagLike.stderr}`).toBe(0);
+    expect(flagLike.stdout).toBe("Literal reply.\n");
+    expect(server.bodies[0]!.messages[1]!.content).toBe("--help");
+
+    const commandLike = await runCli(["-p", "--endpoint", server.endpoint, "--", "version"], dir);
+    expect(commandLike.code, `${commandLike.stdout}\n${commandLike.stderr}`).toBe(0);
+    expect(server.bodies[1]!.messages[1]!.content).toBe("version");
+
+    const multiword = await runCli(["-p", "--endpoint", server.endpoint, "--", "explain", "-x", "flag"], dir);
+    expect(multiword.code, `${multiword.stdout}\n${multiword.stderr}`).toBe(0);
+    expect(server.bodies[2]!.messages[1]!.content).toBe("explain -x flag");
+
+    // The separator is only for literal tasks: a bare --help is still CLI help.
+    const help = await runCli(["--help"], dir);
+    expect(help.code).toBe(0);
+    expect(help.stdout).toContain('motif -p -- "--help"');
+    expect(server.bodies).toHaveLength(3);
+  }, 60_000);
+
   it.each(["--print", "-p"])("restores the checkpoint transcript when resuming with %s", async (printFlag) => {
     writeFileSync(join(dir, "resume-marker.txt"), "RESUME_MARKER");
     server = new MockServer((turn) =>

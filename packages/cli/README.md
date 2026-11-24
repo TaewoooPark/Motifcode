@@ -36,7 +36,12 @@ motif                                   # interactive session in the current dir
 motif --continue                        # with the latest conversation here loaded
 motif "fix the failing test in tests/"  # one task, then exit
 motif -p "what does src/loop.ts do?"    # print only the reply, for pipes
+motif -p -- "--help"                    # pass a flag-looking task literally: -- ends option parsing
 ```
+
+A standalone `--` ends flag and subcommand recognition; everything after it is
+the task, so `motif -p -- "--help"` asks about `--help` instead of printing CLI
+help (plain `motif --help` still prints help).
 
 Connect MCP servers and check them from the CLI:
 
