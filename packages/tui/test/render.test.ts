@@ -193,6 +193,8 @@ describe("transcript", () => {
     expect(done[0]).toBe("⏺ all green");
     const aborted = renderTranscript(fold([{ type: "session_end", reason: "aborted" }]), OPTS);
     expect(aborted[0]).toBe("  ⎿  Interrupted");
+    const transport = renderTranscript(fold([{ type: "session_end", reason: "transport_error" }]), OPTS);
+    expect(transport[0]).toBe("  ⎿  Stopped: the request did not complete");
   });
 
   it("marks a repaired tool call", () => {
