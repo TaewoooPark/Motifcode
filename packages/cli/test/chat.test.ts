@@ -1006,6 +1006,20 @@ describe("interactive session", () => {
     expect(await s.finished).toBe(0);
   });
 
+  it("counts the transcript in messages in /status and /resume", async () => {
+    const t = new GateTransport(reply("answer"));
+    const s = session(t);
+    open.push(s);
+    s.type("hello\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    s.type("/status show\r");
+    await vi.waitFor(() => expect(s.screen()).toContain("2 messages in the conversation"));
+    s.type("/new\r");
+    await vi.waitFor(() => expect(s.chat.transcript).toHaveLength(0));
+    s.type("/resume 1\r");
+    await vi.waitFor(() => expect(s.screen()).toContain("2 messages loaded"));
+  });
+
   it("clears the draft on escape before it ever interrupts anything", async () => {
     const t = new GateTransport([...done("x")]);
     const s = session(t);

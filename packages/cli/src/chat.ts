@@ -189,6 +189,9 @@ const IDLE_HINT = "";
 const RUNNING_HINT = "esc to interrupt";
 const CTRL_C_WINDOW_MS = 2000;
 
+/** The transcript length in the one unit the dashboard, `/status` and `/resume` share. */
+const messagesLabel = (n: number): string => `${n} message${n === 1 ? "" : "s"}`;
+
 /**
  * Commands that rewrite the conversation, refused while a task is running.
  *
@@ -2187,7 +2190,7 @@ export class Chat {
         { label: "Working directory", value: this.settings.cwd },
         { label: "Channel / policy", value: `${this.settings.channel} / ${this.opts.channelPolicy}` },
         { label: "Permissions", value: `${this.settings.permissions}${this.alwaysAllowed.size ? ` · ${this.alwaysAllowed.size} session grants` : ""}`, detail: this.alwaysAllowed.size ? `Allowed this session: ${[...this.alwaysAllowed].join(", ")}` : "No per-tool session grants." },
-        { label: "Conversation", value: `${this.history.length} messages · ${this.queued.length} queued` },
+        { label: "Conversation", value: `${messagesLabel(this.history.length)} · ${this.queued.length} queued` },
         { label: "Session tasks", value: `${this.totals.tasks} ended · ${this.totals.done} done · ${this.totals.interrupted} interrupted` },
         { label: "Last context", value: `${this.totals.lastContext.toLocaleString("en-US")} / ${MAX_CONTEXT.toLocaleString("en-US")} tokens`, detail: "Last reported root prompt tokens, not a live estimate." },
         { label: "Skills / agents", value: `${this.opts.skills.list().length} skills · ${this.opts.agents.list().length} agents` },
@@ -2333,7 +2336,7 @@ export class Chat {
       `compact-at  ${s.compactAt} of ${MAX_CONTEXT.toLocaleString("en-US")} tokens`,
       `api key     ${this.apiKey ? `present, from ${this.apiKeySource ?? "the caller"}` : "none — /login"}`,
       `journal     ${this.lastJournalPath ?? `(none yet; ${this.opts.journalDir})`}`,
-      `history     ${this.history.length} turn(s) in the conversation`,
+      `history     ${messagesLabel(this.history.length)} in the conversation`,
       `tasks       ${t.tasks} run · ${t.done} done · ${t.interrupted} interrupted`,
       `tokens      prompt ${fmt(t.promptTokens)} · completion ${fmt(t.completionTokens)} · cached ${fmt(t.cachedTokens)} · last context ${fmt(t.lastContext)}`,
     ];
@@ -2393,7 +2396,7 @@ export class Chat {
     this.opts.mcp?.clearScope("root");
     lines.unshift(
       `continuing from ${path}`,
-      `${this.history.length} turn(s) loaded${state.task ? ` — last task: ${state.task.split("\n")[0]}` : ""}`,
+      `${messagesLabel(this.history.length)} loaded${state.task ? ` — last task: ${state.task.split("\n")[0]}` : ""}`,
       state.finished ? "that session had finished; the next task picks up after it" : "that session was interrupted; the next task picks up where it stopped",
     );
     return lines;

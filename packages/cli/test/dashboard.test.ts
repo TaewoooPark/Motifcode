@@ -123,6 +123,14 @@ describe("interactive settings dashboard", () => {
     expect(s.makeTransport).not.toHaveBeenCalled();
   });
 
+  it("shows the transcript length in messages on the Status tab", async () => {
+    const s = session();
+    s.type("go\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    s.type("/status\r");
+    await vi.waitFor(() => expect(s.value("Conversation")).toBe("2 messages · 0 queued"));
+  });
+
   it("keeps an invalid numeric edit open and cancels it without applying or saving", () => {
     const s = session();
     s.type("/config\r" + DOWN.repeat(6) + "\r");
