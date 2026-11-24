@@ -59,6 +59,7 @@ import {
   THEMES,
   applyTheme,
   clampSelection,
+  formatMention,
   mentionAt,
   menuItemsFor,
   relativise,
@@ -595,7 +596,7 @@ export class Chat {
     const before = chars.slice(0, m.start).join("");
     const after = chars.slice(m.end).join("");
     const trailing = item.name.endsWith("/") ? "" : " ";
-    const next = `${before}@${item.name}${trailing}`;
+    const next = `${before}@${formatMention(item.name)}${trailing}`;
     this.composer.clear();
     this.composer.insert(next);
     this.composer.insert(after);

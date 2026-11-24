@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mentionAt, mentionsIn } from "../src/mention.js";
+import { formatMention, mentionAt, mentionsIn } from "../src/mention.js";
 
 describe("mentions", () => {
   it("finds the @token under the cursor, and only when @ starts a word", () => {
@@ -21,5 +21,18 @@ describe("mentions", () => {
   it("lists every mention in a message", () => {
     expect(mentionsIn("fix @src/a.ts and @skill:commit, not me@x.y")).toEqual(["src/a.ts", "skill:commit,"]);
     expect(mentionsIn("nothing here")).toEqual([]);
+  });
+
+  it("keeps a quoted path with spaces as one mention", () => {
+    expect(mentionsIn('Read @"meeting notes.txt" and summarize')).toEqual(["meeting notes.txt"]);
+    expect(mentionsIn('@"a b/c d.md" @x.ts')).toEqual(["a b/c d.md", "x.ts"]);
+    // An unclosed or glued quote is an ordinary token, as before.
+    expect(mentionsIn('@"oops and more')).toEqual(['"oops']);
+    expect(mentionsIn('@"a b"c')).toEqual(['"a']);
+  });
+
+  it("quotes a chosen path only when it contains whitespace", () => {
+    expect(formatMention("meeting notes.txt")).toBe('"meeting notes.txt"');
+    expect(formatMention("src/a.ts")).toBe("src/a.ts");
   });
 });
