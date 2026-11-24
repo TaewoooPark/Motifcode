@@ -163,11 +163,24 @@ export const COMMANDS: readonly SlashCommand[] = [
   {
     name: "help",
     description: "commands and keys",
-    run: () => {
+    usage: "[command]",
+    run: (_ctx, args) => {
+      const requested = args.trim().replace(/^\//, "");
+      if (requested) {
+        const command = findCommand(requested);
+        if (!command) return fail(`/help ${requested}`, `unknown command /${requested} — /help lists them`);
+        const invocation = `/${command.name}${command.usage ? ` ${command.usage}` : ""}`;
+        return ok(invocation, [
+          command.description,
+          "",
+          "Run /help with no argument for the command index and keys.",
+        ]);
+      }
       const width = Math.max(...COMMANDS.map((c) => `/${c.name}${c.usage ? ` ${c.usage}` : ""}`.length));
       const lines = COMMANDS.map(
         (c) => `${`/${c.name}${c.usage ? ` ${c.usage}` : ""}`.padEnd(width)}  ${c.description}`,
       );
+      lines.push("", "Give /help a command name for its usage: /help <command>.");
       lines.push("", "Skills are commands too: /<skill> [input] runs one — /skills lists them.");
       const keyWidth = Math.max(...KEYS.map(([k]) => k.length));
       lines.push("", "keys");
