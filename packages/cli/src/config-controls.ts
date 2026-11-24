@@ -25,6 +25,14 @@ export const CONFIG_FIELDS: readonly ConfigField[] = [
   { key: "theme", label: "Theme", choices: Object.keys(THEMES), detail: "Terminal color palette. Applies immediately; NO_COLOR takes precedence." },
 ];
 
+/** The footer hint for the selected Config row: what Enter actually does. */
+export function configHint(field: ConfigField | undefined): string {
+  if (!field) return "↑↓ select · tab next · esc close";
+  return field.choices
+    ? "↑↓ select · ←→ change · tab next · esc close"
+    : "↑↓ select · enter edit · tab next · esc close";
+}
+
 export function configField(key: string): ConfigField | undefined {
   const normalized = key.toLowerCase().replace(/[-_]/g, "");
   return CONFIG_FIELDS.find((f) => f.key.toLowerCase() === (normalized === "maxtokens" ? "maxoutputtokens" : normalized));

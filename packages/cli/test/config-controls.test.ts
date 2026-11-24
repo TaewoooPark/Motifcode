@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { configField, parseConfigValue } from "../src/config-controls.js";
+import { CONFIG_FIELDS, configField, configHint, parseConfigValue } from "../src/config-controls.js";
 
 const parse = (key: string, raw: string) => parseConfigValue(configField(key)!, raw);
 
@@ -45,5 +45,17 @@ describe("interactive configuration values", () => {
     expect(() => parse("thinking", "yes")).toThrow();
     expect(() => parse("permissions", "all")).toThrow();
     expect(() => parse("channel", "chat")).toThrow();
+  });
+});
+
+
+describe("configHint", () => {
+  it("names what Enter does for the selected row", () => {
+    const toggle = CONFIG_FIELDS.find((f) => f.key === "thinking")!;
+    const text = CONFIG_FIELDS.find((f) => f.key === "model")!;
+
+    expect(configHint(toggle)).toBe("↑↓ select · ←→ change · tab next · esc close");
+    expect(configHint(text)).toBe("↑↓ select · enter edit · tab next · esc close");
+    expect(configHint(undefined)).toBe("↑↓ select · tab next · esc close");
   });
 });

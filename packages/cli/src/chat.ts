@@ -75,7 +75,7 @@ import { displayHomePath, loginLines, normaliseKeyInput, verifyApiKey, type Veri
 import { COMMANDS, findCommand, parseSlash, runSlash, type ChatSettings, type CommandContext, type CommandOutput, type PersistableKey } from "./commands.js";
 import { MCP_USAGE, mcpCatalogEntries, mcpFailureHint, mcpListLines, mcpLoginPanelView, mcpPanelKeys, mcpPanelView, mcpStatusLabel, mcpToolCount, parseMcpRequest, type McpAction } from "./mcp-ui.js";
 import type { LoadedSettings, StoredSettings } from "./settings.js";
-import { CONFIG_FIELDS, configField, parseConfigValue, type ConfigField } from "./config-controls.js";
+import { CONFIG_FIELDS, configField, configHint, parseConfigValue, type ConfigField } from "./config-controls.js";
 import { collectInsights, statsRows, usageRows } from "./insights.js";
 import { InfronBilling } from "./billing.js";
 import { balanceRows } from "./billing-view.js";
@@ -2207,7 +2207,7 @@ export class Chat {
       message: panel.message,
       error: panel.error,
       hint: panel.editing ? "enter save · esc cancel · ctrl-u clear"
-        : panel.tab === "config" ? "↑↓ select · enter edit · ←→ change · tab next · esc close"
+        : panel.tab === "config" ? configHint(CONFIG_FIELDS[panel.selected])
         : "↑↓ inspect · tab / ←→ switch · r refresh · esc close",
       ...(panel.editing ? { editing: { label: panel.editing.label, draft: this.configEditor.snapshot() } } : {}),
     };
