@@ -2333,7 +2333,7 @@ export class Chat {
       `compact-at  ${s.compactAt} of ${MAX_CONTEXT.toLocaleString("en-US")} tokens`,
       `api key     ${this.apiKey ? `present, from ${this.apiKeySource ?? "the caller"}` : "none — /login"}`,
       `journal     ${this.lastJournalPath ?? `(none yet; ${this.opts.journalDir})`}`,
-      `history     ${this.history.length} turn(s) in the conversation`,
+      `history     ${this.history.length} message(s) in the conversation`,
       `tasks       ${t.tasks} run · ${t.done} done · ${t.interrupted} interrupted`,
       `tokens      prompt ${fmt(t.promptTokens)} · completion ${fmt(t.completionTokens)} · cached ${fmt(t.cachedTokens)} · last context ${fmt(t.lastContext)}`,
     ];
@@ -2393,7 +2393,7 @@ export class Chat {
     this.opts.mcp?.clearScope("root");
     lines.unshift(
       `continuing from ${path}`,
-      `${this.history.length} turn(s) loaded${state.task ? ` — last task: ${state.task.split("\n")[0]}` : ""}`,
+      `${this.history.length} message(s) loaded${state.task ? ` — last task: ${state.task.split("\n")[0]}` : ""}`,
       state.finished ? "that session had finished; the next task picks up after it" : "that session was interrupted; the next task picks up where it stopped",
     );
     return lines;
