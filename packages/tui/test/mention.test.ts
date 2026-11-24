@@ -21,5 +21,7 @@ describe("mentions", () => {
   it("lists every mention in a message", () => {
     expect(mentionsIn("fix @src/a.ts and @skill:commit, not me@x.y")).toEqual(["src/a.ts", "skill:commit,"]);
     expect(mentionsIn("nothing here")).toEqual([]);
+    expect(mentionsIn('read @"meeting notes.txt" now')).toEqual(["meeting notes.txt"]);
+    expect(mentionsIn("read @'meeting notes.txt'")).toEqual(["meeting notes.txt"]);
   });
 });

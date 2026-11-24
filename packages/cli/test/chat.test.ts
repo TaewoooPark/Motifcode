@@ -659,6 +659,22 @@ describe("interactive session", () => {
     expect(s.screen()).not.toContain("> look at @alpha.txt please\n\n<file");
   });
 
+  it("attaches a picked file whose name contains a space", async () => {
+    const t = new GateTransport([...reply("read it")]);
+    const s = session(t);
+    open.push(s);
+    writeFileSync(join(s.cwd, "meeting notes.txt"), "NOTES CONTENT\n");
+    execFileSync("git", ["init", "-q"], { cwd: s.cwd });
+    s.type("read @meeting");
+    await vi.waitFor(() => expect(s.screen()).toContain('❯ @meeting notes.txt'));
+    s.type("\t");
+    await vi.waitFor(() => expect(s.screen()).toContain('> read @"meeting notes.txt"'));
+    s.type("\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    const sent = String(t.seen[0]!.messages[1]!.content);
+    expect(sent).toContain('<file path="meeting notes.txt">\nNOTES CONTENT');
+  });
+
   it("offers skills in the picker as @skill:name", async () => {
     const t = new GateTransport([]);
     const s = session(t);

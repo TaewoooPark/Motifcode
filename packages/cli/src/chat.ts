@@ -595,7 +595,9 @@ export class Chat {
     const before = chars.slice(0, m.start).join("");
     const after = chars.slice(m.end).join("");
     const trailing = item.name.endsWith("/") ? "" : " ";
-    const next = `${before}@${item.name}${trailing}`;
+    // A name with a space is quoted, so mentionsIn() can tell where it ends.
+    const token = /\s/.test(item.name) && !item.name.startsWith("skill:") ? `"${item.name}"` : item.name;
+    const next = `${before}@${token}${trailing}`;
     this.composer.clear();
     this.composer.insert(next);
     this.composer.insert(after);

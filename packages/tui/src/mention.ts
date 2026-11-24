@@ -29,9 +29,14 @@ export function mentionAt(text: string, cursor: number): Mention | null {
   return { start, end, query: chars.slice(start + 1, at).join("") };
 }
 
-/** Every `@token` in a message, as typed. */
+/**
+ * Every `@token` in a message, as typed. A path with spaces is quoted by the
+ * picker as `@"meeting notes.txt"`, so the quotes are removed here and the
+ * name reaches the attachment code whole.
+ */
 export function mentionsIn(text: string): string[] {
   const out: string[] = [];
-  for (const m of text.matchAll(/(?:^|\s)@(\S+)/g)) out.push(m[1]!);
+  const pattern = /(?:^|\s)@(?:"([^"]+)"|'([^']+)'|(\S+))/g;
+  for (const m of text.matchAll(pattern)) out.push((m[1] ?? m[2] ?? m[3])!);
   return out;
 }
