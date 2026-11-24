@@ -245,6 +245,7 @@ export class Chat {
   private readonly mcpLoginOffered = new Set<string>();
   private mcpBusy: { abort: AbortController; server: string; action: McpAction | "install"; notice?: string } | null = null;
   private mcpRefreshTimer: NodeJS.Timeout | null = null;
+  private ctrlCTimer: NodeJS.Timeout | null = null;
   /** The credential for this session. Starts as the caller's; `/login` replaces it, `/logout` drops it. */
   private apiKey: string | undefined;
   private apiKeySource: string | undefined;
@@ -514,9 +515,16 @@ export class Chat {
       default:
         break;
     }
-    if (key.type !== "ctrl" || key.key !== "c") this.ctrlCArmedAt = 0;
+    if (key.type !== "ctrl" || key.key !== "c") this.disarmCtrlC();
     // A quit from the keypress (Ctrl-D, a second Ctrl-C) has already cleaned the terminal up
     if (!this.quitting) this.refresh();
+  }
+
+  /** Drop an armed Ctrl-C and its expiry timer. */
+  private disarmCtrlC(): void {
+    this.ctrlCArmedAt = 0;
+    if (this.ctrlCTimer) clearTimeout(this.ctrlCTimer);
+    this.ctrlCTimer = null;
   }
 
   private onControl(letter: string): void {
@@ -532,6 +540,16 @@ export class Chat {
           // Armed. A single Ctrl-C on an empty prompt is too easy to hit by
           // reflex to be an exit; the second one within a moment is a decision.
           this.ctrlCArmedAt = this.now();
+          // The hint promises a window; take it back when the window closes,
+          // without waiting for a keystroke to repaint the footer.
+          if (this.ctrlCTimer) clearTimeout(this.ctrlCTimer);
+          this.ctrlCTimer = setTimeout(() => {
+            this.ctrlCTimer = null;
+            if (this.quitting || this.ctrlCArmedAt === 0) return;
+            this.ctrlCArmedAt = 0;
+            this.refresh();
+          }, CTRL_C_WINDOW_MS + 50);
+          this.ctrlCTimer.unref?.();
         }
         break;
       case "d":
@@ -1702,6 +1720,7 @@ export class Chat {
     if (this.pendingSecret) { const pending = this.pendingSecret; this.pendingSecret = null; this.composer.clear(); pending.resolve(null); }
     if (this.mcpRefreshTimer) clearTimeout(this.mcpRefreshTimer);
     this.mcpRefreshTimer = null;
+    this.disarmCtrlC();
     if (this.active) {
       // The task ends first; `finish` runs from its tail.
       this.interrupt();

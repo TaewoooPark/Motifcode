@@ -1006,6 +1006,48 @@ describe("interactive session", () => {
     expect(await s.finished).toBe(0);
   });
 
+  it("takes back the quit hint when the two-second window expires", async () => {
+    const s = session(new GateTransport([]));
+    open.push(s);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      s.type("\x03");
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(s.screen()).toContain("ctrl-c again to quit");
+      const before = s.screen().length;
+      vi.advanceTimersByTime(2_100);
+      const after = s.screen().slice(before);
+      expect(after).not.toContain("ctrl-c again to quit");
+      expect(after).toContain("type a task");
+      // A later press starts a fresh window, and a second one inside it quits.
+      s.type("\x03");
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(s.screen().slice(before)).toContain("ctrl-c again to quit");
+      s.type("\x03");
+      expect(await s.finished).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not repaint the footer when the quit hint expires after exit", async () => {
+    const s = session(new GateTransport([]));
+    open.push(s);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      s.type("\x03");
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(s.screen()).toContain("ctrl-c again to quit");
+      const before = s.screen().length;
+      s.type("\x04");
+      expect(await s.finished).toBe(0);
+      vi.advanceTimersByTime(3_000);
+      expectNoRepaintSince(s, before);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("clears the draft on escape before it ever interrupts anything", async () => {
     const t = new GateTransport([...done("x")]);
     const s = session(t);
