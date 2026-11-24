@@ -79,6 +79,39 @@ describe("editing", () => {
     expect(c.text).toBe("ab\ncd");
   });
 
+  it("restores the draft's cursor when coming back from history", () => {
+    const c = new Composer();
+    c.seedHistory(["older"]);
+    c.insert("ab🙂cd");
+    c.left();
+    c.left();
+    expect(c.cursor).toBe(3);
+    expect(c.up()).toBe(true);
+    expect(c.text).toBe("older");
+    expect(c.down()).toBe(true);
+    expect(c.text).toBe("ab🙂cd");
+    expect(c.cursor).toBe(3);
+    c.insert("X");
+    expect(c.text).toBe("ab🙂Xcd");
+    expect(c.cursor).toBe(4);
+  });
+
+  it("keeps the draft cursor while browsing several history entries", () => {
+    const c = new Composer();
+    c.seedHistory(["one", "two"]);
+    c.insert("draft");
+    c.left();
+    c.left();
+    c.up();
+    c.up();
+    c.up();
+    expect(c.text).toBe("one");
+    c.down();
+    c.down();
+    expect(c.text).toBe("draft");
+    expect(c.cursor).toBe(3);
+  });
+
   it("collapses a long paste to a placeholder and sends the whole thing", () => {
     const c = new Composer();
     const big = Array.from({ length: 30 }, (_, i) => `line ${i}`).join("\n");
