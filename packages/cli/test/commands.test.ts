@@ -97,6 +97,33 @@ describe("commands", () => {
     expect(out.lines.join("\n")).toContain("esc");
   });
 
+  it("shows one command's usage for /help <command>", async () => {
+    const { ctx } = fakeContext();
+    const out = await runSlash("/help max-turns", ctx);
+
+    expect(out.error).toBeUndefined();
+    expect(out.title).toBe("/max-turns [n]");
+    expect(out.lines[0]).toBe("show or set the turn ceiling per task");
+  });
+
+  it("resolves an alias and leaves the session open", async () => {
+    const { ctx, calls } = fakeContext();
+    const out = await runSlash("/help exit", ctx);
+
+    expect(out.error).toBeUndefined();
+    expect(out.title).toBe("/quit");
+    expect(out.lines[0]).toBe("leave (also /exit)");
+    expect(calls).not.toContain("quit");
+  });
+
+  it("points back to /help for an unknown name", async () => {
+    const { ctx } = fakeContext();
+    const out = await runSlash("/help nope", ctx);
+
+    expect(out.error).toBe(true);
+    expect(out.lines[0]).toContain("/help");
+  });
+
   it("shows and sets the model, endpoint, budgets and seed, and remembers each", async () => {
     const { ctx, settings, calls } = fakeContext();
     expect((await runSlash("/model", ctx)).lines).toEqual(["motif/motif-3"]);
