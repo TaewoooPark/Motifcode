@@ -449,7 +449,7 @@ to read a particular file first. Key-only Infron or Morphfactory installations c
 | `/theme [name]` | show, list or set the colour theme |
 | `/thinking` | show or hide the model's reasoning |
 | `/compact [focus]` | replace the transcript with the model's summary of it; words after it say what to keep |
-| `/compact-at [0.5-1]` | the context fraction at which compaction runs (default 0.75) |
+| `/compact-at [0.1-1]` | the context fraction at which compaction runs (default 0.75) |
 | `/permissions [ask\|auto]` | ask before commands, writes and patches run, or run everything |
 | `/cwd [path]` | show or change the working directory |
 | `/notes` (`/memory`), `/hooks` | the project notes every task reads; the hooks around tools |

@@ -363,7 +363,7 @@ export const COMMANDS: readonly SlashCommand[] = [
   {
     name: "compact-at",
     description: "show or set the context fraction at which compaction runs",
-    usage: "[0.5-1]",
+    usage: "[0.1-1]",
     run: (ctx, args) => {
       if (args === "") return ok("/compact-at", [`${ctx.settings.compactAt} of the context window`]);
       const f = Number(args);

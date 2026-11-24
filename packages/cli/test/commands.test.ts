@@ -188,6 +188,9 @@ describe("commands", () => {
     expect((await runSlash("/cost", ctx)).lines).toEqual(["status line"]);
     await runSlash("/compact-at 0.5", ctx);
     expect(settings.compactAt).toBe(0.5);
+    await runSlash("/compact-at 0.2", ctx);
+    expect(settings.compactAt).toBe(0.2);
+    expect(findCommand("compact-at")?.usage).toBe("[0.1-1]");
     expect((await runSlash("/compact-at 3", ctx)).error).toBe(true);
     expect((await runSlash("/config", ctx)).lines).toEqual(["config line"]);
   });
