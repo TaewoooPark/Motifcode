@@ -329,7 +329,7 @@ function renderCellRaw(cell: Cell, opts: RenderOptions): StyledLine[] {
         breakage_limit: "Stopped: too many malformed actions",
         loop_detected: "Stopped: the same action kept repeating",
         no_action_limit: "Stopped: no action for several turns",
-        transport_error: "Stopped: the endpoint could not be reached",
+        transport_error: "Stopped: the request did not complete",
       };
       return [line(`  ${RESULT}  ${label[cell.reason] ?? `Stopped: ${cell.reason}`}`, "warn"), blank];
     }
