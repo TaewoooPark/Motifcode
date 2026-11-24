@@ -37,6 +37,18 @@ function wideAmbiguous(terminal: TerminalInstance): void {
 afterEach(() => { vi.unstubAllEnvs(); vi.useRealTimers(); });
 
 describe("physical footer viewport", () => {
+  it("keeps every ? shortcut readable at 80 columns", () => {
+    const frames = recording(80, 24, (screen, frame) => {
+      screen.setComposer({ draft: { text: "", cursor: 0 } });
+      screen.toggleShortcuts();
+      frame();
+    });
+    const out = frames.join("");
+    for (const label of ["shift-tab permissions", "? hide this", "ctrl-d quit", "# add a project note"]) {
+      expect(out).toContain(label);
+    }
+  });
+
   it.each([1, 45])("blinks a %i-line live reply inside the viewport without moving the editor or scrollback", async (count) => {
     vi.stubEnv("NO_COLOR", undefined);
     vi.stubEnv("TERM", "xterm-256color");

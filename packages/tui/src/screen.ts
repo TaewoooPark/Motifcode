@@ -118,9 +118,12 @@ const SPINNER = ["✻", "✼", "✽", "✾"];
 
 /** The keys, for the panel `?` opens. */
 const SHORTCUTS = [
-  "enter send · \\ + enter newline · esc interrupt or clear · ctrl-c twice quit · ctrl-d quit",
-  "↑ ↓ history · tab show or hide reasoning · ctrl-o output viewer · ctrl-l redraw · shift-tab permissions",
-  "@ attach a file · ! run a shell line · # add a project note · / commands · ? hide this",
+  "enter send · \\ + enter newline · esc interrupt or clear",
+  "ctrl-c twice quit · ctrl-d quit",
+  "↑ ↓ history · tab show or hide reasoning",
+  "ctrl-o output viewer · ctrl-l redraw · shift-tab permissions",
+  "@ attach a file · ! run a shell line · # add a project note",
+  "/ commands · ? hide this",
 ];
 
 /**
