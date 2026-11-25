@@ -166,6 +166,23 @@ export function attachMention(
   return { mention: clean, block: `<file path="${clean}">\n${text}${note}\n</file>` };
 }
 
+/** Longest path beginning at `@token` that exists, for names with spaces. */
+function attachExtended(token: string, text: string, opts: { cwd: string; renderSkill?: (name: string) => string | undefined }): Attachment | null {
+  if (token.startsWith("skill:")) return null;
+  const at = text.indexOf(`@${token}`);
+  if (at < 0) return null;
+  const rest = text.slice(at + token.length + 1);
+  let candidate = token;
+  for (const word of rest.trimStart().split(/\s+/).slice(0, 16)) {
+    if (!word || word.startsWith("@")) break;
+    candidate += ` ${word}`;
+    if (candidate.length > 1024) break;
+    const found = attachMention(candidate, opts);
+    if (found) return found;
+  }
+  return null;
+}
+
 /** The message with its mentions attached after it. The text itself is kept as typed. */
 export function expandMentions(
   text: string,
@@ -176,7 +193,10 @@ export function expandMentions(
   const blocks: string[] = [];
   const seen = new Set<string>();
   for (const m of mentions) {
-    const a = attachMention(m, opts);
+    // The picker completes a name containing spaces to `@meeting notes.txt`,
+    // but the mention token stops at the first space. Extend the token across
+    // following words until a path exists (issue #72).
+    const a = attachMention(m, opts) ?? attachExtended(m, text, opts);
     if (!a || seen.has(a.mention)) continue;
     seen.add(a.mention);
     attached.push(a.mention);

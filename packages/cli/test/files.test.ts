@@ -114,6 +114,16 @@ describe("attaching", () => {
     expect(a.block.length).toBeLessThan(ATTACH_CAP_BYTES + 300);
   });
 
+  it("attaches a file whose name contains a space (issue #72)", () => {
+    const dir = repo();
+    writeFileSync(join(dir, "meeting notes.txt"), "MEETING CONTENT\n");
+    const { task, attached } = expandMentions("read @meeting notes.txt now", ["meeting"], { cwd: dir });
+    expect(attached).toEqual(["meeting notes.txt"]);
+    expect(task).toContain('<file path="meeting notes.txt">\nMEETING CONTENT');
+    // The text itself is still what the person typed.
+    expect(task.startsWith("read @meeting notes.txt now\n\n<file")).toBe(true);
+  });
+
   it("keeps the text as typed and appends the attachments once each", () => {
     const dir = repo();
     const { task, attached } = expandMentions("read @README.md and @README.md again, @nothing", ["README.md", "README.md", "nothing"], { cwd: dir });
