@@ -659,6 +659,58 @@ describe("interactive session", () => {
     expect(s.screen()).not.toContain("> look at @alpha.txt please\n\n<file");
   });
 
+  it("attaches a picked file whose name contains a space", async () => {
+    const t = new GateTransport([...reply("read it")]);
+    const s = session(t);
+    open.push(s);
+    writeFileSync(join(s.cwd, "meeting notes.txt"), "MEETING MARKER\n");
+    // A file named after the first word must not be attached in its place.
+    writeFileSync(join(s.cwd, "meeting"), "WRONG FILE\n");
+    execFileSync("git", ["init", "-q"], { cwd: s.cwd });
+    s.type("Read @meeting");
+    await vi.waitFor(() => expect(s.screen()).toContain("@meeting notes.txt"));
+    for (let i = 0; i < 10 && !s.screen().includes("❯ @meeting notes.txt"); i++) {
+      s.type("\x1b[B");
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    s.type("\t");
+    await vi.waitFor(() => expect(s.screen()).toContain('> Read @"meeting notes.txt"'));
+    s.type("then summarize\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    const sent = String(t.seen[0]!.messages[1]!.content);
+    expect(sent.startsWith('Read @"meeting notes.txt" then summarize')).toBe(true);
+    expect(sent.match(/<file /g)).toHaveLength(1);
+    expect(sent).toContain('<file path="meeting notes.txt">\nMEETING MARKER');
+    expect(sent).not.toContain("WRONG FILE");
+  });
+
+  // Windows does not allow `"` in file names.
+  it.skipIf(process.platform === "win32").each([
+    { name: '"notes"', typed: '@"no', marker: "QUOTED NOTES" },
+    { name: 'quarter "final".txt', typed: "@quarter", marker: "QUARTER FINAL" },
+  ])("attaches the picked file $name, literal double quotes included", async ({ name, typed, marker }) => {
+    const t = new GateTransport([...reply("read it")]);
+    const s = session(t);
+    open.push(s);
+    writeFileSync(join(s.cwd, name), `${marker}\n`);
+    // Same name without the quotes, with other contents, to catch substitution.
+    writeFileSync(join(s.cwd, name.replace(/"/g, "")), "WRONG FILE\n");
+    execFileSync("git", ["init", "-q"], { cwd: s.cwd });
+    s.type(`Read ${typed}`);
+    await vi.waitFor(() => expect(s.screen()).toContain(`@${name}`));
+    for (let i = 0; i < 10 && !s.screen().includes(`❯ @${name}`); i++) {
+      s.type("\x1b[B");
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    s.type("\t");
+    s.type("please\r");
+    await vi.waitFor(() => expect(s.chat.tasksCompleted).toBe(1));
+    const sent = String(t.seen[0]!.messages[1]!.content);
+    expect(sent.match(/<file /g)).toHaveLength(1);
+    expect(sent).toContain(marker);
+    expect(sent).not.toContain("WRONG FILE");
+  });
+
   it("offers skills in the picker as @skill:name", async () => {
     const t = new GateTransport([]);
     const s = session(t);
