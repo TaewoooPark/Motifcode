@@ -32,12 +32,18 @@ export function mentionAt(text: string, cursor: number): Mention | null {
 
 /** How a chosen path is written after `@`: quoted when it contains whitespace. */
 export function formatMention(path: string): string {
-  return /\s/.test(path) ? `"${path}"` : path;
+  // A literal `"` would otherwise be read as the quoting itself, so it is
+  // quoted and escaped too: `"notes"` becomes `@"\"notes\""`.
+  if (!/[\s"]/.test(path)) return path;
+  return `"${path.replace(/[\\"]/g, (c) => `\\${c}`)}"`;
 }
 
 /** Every `@token` in a message, as typed, with `@"quoted paths"` unquoted. */
 export function mentionsIn(text: string): string[] {
   const out: string[] = [];
-  for (const m of text.matchAll(/(?:^|\s)@(?:"([^"\n]+)"(?=$|\s)|(\S+))/g)) out.push((m[1] ?? m[2])!);
+  for (const m of text.matchAll(/(?:^|\s)@(?:"((?:[^"\\\n]|\\.)+)"(?=$|\s)|(\S+))/g)) {
+    // Only `\"` and `\\` are escapes; any other backslash is part of the path.
+    out.push(m[1] !== undefined ? m[1].replace(/\\(["\\])/g, "$1") : m[2]!);
+  }
   return out;
 }
