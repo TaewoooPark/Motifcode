@@ -151,17 +151,18 @@ export class Journal {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   }
 
-  private write(line: JournalLine): void {
+  private write(line: JournalLine, flag: "a" | "wx" = "a"): void {
     // Synchronous, and one record per write call. An async write that has not
     // flushed when the process dies is exactly the record you needed, and a
     // record split across two writes is the corrupt line that loses the file.
-    appendFileSync(this.path, JSON.stringify(line) + "\n", { encoding: "utf8", mode: 0o600 });
+    appendFileSync(this.path, JSON.stringify(line) + "\n", { encoding: "utf8", mode: 0o600, flag });
   }
 
   private ensureHeader(): void {
     if (this.headerWritten) return;
+    // Each header starts a new sequence. Claim the path before writing any events.
+    this.write({ t: "header", header: this.header }, "wx");
     this.headerWritten = true;
-    this.write({ t: "header", header: this.header });
   }
 
   record(scope: ScopeIdentity, record: JournalRecordV2): number {

@@ -280,6 +280,38 @@ describe("cli process end to end", () => {
     expect(loadResume(journalPath).checkpoint?.messages.at(-1)).toMatchObject({ role: "assistant", content: "PRINT_JOURNAL_OK" });
   }, 30_000);
 
+  it("refuses to reuse a print journal before calling the model", async () => {
+    const journalPath = join("records", "requested-session.jsonl");
+    const journalFile = join(dir, journalPath);
+    server = new MockServer(() => "</think>PRINT_JOURNAL_OK");
+    await server.start();
+
+    const args = ["-p", "--endpoint", server.endpoint, "--journal", journalPath, "Reply with PRINT_JOURNAL_OK"];
+    const first = await runCli(args, dir);
+    expect(first).toMatchObject({ code: 0, stdout: "PRINT_JOURNAL_OK\n", stderr: "" });
+    const original = readFileSync(journalFile);
+    expect(parseJournal(original.toString("utf8")).corruption).toBeUndefined();
+
+    const second = await runCli(args, dir);
+    expect(second).toMatchObject({ code: 1, stdout: "" });
+    expect(second.stderr).toContain("file already exists");
+    expect(second.stderr).toContain(journalPath);
+    expect(server.bodies).toHaveLength(1);
+    expect(readFileSync(journalFile)).toEqual(original);
+  }, 30_000);
+
+  it("allows only one print run to claim a journal", async () => {
+    const journalPath = join(dir, "shared.jsonl");
+    server = new MockServer(() => "</think>PRINT_JOURNAL_OK");
+    await server.start();
+
+    const args = ["-p", "record one answer", "--journal", journalPath, "--endpoint", server.endpoint];
+    const results = await Promise.all([runCli(args, dir), runCli(args, dir)]);
+    expect(results.map((result) => result.code).sort()).toEqual([0, 1]);
+    expect(server.bodies).toHaveLength(1);
+    expect(parseJournal(readFileSync(journalPath, "utf8")).corruption).toBeUndefined();
+  }, 30_000);
+
   it("records the tool result and turn-limit ending in print mode", async () => {
     writeFileSync(join(dir, "marker.txt"), "JOURNAL_TOOL_RESULT");
     const journalPath = join(dir, "limited.jsonl");
@@ -318,7 +350,8 @@ describe("cli process end to end", () => {
     const result = await runCli(["-p", "record this", "--journal", journalPath, "--endpoint", server.endpoint], dir);
     expect(result.code, result.stderr).toBe(1);
     expect(result.stdout).toBe("");
-    expect(result.stderr).toContain("EISDIR");
+    expect(result.stderr).toMatch(/EEXIST|EISDIR/);
+    expect(result.stderr).toContain(journalPath);
     expect(server.bodies).toHaveLength(0);
   }, 30_000);
 

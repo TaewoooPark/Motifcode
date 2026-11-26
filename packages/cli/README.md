@@ -44,10 +44,11 @@ the task, so `motif -p -- "--help"` asks about `--help` instead of printing CLI
 help (plain `motif --help` still prints help).
 
 One-shot and print runs save their session records in `.motif/sessions/`.
-Use `--journal <path>` to choose the output file, including with `-p`.
-Records include events, checkpoints and the run's ending; an interrupted run
-keeps its last checkpoint for `motif resume <file> -p`. Journal failures
-are reported on stderr with a nonzero exit.
+Use `--journal <path>` to choose a new output file, including with `-p`.
+If that path already exists, the command reports an error before sending a model
+request and preserves the existing file. Records include events, checkpoints and
+the run's ending. An interrupted run keeps its last checkpoint for
+`motif resume <file> -p`. Journal failures go to stderr and exit nonzero.
 
 Connect MCP servers and check them from the CLI:
 
