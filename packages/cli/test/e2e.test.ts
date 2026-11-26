@@ -13,12 +13,13 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { JournalEnvelopeV2 } from "@motifcode/journal";
+import { loadResume, parseJournal, type JournalEnvelopeV2 } from "@motifcode/journal";
+import { systemPromptHash } from "@motifcode/protocol";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "../../..");
@@ -38,6 +39,7 @@ class MockServer {
   readonly urls: string[] = [];
   readonly headers: Record<string, string | string[] | undefined>[] = [];
   port = 0;
+  status = 200;
   /** Called when a held turn arrives; that request stays unanswered, like a model still thinking. */
   onHold?: () => void;
   private readonly held: ServerResponse[] = [];
@@ -64,7 +66,7 @@ class MockServer {
         this.bodies.push(body);
         if (this.hold(this.bodies.length)) { this.held.push(res); this.onHold?.(); return; }
         const content = this.script(this.bodies.length, body);
-        res.writeHead(200, { "content-type": "application/json" });
+        res.writeHead(this.status, { "content-type": "application/json" });
         res.end(
           JSON.stringify({
             choices: [{ message: { content }, finish_reason: "stop" }],
@@ -246,6 +248,150 @@ describe("cli process end to end", () => {
     const flagFirst = await runCli(["--no-hero", "--print", "what is the answer?", "--endpoint", server.endpoint], dir);
     expect(flagFirst.code).toBe(0);
     expect(server.bodies[2]!.messages[1]!.content).toBe("what is the answer?");
+    const sessions = join(dir, ".motif", "sessions");
+    const journals = readdirSync(sessions).map((file) => loadResume(join(sessions, file)));
+    expect(journals).toHaveLength(3);
+    for (const journal of journals) {
+      expect(journal).toMatchObject({ finished: true, interrupted: false, task: "what is the answer?" });
+      expect(journal.checkpoint?.messages.at(-1)).toMatchObject({ role: "assistant", content: "The answer is 42." });
+    }
+  }, 30_000);
+
+  it.each(["--print", "-p"])("writes a complete journal at an explicit path with %s", async (printFlag) => {
+    const journalPath = join(dir, "records", "requested-session.jsonl");
+    server = new MockServer(() => "</think>PRINT_JOURNAL_OK");
+    await server.start();
+    const result = await runCli([printFlag, "record this answer", "--journal", journalPath, "--endpoint", server.endpoint], dir);
+    expect(result.code, result.stderr).toBe(0);
+    expect(result.stdout).toBe("PRINT_JOURNAL_OK\n");
+    expect(result.stderr).toBe("");
+    expect(existsSync(join(dir, ".motif", "sessions"))).toBe(false);
+
+    const parsed = parseJournal(readFileSync(journalPath, "utf8"));
+    expect(parsed.corruption).toBeUndefined();
+    expect(parsed.truncatedTail).toBe(false);
+    expect(parsed.header).toMatchObject({ schemaVersion: 2, repository: { cwd: dir }, serving: { endpoint: server.endpoint } });
+    expect(parsed.header?.prompt.systemHash).toBe(systemPromptHash(String(server.bodies[0]!.messages[0]!.content)));
+    expect(parsed.records[0]).toMatchObject({ scopeId: "root", scopeKind: "root", record: { t: "scope_start", task: "record this answer" } });
+    expect(parsed.records).toEqual(expect.arrayContaining([
+      expect.objectContaining({ record: { t: "event", event: expect.objectContaining({ type: "session_end", reason: "done", summary: "PRINT_JOURNAL_OK" }) } }),
+    ]));
+    expect(parsed.records.at(-1)?.record).toEqual({ t: "scope_end", result: { endReason: "done", summary: "PRINT_JOURNAL_OK", turns: 1 } });
+    expect(loadResume(journalPath).checkpoint?.messages.at(-1)).toMatchObject({ role: "assistant", content: "PRINT_JOURNAL_OK" });
+  }, 30_000);
+
+  it("refuses to reuse a print journal before calling the model", async () => {
+    const journalPath = join("records", "requested-session.jsonl");
+    const journalFile = join(dir, journalPath);
+    server = new MockServer(() => "</think>PRINT_JOURNAL_OK");
+    await server.start();
+
+    const args = ["-p", "--endpoint", server.endpoint, "--journal", journalPath, "Reply with PRINT_JOURNAL_OK"];
+    const first = await runCli(args, dir);
+    expect(first).toMatchObject({ code: 0, stdout: "PRINT_JOURNAL_OK\n", stderr: "" });
+    const original = readFileSync(journalFile);
+    expect(parseJournal(original.toString("utf8")).corruption).toBeUndefined();
+
+    const second = await runCli(args, dir);
+    expect(second).toMatchObject({ code: 1, stdout: "" });
+    expect(second.stderr).toContain("file already exists");
+    expect(second.stderr).toContain(journalPath);
+    expect(server.bodies).toHaveLength(1);
+    expect(readFileSync(journalFile)).toEqual(original);
+  }, 30_000);
+
+  it("allows only one print run to claim a journal", async () => {
+    const journalPath = join(dir, "shared.jsonl");
+    server = new MockServer(() => "</think>PRINT_JOURNAL_OK");
+    await server.start();
+
+    const args = ["-p", "record one answer", "--journal", journalPath, "--endpoint", server.endpoint];
+    const results = await Promise.all([runCli(args, dir), runCli(args, dir)]);
+    expect(results.map((result) => result.code).sort()).toEqual([0, 1]);
+    expect(server.bodies).toHaveLength(1);
+    expect(parseJournal(readFileSync(journalPath, "utf8")).corruption).toBeUndefined();
+  }, 30_000);
+
+  it("records the tool result and turn-limit ending in print mode", async () => {
+    writeFileSync(join(dir, "marker.txt"), "JOURNAL_TOOL_RESULT");
+    const journalPath = join(dir, "limited.jsonl");
+    server = new MockServer(() => toolCall("read", { path: "marker.txt" }));
+    await server.start();
+    const result = await runCli(["-p", "read the marker", "--max-turns", "1", "--journal", journalPath, "--endpoint", server.endpoint], dir);
+    expect(result.code, result.stderr).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("ended: turn_limit\n");
+    const parsed = parseJournal(readFileSync(journalPath, "utf8"));
+    expect(parsed.corruption).toBeUndefined();
+    expect(parsed.records.at(-1)?.record).toEqual({ t: "scope_end", result: { endReason: "turn_limit", turns: 1 } });
+    expect(loadResume(journalPath).checkpoint?.messages.at(-1)).toMatchObject({ role: "tool", content: expect.stringContaining("JOURNAL_TOOL_RESULT") });
+  }, 30_000);
+
+  it("records a failed print request and keeps its diagnostic on stderr", async () => {
+    const journalPath = join(dir, "failed.jsonl");
+    server = new MockServer(() => "");
+    server.status = 401;
+    await server.start();
+    const result = await runCli(["-p", "record the failure", "--journal", journalPath, "--endpoint", server.endpoint], dir);
+    expect(result.code, result.stderr).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("401");
+    expect(result.stderr).toContain("ended: transport_error");
+    const parsed = parseJournal(readFileSync(journalPath, "utf8"));
+    expect(parsed.corruption).toBeUndefined();
+    expect(parsed.records.at(-1)?.record).toEqual({ t: "scope_end", result: { endReason: "transport_error", turns: 1 } });
+  }, 30_000);
+
+  it("refuses an unusable print journal before calling the model", async () => {
+    const journalPath = join(dir, "journal-is-a-directory");
+    mkdirSync(journalPath);
+    server = new MockServer(() => "</think>Should not run.");
+    await server.start();
+    const result = await runCli(["-p", "record this", "--journal", journalPath, "--endpoint", server.endpoint], dir);
+    expect(result.code, result.stderr).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toMatch(/EEXIST|EISDIR/);
+    expect(result.stderr).toContain(journalPath);
+    expect(server.bodies).toHaveLength(0);
+  }, 30_000);
+
+  it("surfaces a print journal write failure during the run", async () => {
+    const journalPath = join(dir, "write-failure.jsonl");
+    server = new MockServer(() => {
+      rmSync(journalPath, { force: true });
+      mkdirSync(journalPath);
+      return "</think>Should not report success.";
+    });
+    await server.start();
+    const result = await runCli(["-p", "record this", "--journal", journalPath, "--endpoint", server.endpoint], dir);
+    expect(result.code, result.stderr).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("EISDIR");
+    expect(server.bodies).toHaveLength(1);
+  }, 30_000);
+
+  it("keeps an interrupted print journal resumable", async () => {
+    if (process.platform === "win32") return;
+    writeFileSync(join(dir, "marker.txt"), "PRINT_RESUME_MARKER");
+    const journalPath = join(dir, "interrupted.jsonl");
+    server = new MockServer(
+      (turn) => turn === 1 ? toolCall("read", { path: "marker.txt" }) : "</think>Continued print run.",
+      (turn) => turn === 2,
+    );
+    await server.start();
+    let child: ChildProcess | undefined;
+    server.onHold = () => child?.kill("SIGINT");
+    const stopped = await runCli(["-p", "read the marker", "--journal", journalPath, "--endpoint", server.endpoint], dir, {}, (c) => (child = c));
+    expect(stopped.code, stopped.stderr).toBe(130);
+    expect(stopped.stdout).toBe("");
+    const state = loadResume(journalPath);
+    expect(state).toMatchObject({ interrupted: true, finished: false, task: "read the marker" });
+    expect(state.checkpoint?.messages.at(-1)).toMatchObject({ role: "tool", content: expect.stringContaining("PRINT_RESUME_MARKER") });
+
+    const resumed = await runCli(["resume", journalPath, "-p", "--endpoint", server.endpoint], dir);
+    expect(resumed.code, resumed.stderr).toBe(0);
+    expect(resumed.stdout).toBe("Continued print run.\n");
+    expect(server.bodies[2]?.messages.at(-1)).toMatchObject({ role: "tool", content: expect.stringContaining("PRINT_RESUME_MARKER") });
   }, 30_000);
 
   it("passes literal task text after -- through to the model", async () => {
@@ -300,8 +446,9 @@ describe("cli process end to end", () => {
       .filter((line) => JSON.parse(line).record?.t !== "scope_end")
       .join("\n") + "\n";
     writeFileSync(journal, unfinished);
+    const resumedJournal = join(dir, "resumed.jsonl");
     const resumed = await runCli(
-      ["resume", journal, printFlag, "--endpoint", server.endpoint],
+      ["resume", journal, printFlag, "--journal", resumedJournal, "--endpoint", server.endpoint],
       dir,
     );
     expect(resumed.code, `${resumed.stdout}\n${resumed.stderr}`).toBe(0);
@@ -312,6 +459,13 @@ describe("cli process end to end", () => {
     expect(messages.filter((m) => m.role === "user" && m.content === "continue the task")).toHaveLength(1);
     expect(messages[2]!.tool_calls).toMatchObject([{ function: { name: "read" } }]);
     expect(messages[3]!.content).toContain("RESUME_MARKER");
+    const recorded = parseJournal(readFileSync(resumedJournal, "utf8"));
+    expect(recorded.corruption).toBeUndefined();
+    expect(recorded.header?.prompt.systemHash).toBe(loadResume(journal).header.prompt.systemHash);
+    expect(recorded.records).toEqual(expect.arrayContaining([
+      expect.objectContaining({ record: { t: "resume", fromSeq: loadResume(journal).checkpoint!.afterSeq, previousRunId: loadResume(journal).header.runId } }),
+    ]));
+    expect(loadResume(resumedJournal)).toMatchObject({ finished: true, task: "continue the task" });
   }, 30_000);
 
   it("keeps a run stopped by a signal resumable, as a killed process was", async () => {

@@ -39,9 +39,16 @@ motif -p "what does src/loop.ts do?"    # print only the reply, for pipes
 motif -p -- "--help"                    # pass a flag-looking task literally: -- ends option parsing
 ```
 
-A standalone `--` ends flag and subcommand recognition; everything after it is
+A standalone `--` ends flag and subcommand recognition. Everything after it is
 the task, so `motif -p -- "--help"` asks about `--help` instead of printing CLI
 help (plain `motif --help` still prints help).
+
+One-shot and print runs save their session records in `.motif/sessions/`.
+Use `--journal <path>` to choose a new output file, including with `-p`.
+If that path already exists, the command reports an error before sending a model
+request and preserves the existing file. Records include events, checkpoints and
+the run's ending. An interrupted run keeps its last checkpoint for
+`motif resume <file> -p`. Journal failures go to stderr and exit nonzero.
 
 Connect MCP servers and check them from the CLI:
 
