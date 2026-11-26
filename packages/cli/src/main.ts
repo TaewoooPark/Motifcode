@@ -92,7 +92,7 @@ import { expandSkillInput } from "./skill-input.js";
 import { localMcpAuthTarget } from "./mcp-connect.js";
 import { findCommand, parseSlash } from "./commands.js";
 
-const VERSION = "0.5.0";
+const VERSION = "0.5.1";
 
 interface Args {
   command: string;
@@ -130,6 +130,12 @@ function parseArgs(argv: string[]): Args {
   let command = "run";
   for (let i = 0; i < argv.length; i++) {
     let a = argv[i]!;
+    // The first standalone `--` ends flag and subcommand recognition; the rest
+    // is literal task text, even when it looks like a flag or a command name.
+    if (a === "--") {
+      rest.push(...argv.slice(i + 1));
+      break;
+    }
     // A short flag is its long form; the task text itself never starts with
     // a dash and a single letter.
     if (/^-[a-z]$/.test(a) && SHORT_FLAGS[a.slice(1)]) a = `--${SHORT_FLAGS[a.slice(1)]}`;
@@ -392,6 +398,7 @@ const HELP = `motif ${VERSION} — a coding agent built for Motif-3 (unofficial;
   motif                     open the interactive session (a terminal is required)
   motif "<task>"            run one task and exit; add --interactive to stay
   motif -p "<question>"     print only the final reply, for scripts and pipes (also --print)
+  motif -p -- "--help"      treat what follows -- as task text, not flags or subcommands
   motif login               paste the selected provider's API key; it is checked and saved to ~/.motif/.env
   motif logout              remove the saved key
   motif doctor              check the endpoint, the credentials and what the server produces

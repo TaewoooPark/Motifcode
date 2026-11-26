@@ -37,6 +37,8 @@ export class Composer {
   private browsing: number | null = null;
   /** The unsent text set aside while browsing history, restored on the way back. */
   private draft: string[] = [];
+  /** Cursor position inside that draft, restored with it. */
+  private draftCursor = 0;
 
   get text(): string {
     return this.chars.join("");
@@ -214,6 +216,7 @@ export class Composer {
     if (this.history.length === 0) return false;
     if (this.browsing === null) {
       this.draft = [...this.chars];
+      this.draftCursor = this.pos;
       this.browsing = this.history.length - 1;
     } else if (this.browsing > 0) {
       this.browsing -= 1;
@@ -230,11 +233,12 @@ export class Composer {
     if (this.browsing < this.history.length - 1) {
       this.browsing += 1;
       this.chars = [...this.history[this.browsing]!];
-    } else {
-      this.browsing = null;
-      this.chars = [...this.draft];
+      this.pos = this.chars.length;
+      return true;
     }
-    this.pos = this.chars.length;
+    this.browsing = null;
+    this.chars = [...this.draft];
+    this.pos = Math.min(this.draftCursor, this.chars.length);
     return true;
   }
 

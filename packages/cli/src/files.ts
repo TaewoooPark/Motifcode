@@ -153,8 +153,11 @@ export function attachMention(
   if (rel.startsWith("..") || !existsSync(target)) return null;
   const st = statSync(target);
   if (st.isDirectory()) {
-    const names = readdirSync(target).filter((n) => !SKIP_DIRS.has(n)).sort().slice(0, 200);
-    return { mention: clean, block: `<directory path="${clean}">\n${names.join("\n")}\n</directory>` };
+    const eligible = readdirSync(target).filter((n) => !SKIP_DIRS.has(n)).sort();
+    const names = eligible.slice(0, 200);
+    const omitted = eligible.length - names.length;
+    const note = omitted > 0 ? `\n… ${omitted} more ${omitted === 1 ? "entry" : "entries"}` : "";
+    return { mention: clean, block: `<directory path="${clean}">\n${names.join("\n")}${note}\n</directory>` };
   }
   const buf = readFileSync(target);
   const truncated = buf.length > ATTACH_CAP_BYTES;

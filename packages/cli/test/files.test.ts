@@ -83,6 +83,29 @@ describe("attaching", () => {
     expect(attachMention("skill:missing", { cwd: "/", renderSkill: () => undefined })).toBeNull();
   });
 
+  it("counts the directory entries left out of the listing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "motif-dir-cap-"));
+    mkdirSync(join(dir, "src"));
+    for (let i = 1; i <= 201; i++) writeFileSync(join(dir, "src", `${String(i).padStart(3, "0")}.ts`), "");
+    mkdirSync(join(dir, "src", "node_modules"));
+
+    const block = attachMention("src/", { cwd: dir })?.block;
+
+    expect(block).toContain("200.ts\n… 1 more entry\n</directory>");
+    expect(block).not.toContain("201.ts");
+  });
+
+  it("ends at the last name when the listing fits exactly", () => {
+    const dir = mkdtempSync(join(tmpdir(), "motif-dir-full-"));
+    mkdirSync(join(dir, "src"));
+    for (let i = 1; i <= 200; i++) writeFileSync(join(dir, "src", `${String(i).padStart(3, "0")}.ts`), "");
+
+    const block = attachMention("src/", { cwd: dir })?.block;
+
+    expect(block).toContain("200.ts\n</directory>");
+    expect(block).not.toContain("more entry");
+  });
+
   it("marks a file it had to cut", () => {
     const dir = repo();
     writeFileSync(join(dir, "big.txt"), "x".repeat(ATTACH_CAP_BYTES + 10));

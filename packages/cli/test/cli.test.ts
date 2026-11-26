@@ -397,7 +397,7 @@ describe("executor", () => {
       repaired: false as const,
       validated: true as const,
     };
-    const lines = content === "" ? 0 : content.split("\n").length;
+    const lines = content === "" ? 0 : content.split("\n").length - (content.endsWith("\n") ? 1 : 0);
     const bytes = Buffer.byteLength(content, "utf8");
 
     const created = await ex.run({ id: "1", ...invocation });
@@ -410,6 +410,35 @@ describe("executor", () => {
     expect(replaced.output).toBe(`replaced a.txt (${lines} lines, ${bytes} bytes)`);
     expect(readFileSync(path, "utf8")).toBe(content);
     expect(statSync(path).size).toBe(bytes);
+  });
+
+  it.each([
+    ["empty", "", 0],
+    ["no newline", "a", 1],
+    ["one newline", "a\n", 1],
+    ["only a newline", "\n", 1],
+    ["blank final line", "a\n\n", 2],
+    ["multibyte text", "한글 🙂\n둘\n", 2],
+  ])("reports logical lines for %s in write results", async (_label, content, expectedLines) => {
+    const dir = mkdtempSync(join(tmpdir(), "motifcode-write-lines-"));
+    const ex = new ToolExecutor({ cwd: dir });
+    const invocation = {
+      name: "write" as const,
+      arguments: { path: "single", content },
+      repaired: false as const,
+      validated: true as const,
+    };
+    const bytes = Buffer.byteLength(content, "utf8");
+
+    const created = await ex.run({ id: "1", ...invocation });
+    expect(created.output).toBe(`created single (${expectedLines} lines, ${bytes} bytes)`);
+    expect(readFileSync(join(dir, "single"), "utf8")).toBe(content);
+    expect(statSync(join(dir, "single")).size).toBe(bytes);
+
+    const replaced = await ex.run({ id: "2", ...invocation });
+    ex.close();
+    expect(replaced.output).toBe(`replaced single (${expectedLines} lines, ${bytes} bytes)`);
+    expect(readFileSync(join(dir, "single"), "utf8")).toBe(content);
   });
 
   it("applies a patch with miscounted hunks and no trailing newline", async () => {
